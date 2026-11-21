@@ -194,6 +194,71 @@ export function compareMembership(before, after) {
   return { ok: missing.length === 0 && hoisted.length === 0 && moved.length === 0, missing, hoisted, moved }
 }
 
+function projectionValues(row) {
+  const values = row?.projections?.values
+  return values && typeof values === 'object' ? values : {}
+}
+
+function listedTitle(row) {
+  const values = projectionValues(row)
+  const title = row?.title || values.title || values.displayTitle
+  return typeof title === 'string' && title.trim() ? redactText(title.trim()) : ''
+}
+
+function listedModel(row) {
+  const values = projectionValues(row)
+  const selection = values.modelSelection && typeof values.modelSelection === 'object' ? values.modelSelection : null
+  const model = shortText(selection?.model || values.model || row?.model || row?.modelId || null)
+  const provider = shortText(selection?.provider || values.provider || row?.provider || null)
+  return { model, provider }
+}
+
+export function sessionIndex(rows) {
+  const index = new Map()
+  const failures = []
+  for (const row of rows || []) {
+    try {
+      const projected = projectSession(row, row?.workspaceId || '')
+      index.set(projected.session_id, { projected, row })
+    } catch (error) {
+      failures.push(safeError(error, 'sessionController.list.item'))
+    }
+  }
+  return { index, failures }
+}
+
+export function registeredSession(workspace, sessionId, listed) {
+  const header = headerFor(workspace, sessionId)
+  const row = listed?.row || {}
+  const parent = header?.parentSession || row.parentSessionId || row.parentSession || null
+  const origin = header?.origin || row.origin || null
+  const topFlag = header?.top !== false && row.top !== false
+  const subagent = origin === 'subagent' || Boolean(parent) || !topFlag
+  const names = listedModel(row)
+  const explicit = listedTitle(row)
+  return {
+    session_id: String(sessionId),
+    workspace_id: String(workspace.id),
+    title: explicit || redactText(workspace.title || ''),
+    title_source: explicit ? 'projection' : (workspace.title ? 'workspace_name' : 'missing'),
+    cwd: row.cwd || header?.cwd || workspace.cwd || workspace.path || '',
+    profile: row.profile || row.agentPreset || header?.agentPreset || 'desktop',
+    model: names.model,
+    provider: names.provider,
+    busy: Boolean(row.running || row.writerHeld || row.agentAvailable),
+    origin,
+    parent: parent ? String(parent) : null,
+    top: !subagent,
+  }
+}
+
+function headerFor(workspace, sessionId) {
+  for (const header of workspace.headers || []) {
+    if (header && String(header.id) === String(sessionId)) return header
+  }
+  return null
+}
+
 export async function assembleCatalog(ctx) {
   const warnings = []
   let workspaceStatus = 'ok'
@@ -207,13 +272,22 @@ export async function assembleCatalog(ctx) {
   }
   const workspaces = []
   for (const row of workspaceRows) {
+    let headers = []
+    if (typeof row.getSessionHeaders === 'function') {
+      try {
+        headers = row.getSessionHeaders() || []
+      } catch (error) {
+        warnings.push(safeError(error, 'workspace.getSessionHeaders'))
+      }
+    }
     try {
       workspaces.push({
         id: String(row.id),
         title: redactText(row.title || ''),
         cwd: row.path || row.cwd || '',
+        path: row.path || row.cwd || '',
         sessionIds: Array.isArray(row.sessionIds) ? row.sessionIds.map(String) : [],
-        headers: typeof row.getSessionHeaders === 'function' ? row.getSessionHeaders() || [] : [],
+        headers,
       })
     } catch (error) {
       warnings.push(safeError(error, 'workspaceRegistry.list.item'))
@@ -229,34 +303,44 @@ export async function assembleCatalog(ctx) {
     warnings.push(safeError(error, 'sessionController.list'))
     sessionRows = null
   }
-  const projected = []
-  if (sessionRows) {
-    for (const row of sessionRows) {
-      try {
-        projected.push(projectSession(row, ''))
-      } catch (error) {
-        warnings.push(safeError(error, 'sessionController.list.item'))
+  const indexed = sessionRows ? sessionIndex(sessionRows) : { index: new Map(), failures: [] }
+  warnings.push(...indexed.failures)
+  const registered = new Set(workspaces.flatMap((item) => item.sessionIds))
+  const top = []
+  const classified = []
+  const metadataFailed = []
+  if (sessionStatus !== 'read_failed') {
+    for (const workspace of workspaces) {
+      for (const sessionId of workspace.sessionIds) {
+        try {
+          const session = registeredSession(workspace, sessionId, indexed.index.get(sessionId))
+          if (session.top) top.push(session)
+          else classified.push(session)
+        } catch (error) {
+          metadataFailed.push(String(sessionId))
+          warnings.push(safeError(error, 'session.metadata'))
+        }
       }
     }
   }
-  const top = []
-  const classified = []
-  for (const session of projected) {
-    if (session.top) top.push(session)
-    else classified.push(session)
-  }
-  const membership = buildMembership({ status: workspaceStatus === 'read_failed' ? 'read_failed' : 'ok', workspaces })
+  const membership = buildMembership({
+    status: workspaceStatus === 'read_failed' ? 'read_failed' : 'ok',
+    workspaces,
+    listed: indexed.index,
+    metadataFailed,
+  })
   return {
     catalog: {
       ok: workspaceStatus !== 'read_failed' && sessionStatus !== 'read_failed',
-      source: 'desktop_metadata',
+      source: 'registered_workspaces',
       grants_execution: false,
       includes_history: false,
       workspace_status: workspaceStatus,
       session_status: sessionStatus,
       not_an_empty_history: sessionStatus === 'read_failed',
       filtered_subagents: classified.length,
-      unreadable: membership.workspaces.reduce((sum, item) => sum + item.unreadable.length, 0),
+      omitted_unregistered: sessionRows ? sessionRows.length - [...indexed.index.keys()].filter((id) => registered.has(id)).length : 0,
+      unreadable: metadataFailed.length,
       warnings,
       workspaces: workspaces.map((item) => ({ id: item.id, title: item.title, cwd: item.cwd })),
       sessions: sessionStatus === 'read_failed' ? null : top,
@@ -272,31 +356,31 @@ export async function assembleCatalog(ctx) {
 }
 
 export function buildMembership(input) {
+  const listed = input.listed || new Map()
+  const failed = new Set(input.metadataFailed || [])
   const workspaces = []
   for (const workspace of input.workspaces || []) {
-    const headers = new Map()
-    for (const header of workspace.headers || []) {
-      if (header && header.id) headers.set(String(header.id), header)
-    }
     const topLevel = []
     const subagent = []
     const unreadable = []
     for (const id of workspace.sessionIds || []) {
-      const header = headers.get(String(id))
-      if (!header) {
+      if (failed.has(String(id))) {
         unreadable.push(String(id))
         continue
       }
-      if (header.origin === 'subagent' || header.parentSession || header.top === false) {
-        subagent.push({ id: String(id), parent: header.parentSession ? String(header.parentSession) : null })
-      } else {
-        topLevel.push(String(id))
-      }
+      const known = listed.get(String(id))
+      const row = known?.row || known || {}
+      const header = headerFor(workspace, id) || {}
+      const parent = header.parentSession || row.parentSessionId || row.parentSession || null
+      const origin = header.origin || row.origin || null
+      const sub = origin === 'subagent' || Boolean(parent) || header.top === false || row.top === false
+      if (sub) subagent.push({ id: String(id), parent: parent ? String(parent) : null })
+      else topLevel.push(String(id))
     }
     workspaces.push({
       id: workspace.id,
       title: workspace.title || '',
-      cwd: workspace.cwd || '',
+      cwd: workspace.cwd || workspace.path || '',
       top_level: topLevel,
       subagent,
       unreadable,

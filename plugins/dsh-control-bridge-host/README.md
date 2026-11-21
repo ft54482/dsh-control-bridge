@@ -26,7 +26,7 @@ Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-c
 Quit Desktop from the tray first. The bridge does not quit it.
 
 ```text
-dsh plugin --profile desktop add dsh-control-bridge-host-0.1.2.tgz
+dsh plugin --profile desktop add dsh-control-bridge-host-0.1.3.tgz
 ```
 
 `Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable. An empty allowlist with no armed bootstrap does not open the port. After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, profile, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy.

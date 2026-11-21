@@ -30,7 +30,7 @@ function ctx(extra = {}) {
   }
   return {
     state,
-    workspaceRegistry: { async list() { return [{ id: 'ws-demo', title: 'demo', path: 'C:/work/demo' }, { id: 'ws-other', title: 'other', path: 'C:/work/other' }] } },
+    workspaceRegistry: { async list() { return [{ id: 'ws-demo', title: 'demo', path: 'C:/work/demo', sessionIds: ['session-demo', 'session-busy'] }, { id: 'ws-other', title: 'other', path: 'C:/work/other', sessionIds: ['session-other'] }] } },
     sessionController: {
       async list() { return state.sessions },
       async prompt(body, signal) {
@@ -267,6 +267,45 @@ test('a failed session list is not an empty history', async () => {
   assert.equal(response.body.sessions, null)
   assert.equal(response.body.not_an_empty_history, true)
   assert.equal(response.body.warnings[0].code, 'method_missing')
+  await new Promise((resolve) => started.server.close(resolve))
+})
+
+test('registered sessions keep a title and workspace without listing removed directories', async () => {
+  const host = ctx()
+  host.workspaceRegistry.list = () => [{
+    id: 'ws-broadcast',
+    title: 'example-workspace',
+    path: 'D:/work/broadcast',
+    sessionIds: ['session-top'],
+  }]
+  host.sessionController.list = async (_request, signal) => {
+    if (!signal) throw new TypeError('signal required')
+    return {
+      items: [
+        {
+          sessionId: 'session-top',
+          cwd: 'D:/work/broadcast',
+          running: false,
+          projections: { kind: 'cached', asOfSeq: 4, values: { title: '客服复盘', modelSelection: { provider: 'example-provider', model: 'example-model' } } },
+        },
+        { sessionId: 'session-removed', title: 'old superagent', cwd: 'D:/old', running: false },
+      ],
+    }
+  }
+  const started = await bootBootstrap(host)
+  const response = await fetch(`http://127.0.0.1:${started.port}/v1/bootstrap/catalog`, {
+    headers: { authorization: `Bearer ${started.token}` },
+  }).then(async (item) => ({ body: await item.json() }))
+  assert.deepEqual(response.body.sessions.map((item) => item.session_id), ['session-top'])
+  assert.equal(response.body.sessions[0].title, '客服复盘')
+  assert.equal(response.body.sessions[0].workspace_id, 'ws-broadcast')
+  assert.equal(response.body.sessions[0].model, 'example-model')
+  assert.equal(response.body.sessions[0].provider, 'example-provider')
+  const membership = await fetch(`http://127.0.0.1:${started.port}/v1/guard/membership`, {
+    headers: { authorization: `Bearer ${started.token}` },
+  }).then(async (item) => item.json())
+  assert.deepEqual(membership.workspaces[0].top_level, ['session-top'])
+  assert.deepEqual(membership.workspaces[0].unreadable, [])
   await new Promise((resolve) => started.server.close(resolve))
 })
 

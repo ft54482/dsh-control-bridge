@@ -59,7 +59,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 写入要另一步：发现口令作废后，用持久口令 `python -m dsh_control_bridge.pair_desktop --grant-write --host-secret-file desktop-host-local\host.secret --index 编号`。忙会话拒绝写入。
 
-安装后先保存 `GET /v1/guard/membership` 指纹，升级后再比对。缺了工作区或会话、或者子会话被抬到根上，比对失败并停止。不要用旧的 profile 备份覆盖用户后来的修改。插件不改 workspace 登记。
+安装后先保存 `GET /v1/guard/membership` 指纹，升级后再比对。缺了工作区或会话、或者子会话被抬到根上，比对失败并停止。不要用旧的 profile 备份覆盖用户后来的修改。插件不改 workspace 登记。目录只列出当前工作区 `sessionIds` 里的顶层会话。标题来自 list 投影的 `title`，没有投影时用工作区名并标明来源，不读会话正文。模型来自投影里的 `modelSelection`。已移出侧栏的目录不会进默认配对列表。
 
 安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 
