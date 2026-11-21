@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import test from 'node:test'
+import { compareMembership } from '../host_read.js'
 import { apply } from '../index.js'
 import { decideListen, decideResume, discoverCatalog, pageHistory, promptBody, selectAllowlist } from '../policy.js'
 import { createHostServer } from '../server.js'
@@ -207,6 +208,85 @@ test('bootstrap lists metadata and then revokes itself', async () => {
   const again = await fetch(`http://127.0.0.1:${port}/v1/bootstrap/catalog`, { headers })
   assert.equal(again.status, 401)
   await new Promise((resolve) => server.close(resolve))
+})
+
+async function bootBootstrap(host) {
+  const token = 'bootstrap-secret-0123456789abcdef'
+  const server = createHostServer(host, config, { host: SECRET, bootstrap: token, expiresAt: Date.now() + 60_000, consumed: false })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  return { server, port: server.address().port, token }
+}
+
+test('official list shape and a single bad row do not erase the catalog', async () => {
+  const secret = 'secret-should-not-leak-0123456789abcd'
+  const host = ctx()
+  host.workspaceRegistry.list = () => [{
+    id: 'ws-demo',
+    title: 'example-workspace',
+    path: 'C:/work/demo',
+    sessionIds: ['session-demo', 'child-1'],
+    getSessionHeaders: () => [
+      { id: 'session-demo', cwd: 'C:/work/demo' },
+      { id: 'child-1', origin: 'subagent', parentSession: 'session-demo' },
+    ],
+  }]
+  host.sessionController.list = async (request, signal) => {
+    if (!signal) throw new TypeError(`signal required ${secret}`)
+    return {
+      items: [
+        { sessionId: 'session-demo', title: 'Demo chat', cwd: 'C:/work/demo', profile: 'desktop', model: 'example-model', provider: 'example-provider' },
+        { sessionId: 'child-1', header: { id: 'child-1', origin: 'subagent', parentSession: 'session-demo' } },
+        { title: 'broken row' },
+      ],
+    }
+  }
+  const started = await bootBootstrap(host)
+  const response = await fetch(`http://127.0.0.1:${started.port}/v1/bootstrap/catalog`, {
+    headers: { authorization: `Bearer ${started.token}` },
+  }).then(async (item) => ({ body: await item.json() }))
+  const body = JSON.stringify(response.body)
+  assert.equal(body.includes(secret), false)
+  assert.equal(response.body.session_status, 'ok')
+  assert.equal(response.body.sessions.some((item) => item.session_id === 'child-1'), false)
+  assert.equal(response.body.filtered_subagents >= 1, true)
+  assert.equal(response.body.sessions.some((item) => item.title === 'Demo chat'), true)
+  await new Promise((resolve) => started.server.close(resolve))
+})
+
+test('a failed session list is not an empty history', async () => {
+  const host = ctx()
+  host.sessionController.list = async () => {
+    throw new TypeError('sessionController.list is not a function')
+  }
+  const started = await bootBootstrap(host)
+  const response = await fetch(`http://127.0.0.1:${started.port}/v1/bootstrap/catalog`, {
+    headers: { authorization: `Bearer ${started.token}` },
+  }).then(async (item) => ({ body: await item.json() }))
+  assert.equal(response.body.session_status, 'read_failed')
+  assert.equal(response.body.sessions, null)
+  assert.equal(response.body.not_an_empty_history, true)
+  assert.equal(response.body.warnings[0].code, 'method_missing')
+  await new Promise((resolve) => started.server.close(resolve))
+})
+
+test('subagents stay under their parent across an upgrade', () => {
+  const children = Array.from({ length: 31 }, (_, index) => ({ id: `child-${index}`, parent: 'session-parent' }))
+  const before = {
+    status: 'ok',
+    workspaces: [{ id: 'ws-broadcast', top_level: ['s1', 's2', 's3', 's4', 's5', 's6'], subagent: children, unreadable: [] }],
+  }
+  const after = JSON.parse(JSON.stringify(before))
+  assert.equal(compareMembership(before, after).ok, true)
+  after.workspaces[0].top_level.push(children[0].id)
+  after.workspaces[0].subagent = children.slice(1)
+  const hoisted = compareMembership(before, after)
+  assert.equal(hoisted.ok, false)
+  assert.equal(hoisted.hoisted[0].session_id, 'child-0')
+  const lost = compareMembership(before, { status: 'ok', workspaces: [{ id: 'ws-broadcast', top_level: ['s1'], subagent: children, unreadable: [] }] })
+  assert.equal(lost.ok, false)
+  assert.equal(lost.missing.some((item) => item.session_id === 's2'), true)
+  assert.equal(compareMembership(before, { status: 'read_failed', workspaces: [] }).reason, 'read_failed')
 })
 
 test('cancel aborts only the bridge request', async () => {

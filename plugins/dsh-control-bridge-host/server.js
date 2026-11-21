@@ -1,5 +1,6 @@
 import http from 'node:http'
-import { decideResume, checkAuth, discoverCatalog, loopbackPeer, pageHistory, promptBody, redactText, rejectBrowser, selectAllowlist, visibleSessions, visibleWorkspaces } from './policy.js'
+import { assembleCatalog, readSessionRows, safeError } from './host_read.js'
+import { decideResume, checkAuth, loopbackPeer, pageHistory, promptBody, redactText, rejectBrowser, selectAllowlist, visibleSessions, visibleWorkspaces } from './policy.js'
 
 function authScope(header, secrets) {
   if (secrets.bootstrap && checkAuth(header, secrets.bootstrap) && !secrets.consumed && Number(secrets.expiresAt) > Date.now()) {
@@ -33,18 +34,25 @@ export function createHostServer(ctx, config, secret) {
           services: Boolean(ctx.sessionController && ctx.workspaceRegistry && ctx.sessionQuery),
         })
       }
+      if (req.method === 'GET' && url.pathname === '/v1/guard/membership') {
+        const loaded = await assembleCatalog(ctx)
+        note(config, loaded.warnings)
+        return send(res, 200, loaded.membership)
+      }
       if (url.pathname.startsWith('/v1/bootstrap/')) {
         if (scope !== 'bootstrap') return send(res, 403, { ok: false, reason: 'bootstrap_required' })
         if (req.method === 'GET' && url.pathname === '/v1/bootstrap/catalog') {
-          const workspaces = await ctx.workspaceRegistry.list()
-          const sessions = await ctx.sessionController.list({})
-          return send(res, 200, discoverCatalog(workspaces, sessions))
+          const loaded = await assembleCatalog(ctx)
+          note(config, loaded.warnings)
+          return send(res, 200, loaded.catalog)
         }
         if (req.method === 'POST' && url.pathname === '/v1/bootstrap/select') {
           const body = await readJson(req)
-          const workspaces = await ctx.workspaceRegistry.list()
-          const sessions = await ctx.sessionController.list({})
-          const chosen = selectAllowlist(discoverCatalog(workspaces, sessions), {
+          const loaded = await assembleCatalog(ctx)
+          if (loaded.catalog.session_status === 'read_failed') {
+            return send(res, 409, { ok: false, reason: 'read_failed', started_task: false, warnings: loaded.warnings })
+          }
+          const chosen = selectAllowlist(loaded.catalog, {
             session_id: body.session_id,
             access: body.access,
           })
@@ -57,6 +65,19 @@ export function createHostServer(ctx, config, secret) {
         return send(res, 404, { ok: false, reason: 'not_found' })
       }
       if (scope !== 'host') return send(res, 403, { ok: false, reason: 'host_secret_required' })
+      if (req.method === 'GET' && url.pathname === '/v1/granted') {
+        return send(res, 200, {
+          sessions: (config.sessionAllowlist || []).map((item) => ({
+            session_id: item.sessionId,
+            title: item.title || '',
+            cwd: item.cwd || '',
+            access: item.access,
+            profile: item.profile || 'unknown',
+            model: item.model || null,
+            busy: false,
+          })),
+        })
+      }
       if (req.method === 'GET' && url.pathname === '/v1/workspaces') {
         const rows = await ctx.workspaceRegistry.list()
         return send(res, 200, { ok: true, workspaces: visibleWorkspaces(config, rows) })
@@ -120,6 +141,26 @@ export function createHostServer(ctx, config, secret) {
           live.delete(body.request_id)
         }
       }
+      if (req.method === 'POST' && url.pathname === '/v1/access') {
+        const body = await readJson(req)
+        const current = (config.sessionAllowlist || []).find((item) => item.sessionId === body.session_id)
+        if (!current) return send(res, 403, { ok: false, reason: 'not_allowlisted', started_task: false })
+        const loaded = await assembleCatalog(ctx)
+        const live = (loaded.catalog.sessions || []).find((item) => item.session_id === body.session_id)
+        if (body.access === 'write' && live && live.busy) {
+          return send(res, 409, { ok: false, reason: 'busy', detail: 'write refused; existing turn not cancelled', started_task: false })
+        }
+        const next = {
+          version: 1,
+          workspaceAllowlist: config.workspaceAllowlist || [],
+          sessionAllowlist: (config.sessionAllowlist || []).map((item) => (
+            item.sessionId === body.session_id ? { ...item, access: body.access === 'write' ? 'write' : 'read' } : item
+          )),
+        }
+        if (config.saveAllowlist) config.saveAllowlist(next)
+        config.sessionAllowlist = next.sessionAllowlist
+        return send(res, 200, { ok: true, started_task: false, model_changed: false, access: body.access === 'write' ? 'write' : 'read', session_id: body.session_id })
+      }
       if (req.method === 'POST' && url.pathname === '/v1/cancel') {
         const body = await readJson(req)
         const controller = live.get(body.request_id)
@@ -128,16 +169,24 @@ export function createHostServer(ctx, config, secret) {
         return send(res, 200, { confirmed: true, reason: 'aborted_bridge_request', killed_desktop: false })
       }
       return send(res, 404, { ok: false, reason: 'not_found' })
-    } catch {
-      return send(res, 500, { ok: false, reason: 'internal' })
+    } catch (error) {
+      const detail = safeError(error, 'request')
+      note(config, [detail])
+      return send(res, 500, { ok: false, reason: 'request_failed', ...detail })
     }
   })
   return server
 }
 
 async function findSession(ctx, sessionId) {
-  const rows = await ctx.sessionController.list({})
-  return (rows || []).find((item) => item.id === sessionId) || null
+  const rows = await readSessionRows(ctx.sessionController)
+  return rows.find((item) => (item.sessionId || item.id) === sessionId) || null
+}
+
+function note(config, warnings) {
+  if (!config.logFile || !warnings || warnings.length === 0) return
+  const lines = warnings.map((item) => `${new Date().toISOString()} ${item.method} ${item.error} ${item.code}`).join('\n') + '\n'
+  import('node:fs').then((fs) => fs.appendFileSync(config.logFile, lines)).catch(() => {})
 }
 
 function readJson(req) {

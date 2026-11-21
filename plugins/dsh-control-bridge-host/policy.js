@@ -57,25 +57,46 @@ export function decideListen({ services, hostSecret, allowlistCount, bootstrap, 
   return { listening: true, steady, bootstrap: armed, outbound: false }
 }
 
-export function discoverCatalog(workspaces, sessions) {
-  return {
-    source: 'desktop_metadata',
-    grants_execution: false,
-    includes_history: false,
-    workspaces: (workspaces || []).map((item) => ({
-      id: item.id,
-      title: redactText(item.title || ''),
-      cwd: item.path || item.cwd || '',
-    })),
-    sessions: (sessions || []).map((item) => ({
-      session_id: item.id,
-      workspace_id: item.workspaceId || '',
+export function discoverCatalog(workspaces, sessions, extra = {}) {
+  const projected = []
+  const skipped = []
+  for (const item of sessions || []) {
+    const subagent = item.origin === 'subagent' || item.top === false || Boolean(item.parent)
+    const safe = {
+      session_id: item.session_id || item.id,
+      workspace_id: item.workspace_id || item.workspaceId || '',
       title: redactText(item.title || ''),
       cwd: item.cwd || '',
       profile: item.profile || 'unknown',
-      model: item.model || item.modelId || null,
+      model: item.model || null,
       provider: item.provider || null,
-      busy: Boolean(item.running || item.writerHeld),
+      busy: Boolean(item.busy || item.running),
+      parent: item.parent || null,
+    }
+    if (subagent || item.top === false) {
+      skipped.push(safe)
+      continue
+    }
+    projected.push(safe)
+  }
+  const sessionStatus = extra.session_status || (projected.length || skipped.length ? 'ok' : 'empty')
+  return {
+    ok: sessionStatus !== 'read_failed' && extra.workspace_status !== 'read_failed',
+    source: 'desktop_metadata',
+    grants_execution: false,
+    includes_history: false,
+    workspace_status: extra.workspace_status || 'ok',
+    session_status: sessionStatus,
+    not_an_empty_history: sessionStatus === 'read_failed',
+    filtered_subagents: extra.filtered_subagents ?? skipped.length,
+    unreadable: extra.unreadable || 0,
+    warnings: extra.warnings || [],
+    workspaces: workspaces || [],
+    sessions: sessionStatus === 'read_failed' ? null : projected,
+    classified_subagents: (extra.classified_subagents || skipped).map((item) => ({
+      session_id: item.session_id || item.id,
+      parent: item.parent || null,
+      workspace_id: item.workspace_id || '',
     })),
   }
 }

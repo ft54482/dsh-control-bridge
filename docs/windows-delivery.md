@@ -55,7 +55,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 官方源码和 0.2.1 以后的问题记录都没有 `dsh desktop quit`。关窗口只会进托盘。托盘菜单 **Quit DeepSeek Harness** 会先问 Host 有没有未完成任务，确认后才退出。没有正规外部退出命令，所以这一次托盘退出不能省，也不能改成 taskkill。允许重启不等于可以丢掉还没写完的任务。
 
-`Prepare-DesktopHost.ps1` 把口令写在解压目录的 `desktop-host-local`，不写系统环境变量。空名单且没有 20 分钟发现窗口时插件不监听。打开 Desktop 后，`Pair-DesktopHost.ps1` 按标题列出会话；`Pair-DesktopHost.ps1 -Index 1` 只写入这一条只读授权并作废发现口令。发现不读正文、不启动任务、不改模型。
+`Prepare-DesktopHost.ps1` 把口令写在解压目录的 `desktop-host-local`，不写系统环境变量。空名单且没有 20 分钟发现窗口时插件不监听。打开 Desktop 后，`Pair-DesktopHost.ps1` 按标题列出会话；`Pair-DesktopHost.ps1 -Index 1` 只写入这一条只读授权并作废发现口令。发现不读正文、不启动任务、不改模型。子会话只分类，不挂到根上。列表读取失败会标明失败，不会显示成“没有历史”。
+
+写入要另一步：发现口令作废后，用持久口令 `python -m dsh_control_bridge.pair_desktop --grant-write --host-secret-file desktop-host-local\host.secret --index 编号`。忙会话拒绝写入。
+
+安装后先保存 `GET /v1/guard/membership` 指纹，升级后再比对。缺了工作区或会话、或者子会话被抬到根上，比对失败并停止。不要用旧的 profile 备份覆盖用户后来的修改。插件不改 workspace 登记。
 
 安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 

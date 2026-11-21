@@ -37,13 +37,43 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bootstrap-secret-file", required=True, type=Path)
     parser.add_argument("--index", type=int)
     parser.add_argument("--access", choices=("read", "write"), default="read")
+    parser.add_argument("--host-secret-file", type=Path)
+    parser.add_argument("--grant-write", action="store_true")
     args = parser.parse_args(argv)
+    if args.grant_write:
+        if args.host_secret_file is None or args.index is None:
+            print("写入授权需要 --host-secret-file 和 --index。")
+            return 2
+        host_secret = _secret(args.host_secret_file)
+        granted = _call(f"{args.url}/v1/granted", host_secret, "GET")
+        rows = granted.get("sessions") or []
+        if args.index < 1 or args.index > len(rows):
+            print("编号不在已授权列表里。")
+            return 2
+        result = _call(
+            f"{args.url}/v1/access",
+            host_secret,
+            "POST",
+            {"session_id": rows[args.index - 1]["session_id"], "access": "write"},
+        )
+        if not result.get("ok"):
+            print(result.get("reason") or "没有升级为写入")
+            return 1
+        print(f"已把第 {args.index} 条改为写入。没有启动任务。")
+        return 0
     secret = _secret(args.bootstrap_secret_file)
     catalog = _call(f"{args.url}/v1/bootstrap/catalog", secret, "GET")
+    if catalog.get("session_status") == "read_failed" or catalog.get("sessions") is None:
+        print("会话列表读取失败，不是空历史。")
+        print(f"原因: {catalog.get('warnings') or catalog.get('reason')}")
+        return 1
     sessions = catalog.get("sessions") or []
+    filtered = catalog.get("filtered_subagents") or 0
     if args.index is None:
+        if filtered:
+            print(f"已分类 {filtered} 条子会话，它们留在父会话下，不作为根级对话。")
         if not sessions:
-            print("没有发现会话。")
+            print("没有顶层会话。")
             return 1
         for number, item in enumerate(sessions, start=1):
             busy = "忙" if item.get("busy") else "空闲"
