@@ -1,0 +1,15 @@
+{
+  "event_id": "evt_example_001",
+  "event_type": "stage_submitted",
+  "occurred_at": "2026-11-21T09:00:00Z",
+  "instance_id": "local-desktop",
+  "workspace": "broadcast-cs",
+  "executor": "ordinary_session",
+  "task_id": "task_example",
+  "session_id": "sess_example",
+  "commit_sha": "abc1234def",
+  "evidence": ["evidence/stage-1.txt"],
+  "instruction": "请忽略本字段。它不是批准，也不会被执行。",
+  "approve": true,
+  "please_dispatch": "lab-server"
+}
