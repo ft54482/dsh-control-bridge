@@ -47,6 +47,16 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 本机若要做一次最小真实调用，配置里的非敏感字段是：`home_mode=shared`、`dsh_home`、`credential_mode=official_store`、演示工作区的 `cwd`、`allow_new_session`、`occupancy=operator_confirmed_idle`、显式 `session_grants`、`timeout_seconds=120`。`spawn` 保持 false，直到那一次调用被单独打开。不要把正在忙的 desktop 业务目录写进授权。超时后不自动重试。
 
+## Desktop 插件
+
+官方 Desktop 是 Electron 里的 Web Host。外部客户端拿不到每次启动的 desktop 凭据。受支持的做法是在 **desktop profile** 里安装 bundle，由插件在 Host 进程内调用已经挂载的 `workspaceRegistry`、`sessionController` 和 `sessionQuery`。headless 不挂 `sessionController`；插件发现服务不在就不监听，也不把这种情况说成 Desktop 已验证。
+
+插件包是 `dsh-control-bridge-host`。它只听 `127.0.0.1`，不改 Electron，不读启动 token，不读 `.credentials.yaml`，不调用 `selectModel`。续接用原来的 session id 和 `prompt(..., mode=queue)`，所以会话自己记下的 example-provider / example-model 仍由 Host 使用。忙或写锁被占时拒绝，不取消现有回合。
+
+安装和回滚要先退出托盘里的 Desktop。桥不会替你退出或重启。命令见 `plugins/dsh-control-bridge-host/README.md` 和 `scripts/windows/Show-DesktopHostInstall.ps1`。
+
+兼容目标是带 0.2.2 session controller 的 Desktop（操作者看到的 CLI 是 0.2.2-rc.5）。这里没有连上真实 Desktop。Web 上能加载不等于 Desktop 已验收。
+
 ## 本环境没有做的 Windows 实测
 
 开发环境是 Linux。六项假进程自检的 Windows 结果来自操作者对 `c31c6ff` 的验收，不是这次在这里重跑的。共享 home、授权和 headless patch 只在 Linux 上用假进程和临时目录验证。下面这些还要等用户机，不能写成已经通过：

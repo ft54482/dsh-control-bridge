@@ -52,15 +52,18 @@ _INSTANCE_KEYS = frozenset(
         "dsh_home",
         "credential_mode",
         "session_grants",
+        "host_bind",
+        "host_port",
+        "host_secret_env",
     }
 )
 _NOTIFY_KEYS = frozenset({"mode", "file_name", "webhook_url", "allowed_hosts"})
 _FILE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
-_WORKSPACE_KEYS = frozenset({"name", "description", "cwd", "allow_new_session", "occupancy"})
+_WORKSPACE_KEYS = frozenset({"name", "description", "cwd", "allow_new_session", "occupancy", "host_workspace_id"})
 _GRANT_KEYS = frozenset({"session_id", "workspace", "profile", "cwd", "access", "occupancy"})
 _GRANT_PROFILES = frozenset({"headless", "desktop", "web", "superagent"})
 _KINDS = frozenset({"desktop", "remote"})
-_ADAPTERS = frozenset({"fake", "harness", "headless_cli"})
+_ADAPTERS = frozenset({"fake", "harness", "headless_cli", "desktop_host"})
 _META = set('%&|<>^\r\n"!`')
 
 
@@ -71,6 +74,7 @@ class Workspace:
     cwd: str
     allow_new_session: bool = False
     occupancy: str = "unknown"
+    host_workspace_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -99,6 +103,9 @@ class Instance:
     dsh_home: str = ""
     credential_mode: str = "environment"
     session_grants: tuple[SessionGrant, ...] = ()
+    host_bind: str = ""
+    host_port: int = 0
+    host_secret_env: str = ""
 
 
 @dataclass(frozen=True)
@@ -270,7 +277,7 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
             kind = "remote"
         adapter = item.get("adapter")
         if adapter not in _ADAPTERS:
-            errors.append(f"{where}.adapter must be fake or harness")
+            errors.append(f"{where}.adapter must be fake, harness, headless_cli, or desktop_host")
             adapter = "fake"
         base_url = _normalize_url(item.get("base_url"), f"{where}.base_url", errors)
         if base_url in urls:
@@ -324,6 +331,18 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
             errors.append(f"{where}.timeout_seconds must be an integer from 0 to 3600")
             timeout = 0
         credential_envs = _parse_env_names(item.get("credential_envs", []), where, errors)
+        host_bind = item.get("host_bind", "")
+        host_port = item.get("host_port", 0)
+        host_secret_env = item.get("host_secret_env", "")
+        if not isinstance(host_bind, str):
+            errors.append(f"{where}.host_bind must be a string")
+            host_bind = ""
+        if isinstance(host_port, bool) or not isinstance(host_port, int) or host_port < 0 or host_port > 65535:
+            errors.append(f"{where}.host_port must be an integer from 0 to 65535")
+            host_port = 0
+        if host_secret_env and (not isinstance(host_secret_env, str) or not _ENV.match(host_secret_env)):
+            errors.append(f"{where}.host_secret_env must name an environment variable")
+            host_secret_env = ""
         if adapter == "headless_cli":
             if not executable:
                 errors.append(f"{where}.executable is required for headless_cli")
@@ -335,8 +354,21 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
             normalized = [_normalize_cwd(cwd) for cwd in cwds if cwd]
             if len(normalized) != len(set(normalized)):
                 errors.append(f"{where} headless workspaces must use distinct directories")
-        elif executable or spawn or credential_envs:
-            errors.append(f"{where} executable, spawn, and credential_envs belong only to headless_cli")
+            if host_bind or host_port or host_secret_env:
+                errors.append(f"{where} host_bind belongs only to desktop_host")
+        elif adapter == "desktop_host":
+            if executable or credential_envs:
+                errors.append(f"{where} desktop_host does not take an executable or credential env")
+            if host_bind not in {"127.0.0.1", "localhost"}:
+                errors.append(f"{where}.host_bind must be 127.0.0.1")
+            if host_port <= 0:
+                errors.append(f"{where}.host_port is required for desktop_host")
+            if not isinstance(host_secret_env, str) or not _ENV.match(host_secret_env or ""):
+                errors.append(f"{where}.host_secret_env is required for desktop_host")
+            if spawn and timeout <= 0:
+                errors.append(f"{where}.timeout_seconds is required when spawn is true")
+        elif executable or spawn or credential_envs or host_bind or host_port or host_secret_env:
+            errors.append(f"{where} executable, spawn, and host fields belong only to a headless or desktop adapter")
         home_mode = item.get("home_mode", "isolated")
         if home_mode not in {"isolated", "shared"}:
             errors.append(f"{where}.home_mode must be isolated or shared")
@@ -360,10 +392,26 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
         if home_mode == "isolated" and dsh_home:
             errors.append(f"{where}.dsh_home belongs only to home_mode shared")
         grants = _parse_grants(item.get("session_grants", []), workspaces, where, errors)
-        shared_fields = home_mode != "isolated" or bool(dsh_home) or credential_mode != "environment" or bool(grants)
+        headless_only = home_mode != "isolated" or bool(dsh_home) or credential_mode != "environment"
         workspace_shared = any(item.allow_new_session or item.occupancy != "unknown" for item in workspaces.values())
-        if adapter != "headless_cli" and (shared_fields or workspace_shared):
-            errors.append(f"{where} home and session grants belong only to headless_cli")
+        if adapter != "headless_cli" and headless_only:
+            errors.append(f"{where} shared home belongs only to headless_cli")
+        if adapter not in {"headless_cli", "desktop_host"} and (grants or workspace_shared):
+            errors.append(f"{where} session grants belong only to headless_cli or desktop_host")
+        if adapter == "desktop_host" and any(item.allow_new_session for item in workspaces.values()):
+            errors.append(f"{where} desktop_host does not create a stand-in session")
+        if adapter == "desktop_host" and any(not item.host_workspace_id for item in workspaces.values()):
+            errors.append(f"{where} desktop workspaces require host_workspace_id")
+        if adapter == "desktop_host":
+            for grant in grants:
+                if grant.access == "write" and grant.profile != "desktop":
+                    errors.append(
+                        f"{where} session {grant.session_id} is {grant.profile}, not desktop; refusing to forge a resume"
+                    )
+                if grant.access == "write" and grant.occupancy != "operator_confirmed_idle":
+                    errors.append(
+                        f"{where} session {grant.session_id} refuses write until occupancy is operator_confirmed_idle"
+                    )
         if adapter == "headless_cli" and home_mode == "shared":
             for grant in grants:
                 if grant.access == "write" and grant.profile != "headless":
@@ -387,6 +435,9 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
             dsh_home=dsh_home,
             credential_mode=str(credential_mode),
             session_grants=tuple(grants),
+            host_bind=host_bind,
+            host_port=host_port,
+            host_secret_env=host_secret_env or "",
         )
     return instances
 
@@ -437,12 +488,19 @@ def _parse_workspaces(raw: Any, where: str, errors: list[str]) -> dict[str, Work
             occupancy = "unknown"
         if allow_new and occupancy != "operator_confirmed_idle":
             errors.append(f"{spot} allow_new_session requires occupancy operator_confirmed_idle")
+        host_workspace_id = item.get("host_workspace_id", "")
+        if host_workspace_id and (
+            not isinstance(host_workspace_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", host_workspace_id)
+        ):
+            errors.append(f"{spot}.host_workspace_id must be a safe token")
+            host_workspace_id = ""
         found[name] = Workspace(
             name=name,
             description=description.strip(),
             cwd=cwd,
             allow_new_session=allow_new,
             occupancy=occupancy,
+            host_workspace_id=host_workspace_id if isinstance(host_workspace_id, str) else "",
         )
     return found
 

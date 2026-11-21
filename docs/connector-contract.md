@@ -14,8 +14,9 @@
 - 默认 headless 不使用 GUI 保存的登录。适配器把 `DSH_HOME` 指到桥自己的数据目录。可选的 `home_mode = "shared"` 才把子进程的 `DSH_HOME` 指到操作者写明的那一个目录，并且只允许配置里点名的工作区和 session。共享 home 不会自动开放里面的全部会话。
 - 官方凭证复用是同一 `DSH_HOME` 里的托管存储。headless 默认关掉 `credentials`、`authorization`、`deepseek-account`。`credential_mode = "official_store"` 用桥数据目录里的 `--patch` 覆盖把这三行重新打开，交给官方组件读取。桥不读取、不复制 `.credentials.yaml`，也不把 Key 放进仓库。
 - 没有官方的 `dsh session list` 或会话导出命令。会话文件不是受支持的 resume。能恢复的只有 headless `--session-id`，并且 cwd、profile 和授权必须一致。
-- Desktop 没有外部配对，不能把 Electron 进程接过来。Web 主机的 RPC 是内部线路，不是稳定接口。SuperAgent 的 `state` 仍然不能派工。旧的 `dsh-agent-bridge` 驱动的是 Web Session，不解决这次的 headless home。
-- 取消只结束桥自己启动的进程。外部占用确认不了就拒绝写。
+- CLI 不能启动 desktop profile，也没有外部配对令牌。Desktop 里受支持的扩展点是安装到 desktop profile 的 bundle：插件在 Host 进程内调用 `workspaceRegistry`、`sessionController` 和 `sessionQuery`。这不是读取启动 token，也不是改 Electron。headless 不挂这些服务。详见 [plugins/dsh-control-bridge-host/README.md](../plugins/dsh-control-bridge-host/README.md)。
+- Web 主机的 HTTP RPC 仍是内部线路。旧的 `dsh-agent-bridge`（MIT）说明了 loopback 加进程内 `sessionController` 的形状；本仓库另写实现，不把它的 Web 验收当成 Desktop 验收。SuperAgent 的 `state` 仍然不能派工。
+- 取消只结束桥自己这次请求。外部占用确认不了就拒绝写。
 
 实现和限制写在 [headless-cli.md](headless-cli.md)。默认 `spawn = false`。
 

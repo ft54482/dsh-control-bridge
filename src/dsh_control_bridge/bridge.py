@@ -12,6 +12,7 @@ from typing import Any
 from dsh_control_bridge.adapters.base import CancelRequest, DispatchRequest, DispatchResult
 from dsh_control_bridge.adapters.fake import FakeAdapter
 from dsh_control_bridge.adapters.harness import HarnessAdapter
+from dsh_control_bridge.adapters.desktop_host import DesktopHostAdapter
 from dsh_control_bridge.adapters.headless_cli import HeadlessCliAdapter
 from dsh_control_bridge.config import Config, dev_unsigned
 from dsh_control_bridge.errors import (
@@ -378,9 +379,10 @@ class Bridge:
             and instance.home_mode == "shared"
             and bool(session_id)
         )
-        if shared_resume:
+        desktop_resume = instance is not None and instance.adapter == "desktop_host" and bool(session_id)
+        if shared_resume or desktop_resume:
             if not mandate.allows("resume"):
-                raise MandateRequired("shared-home resume requires mandate action resume")
+                raise MandateRequired("resume requires mandate action resume")
             if mandate.session_id != session_id:
                 raise MandateRequired("mandate.session_id does not match the resume target")
         elif not mandate.allows("dispatch"):
@@ -524,6 +526,12 @@ class Bridge:
                 task_id=task.task_id,
                 detail={"from": current.status, "to": "running", "reason": "dispatch_ack"},
             )
+            report = None
+            take = getattr(adapter, "take_host_report", None)
+            if take is not None:
+                report = take()
+            if report:
+                self.record_host_completion(task.task_id, report)
             return self._require_task(task.task_id)
         return self._dead_letter(self._require_task(task.task_id), "retry limit reached")
 
@@ -895,6 +903,62 @@ class Bridge:
             raise AdapterError("history needs a bridge data directory")
         return read_transcript(self.data_dir, instance_id, session_id, offset=offset, limit=limit)
 
+    def record_host_completion(self, task_id: str, report: dict[str, Any]) -> dict[str, Any]:
+        """Move a desktop host result to review. The text cannot grant access."""
+
+        task = self._require_task(task_id)
+        if report.get("source") != "desktop_session" or report.get("session_id") != task.session_id:
+            raise AdapterError("completion does not match the authorized desktop session")
+        if report.get("kind") != "completed":
+            raise AdapterError("desktop run has no completed final")
+        text = self.redactor.redact(str(report.get("text") or ""))
+        digest = hashlib.sha256(f"{task.task_id}:{report.get('request_id')}".encode("utf-8")).hexdigest()
+        event_id = f"host.{digest[:32]}"
+        state = self.store.begin_event(
+            event_id=event_id,
+            event_type="stage_submitted",
+            occurred_at=format_utc(utc_now()),
+            instance_id=task.instance_id,
+            workspace=task.workspace,
+            executor=task.executor,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            ticket_id=None,
+            run_id=None,
+            commit_sha=None,
+            evidence=[],
+            payload_sha256=digest,
+            disposition="accepted",
+            reject_reason=None,
+            applied=False,
+        )
+        if state == "duplicate":
+            current = self._require_task(task_id)
+            return {"duplicate": True, "status": current.status, "authorization_changed": False, "text": text}
+        event = ExtractedEvent(
+            event_id=event_id,
+            event_type="stage_submitted",
+            occurred_at=format_utc(utc_now()),
+            instance_id=task.instance_id,
+            workspace=task.workspace,
+            executor=task.executor,
+            task_id=task.task_id,
+            session_id=task.session_id,
+            ticket_id=None,
+            run_id=None,
+            commit_sha=None,
+            evidence=[],
+            problems=[],
+        )
+        status, applied = self._apply_event(task, event)
+        return {
+            "duplicate": False,
+            "applied": applied,
+            "status": status,
+            "authorization_changed": False,
+            "text": text,
+        }
+
     def home_plan(self, instance_id: str) -> dict[str, Any]:
         from dsh_control_bridge.home_access import non_secret_operator_fields, surface_matrix
 
@@ -934,6 +998,8 @@ def open_bridge(config: Config, data_dir: Path, *, adapters: dict[str, Any] | No
                     instance.id,
                     data_dir / "adapters" / f"fake-{instance.id}.json",
                 )
+            elif instance.adapter == "desktop_host":
+                adapters[instance.id] = DesktopHostAdapter(instance)
             elif instance.adapter == "headless_cli":
                 adapters[instance.id] = HeadlessCliAdapter(
                     instance,

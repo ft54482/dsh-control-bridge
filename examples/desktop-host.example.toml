@@ -1,0 +1,38 @@
+# Desktop host plugin client. spawn is false, so nothing is dialed.
+# host_workspace_id and session_id are placeholders, not a live desktop.
+# Do not add the busy business workspaces.
+
+[bridge]
+signature_window_seconds = 300
+allow_unsigned = false
+
+[notify]
+mode = "off"
+
+[[instances]]
+id = "local-desktop-host"
+label = "Desktop host plugin"
+kind = "desktop"
+adapter = "desktop_host"
+base_url = "http://127.0.0.1:9"
+auth_env = "DSH_DESKTOP_HOST_TOKEN"
+event_secret_env = "DSH_DESKTOP_HOST_EVENT_SECRET"
+spawn = false
+timeout_seconds = 120
+host_bind = "127.0.0.1"
+host_port = 8765
+host_secret_env = "DSH_BRIDGE_HOST_SECRET"
+
+[[instances.workspaces]]
+name = "demo"
+description = "人工授权的隔离演示工作区"
+cwd = "C:/dsh-workspaces/demo"
+host_workspace_id = "ws-demo"
+
+[[instances.session_grants]]
+session_id = "session-demo"
+workspace = "demo"
+profile = "desktop"
+cwd = "C:/dsh-workspaces/demo"
+access = "read"
+occupancy = "unknown"
