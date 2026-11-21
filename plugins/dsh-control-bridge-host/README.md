@@ -26,10 +26,10 @@ Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-c
 Quit Desktop from the tray first. The bridge does not quit it.
 
 ```text
-dsh plugin --profile desktop add dsh-control-bridge-host-0.1.0.tgz
+dsh plugin --profile desktop add dsh-control-bridge-host-0.1.1.tgz
 ```
 
-Generate a 32+ character secret outside the repo and set `DSH_BRIDGE_HOST_SECRET` for the Desktop process. Edit the profile `cordis.patch.yml` row `dsh-control-bridge-host` so `workspaceAllowlist` and `sessionAllowlist` name only the authorized demo workspace and session. An empty allowlist does not open the port. Reopen Desktop.
+`Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable. An empty allowlist with no armed bootstrap does not open the port. After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, profile, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy.
 
 Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, and reopen Desktop.
 

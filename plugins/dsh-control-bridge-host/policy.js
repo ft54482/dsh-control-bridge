@@ -29,6 +29,89 @@ export function loopbackPeer(address) {
   return address === '127.0.0.1' || address === '::1' || address === '::ffff:127.0.0.1'
 }
 
+export function rejectBrowser(headers) {
+  const origin = headers.origin || ''
+  if (origin) return 'cross_origin'
+  const site = headers['sec-fetch-site'] || ''
+  if (site && site !== 'none' && site !== 'same-origin') return 'cross_origin'
+  return ''
+}
+
+export function decideListen({ services, hostSecret, allowlistCount, bootstrap, bind, now }) {
+  if (!services) {
+    return { listening: false, reason: 'desktop session services are not mounted; headless and incomplete profiles stay silent' }
+  }
+  if (bind && bind !== '127.0.0.1') return { listening: false, reason: 'bind must be 127.0.0.1' }
+  const steady = Boolean(hostSecret && hostSecret.length >= 32 && allowlistCount > 0)
+  const clock = now || Date.now()
+  const armed = Boolean(
+    bootstrap
+    && bootstrap.secret
+    && bootstrap.secret.length >= 32
+    && Number(bootstrap.expiresAt) > clock
+    && !bootstrap.consumed,
+  )
+  if (!steady && !armed) {
+    return { listening: false, reason: 'no steady allowlist and no armed bootstrap' }
+  }
+  return { listening: true, steady, bootstrap: armed, outbound: false }
+}
+
+export function discoverCatalog(workspaces, sessions) {
+  return {
+    source: 'desktop_metadata',
+    grants_execution: false,
+    includes_history: false,
+    workspaces: (workspaces || []).map((item) => ({
+      id: item.id,
+      title: redactText(item.title || ''),
+      cwd: item.path || item.cwd || '',
+    })),
+    sessions: (sessions || []).map((item) => ({
+      session_id: item.id,
+      workspace_id: item.workspaceId || '',
+      title: redactText(item.title || ''),
+      cwd: item.cwd || '',
+      profile: item.profile || 'unknown',
+      model: item.model || item.modelId || null,
+      provider: item.provider || null,
+      busy: Boolean(item.running || item.writerHeld),
+    })),
+  }
+}
+
+export function selectAllowlist(catalog, choice) {
+  const session = (catalog.sessions || []).find((item) => item.session_id === choice.session_id)
+  if (!session) return { ok: false, reason: 'unknown_session', started_task: false }
+  const access = choice.access === 'write' ? 'write' : 'read'
+  if (access === 'write' && session.busy) {
+    return { ok: false, reason: 'busy', detail: 'write refused; existing turn not cancelled', started_task: false }
+  }
+  if (access === 'write' && session.profile !== 'desktop') {
+    return { ok: false, reason: 'cross_profile', started_task: false, model_changed: false }
+  }
+  const workspace = (catalog.workspaces || []).find((item) => item.id === session.workspace_id)
+  return {
+    ok: true,
+    started_task: false,
+    model_changed: false,
+    allowlist: {
+      version: 1,
+      workspaceAllowlist: workspace ? [{ id: workspace.id, cwd: workspace.cwd, title: workspace.title }] : [],
+      sessionAllowlist: [{
+        sessionId: session.session_id,
+        workspaceId: session.workspace_id,
+        access,
+        cwd: session.cwd,
+        profile: session.profile,
+        model: session.model,
+        provider: session.provider,
+        title: session.title,
+      }],
+    },
+  }
+}
+
 function workspaceGrant(config, workspaceId) {
   return (config.workspaceAllowlist || []).find((item) => item && item.id === workspaceId) || null
 }

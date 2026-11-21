@@ -7,7 +7,10 @@
     config:
       bind: 127.0.0.1
       port: 8765
-      secretEnv: DSH_BRIDGE_HOST_SECRET
+      secretFile: ""
+      bootstrapFile: ""
+      bootstrapSecretFile: ""
+      allowlistFile: ""
       busyPolicy: refuse
       workspaceAllowlist: []
       sessionAllowlist: []

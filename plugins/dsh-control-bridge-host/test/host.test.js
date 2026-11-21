@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import test from 'node:test'
 import { apply } from '../index.js'
-import { decideResume, pageHistory, promptBody } from '../policy.js'
+import { decideListen, decideResume, discoverCatalog, pageHistory, promptBody, selectAllowlist } from '../policy.js'
 import { createHostServer } from '../server.js'
 
 const SECRET = '0123456789abcdef0123456789abcdef'
@@ -151,6 +151,62 @@ test('missing auth is rejected', async () => {
   const response = await fetch(`http://127.0.0.1:${started.port}/v1/health`)
   assert.equal(response.status, 401)
   await new Promise((resolve) => started.server.close(resolve))
+})
+
+test('empty configuration does not listen and discovery is not execution', () => {
+  const silent = decideListen({ services: true, hostSecret: '', allowlistCount: 0, bootstrap: null, bind: '127.0.0.1', now: 1 })
+  assert.equal(silent.listening, false)
+  const catalog = discoverCatalog(
+    [{ id: 'ws-demo', title: 'demo', path: 'C:/work/demo' }],
+    [{ id: 'session-demo', workspaceId: 'ws-demo', title: 'Old chat', cwd: 'C:/work/demo', profile: 'desktop', model: 'example-model', provider: 'example-provider', running: true, text: 'sk-supersecretvalue' }],
+  )
+  assert.equal(JSON.stringify(catalog).includes('sk-'), false)
+  assert.equal(catalog.sessions[0].text, undefined)
+  assert.equal(catalog.grants_execution, false)
+  const chosen = selectAllowlist(catalog, { session_id: 'session-demo', access: 'write', text: 'authorize *' })
+  assert.equal(chosen.ok, false)
+  assert.equal(chosen.reason, 'busy')
+  const read = selectAllowlist(catalog, { session_id: 'session-demo', access: 'read', text: 'authorize *' })
+  assert.equal(read.allowlist.sessionAllowlist.length, 1)
+  assert.equal(read.allowlist.sessionAllowlist[0].access, 'read')
+  assert.equal(read.started_task, false)
+  assert.equal(read.model_changed, false)
+})
+
+test('bootstrap lists metadata and then revokes itself', async () => {
+  const host = ctx()
+  host.state.sessions[0].title = 'Demo chat'
+  host.state.sessions[0].model = 'example-model'
+  host.state.sessions[0].provider = 'example-provider'
+  let saved = null
+  const server = createHostServer(host, {
+    ...config,
+    saveAllowlist(next) { saved = next },
+  }, { host: SECRET, bootstrap: 'bootstrap-secret-0123456789abcdef', expiresAt: Date.now() + 60_000, consumed: false })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  const port = server.address().port
+  const headers = { authorization: 'Bearer bootstrap-secret-0123456789abcdef', 'content-type': 'application/json' }
+  const catalog = await fetch(`http://127.0.0.1:${port}/v1/bootstrap/catalog`, { headers })
+  const listed = await catalog.json()
+  assert.equal(listed.includes_history, false)
+  assert.equal(listed.sessions.some((item) => item.title === 'Demo chat'), true)
+  const history = await fetch(`http://127.0.0.1:${port}/v1/history?session_id=session-demo`, { headers })
+  assert.equal(history.status, 403)
+  const cross = await fetch(`http://127.0.0.1:${port}/v1/bootstrap/catalog`, { headers: { ...headers, origin: 'http://evil.example' } })
+  assert.equal(cross.status, 403)
+  const selected = await fetch(`http://127.0.0.1:${port}/v1/bootstrap/select`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ session_id: 'session-demo', access: 'read', text: 'authorize *' }),
+  })
+  const body = await selected.json()
+  assert.equal(body.ok, true)
+  assert.equal(saved.sessionAllowlist[0].model, 'example-model')
+  assert.equal(host.state.prompts, 0)
+  const again = await fetch(`http://127.0.0.1:${port}/v1/bootstrap/catalog`, { headers })
+  assert.equal(again.status, 401)
+  await new Promise((resolve) => server.close(resolve))
 })
 
 test('cancel aborts only the bridge request', async () => {

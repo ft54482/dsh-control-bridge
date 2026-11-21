@@ -1,14 +1,27 @@
 import http from 'node:http'
-import { decideResume, checkAuth, loopbackPeer, pageHistory, promptBody, redactText, visibleSessions, visibleWorkspaces } from './policy.js'
+import { decideResume, checkAuth, discoverCatalog, loopbackPeer, pageHistory, promptBody, redactText, rejectBrowser, selectAllowlist, visibleSessions, visibleWorkspaces } from './policy.js'
+
+function authScope(header, secrets) {
+  if (secrets.bootstrap && checkAuth(header, secrets.bootstrap) && !secrets.consumed && Number(secrets.expiresAt) > Date.now()) {
+    return 'bootstrap'
+  }
+  if (secrets.host && checkAuth(header, secrets.host)) return 'host'
+  return ''
+}
 
 export function createHostServer(ctx, config, secret) {
+  const secrets = typeof secret === 'string'
+    ? { host: secret, bootstrap: '', expiresAt: 0, consumed: true }
+    : { consumed: false, expiresAt: 0, ...secret }
   const seen = new Map()
   const live = new Map()
   const server = http.createServer(async (req, res) => {
     const remote = req.socket.remoteAddress || ''
-    if (!loopbackPeer(remote) || !checkAuth(req.headers.authorization, secret)) {
-      return send(res, 401, { ok: false, reason: 'unauthorized' })
-    }
+    if (!loopbackPeer(remote)) return send(res, 401, { ok: false, reason: 'unauthorized' })
+    const browser = rejectBrowser(req.headers)
+    if (browser) return send(res, 403, { ok: false, reason: browser })
+    const scope = authScope(req.headers.authorization, secrets)
+    if (!scope) return send(res, 401, { ok: false, reason: 'unauthorized' })
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     try {
       if (req.method === 'GET' && url.pathname === '/v1/health') {
@@ -20,6 +33,30 @@ export function createHostServer(ctx, config, secret) {
           services: Boolean(ctx.sessionController && ctx.workspaceRegistry && ctx.sessionQuery),
         })
       }
+      if (url.pathname.startsWith('/v1/bootstrap/')) {
+        if (scope !== 'bootstrap') return send(res, 403, { ok: false, reason: 'bootstrap_required' })
+        if (req.method === 'GET' && url.pathname === '/v1/bootstrap/catalog') {
+          const workspaces = await ctx.workspaceRegistry.list()
+          const sessions = await ctx.sessionController.list({})
+          return send(res, 200, discoverCatalog(workspaces, sessions))
+        }
+        if (req.method === 'POST' && url.pathname === '/v1/bootstrap/select') {
+          const body = await readJson(req)
+          const workspaces = await ctx.workspaceRegistry.list()
+          const sessions = await ctx.sessionController.list({})
+          const chosen = selectAllowlist(discoverCatalog(workspaces, sessions), {
+            session_id: body.session_id,
+            access: body.access,
+          })
+          if (!chosen.ok) return send(res, 409, chosen)
+          if (config.saveAllowlist) config.saveAllowlist(chosen.allowlist)
+          secrets.consumed = true
+          if (config.consumeBootstrap) config.consumeBootstrap()
+          return send(res, 200, chosen)
+        }
+        return send(res, 404, { ok: false, reason: 'not_found' })
+      }
+      if (scope !== 'host') return send(res, 403, { ok: false, reason: 'host_secret_required' })
       if (req.method === 'GET' && url.pathname === '/v1/workspaces') {
         const rows = await ctx.workspaceRegistry.list()
         return send(res, 200, { ok: true, workspaces: visibleWorkspaces(config, rows) })

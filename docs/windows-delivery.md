@@ -53,7 +53,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 插件包是 `dsh-control-bridge-host`。它只听 `127.0.0.1`，不改 Electron，不读启动 token，不读 `.credentials.yaml`，不调用 `selectModel`。续接用原来的 session id 和 `prompt(..., mode=queue)`，所以会话自己记下的 example-provider / example-model 仍由 Host 使用。忙或写锁被占时拒绝，不取消现有回合。
 
-安装和回滚要先退出托盘里的 Desktop。桥不会替你退出或重启。命令见 `plugins/dsh-control-bridge-host/README.md` 和 `scripts/windows/Show-DesktopHostInstall.ps1`。
+官方源码和 0.2.1 以后的问题记录都没有 `dsh desktop quit`。关窗口只会进托盘。托盘菜单 **Quit DeepSeek Harness** 会先问 Host 有没有未完成任务，确认后才退出。没有正规外部退出命令，所以这一次托盘退出不能省，也不能改成 taskkill。允许重启不等于可以丢掉还没写完的任务。
+
+`Prepare-DesktopHost.ps1` 把口令写在解压目录的 `desktop-host-local`，不写系统环境变量。空名单且没有 20 分钟发现窗口时插件不监听。打开 Desktop 后，`Pair-DesktopHost.ps1` 按标题列出会话；`Pair-DesktopHost.ps1 -Index 1` 只写入这一条只读授权并作废发现口令。发现不读正文、不启动任务、不改模型。
+
+安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 
 兼容目标是带 0.2.2 session controller 的 Desktop（操作者看到的 CLI 是 0.2.2-rc.5）。这里没有连上真实 Desktop。Web 上能加载不等于 Desktop 已验收。
 
