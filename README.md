@@ -229,16 +229,18 @@ dsh-bridge --config bridge.toml accept TASK_ID
 
 `dsh-bridge mcp` 是实际的 stdio MCP 服务：`initialize`、`tools/list`、`tools/call`。目录写在 [`docs/mcp-tools.json`](docs/mcp-tools.json)，和服务器返回的是同一份。工具调用默认起草。`mode=send` 必须在参数里带上操作者的 mandate，事件正文不能充当这个参数。
 
-## Windows 快速安装
+## Windows 便携运行
 
-非开发使用不需要克隆后再手写虚拟环境。在仓库根目录用 Windows PowerShell：
+这个包只用 Python 标准库。把 zip 解压到一个新建的空目录，用显式的 `-PythonExe` 指向捆绑的 Python 3.12（或任何 3.11+ 的 `python.exe`）。不要运行 pip，不要写入 `%LOCALAPPDATA%`，也不要修改用户或系统 PATH。
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\windows\Start-DshBridge.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Test-FakeDsh.ps1 -PythonExe D:\Python312\python.exe
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1 -Destination . -PythonExe D:\Python312\python.exe
 ```
 
-安装脚本检查 Python 3.11+，在 `%LOCALAPPDATA%\dsh-control-bridge` 创建虚拟环境，安装本仓库（没有额外运行时依赖），复制样例配置（不覆盖已有文件），然后运行 `self-check` 和 `diagnose`。自检只用内置 fake 适配器。它不搜索本机的 Harness 安装目录，也不请求管理端口。`Start-DshBridge.ps1 -Serve` 才在 `127.0.0.1:8787` 上监听。
+`Install-DshBridge.ps1` 的 `-Destination` 必须就是这次解压目录。它不创建虚拟环境，不访问网络。自检只启动包内的 `fake-dsh.cmd`。`success` 才是业务成功；没有 final、坏退出、超时和主动取消都必须显示为拒绝。步骤和尚未在 Windows 上重跑的项目见 [docs/windows-delivery.md](docs/windows-delivery.md)。
+
+`Start-DshBridge.ps1 -PythonExe D:\Python312\python.exe` 只做本机 `diagnose`。加上 `-Serve` 才在 `127.0.0.1:8787` 监听。它不启动 desktop，也不启动真实 `dsh`。
 
 ## 事件
 

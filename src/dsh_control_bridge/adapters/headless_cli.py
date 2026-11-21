@@ -111,6 +111,15 @@ class SubprocessRunner:
             raise AdapterError("headless process did not exit")
         return ProcessResult(process.returncode, stdout, stderr)
 
+    def live_pid(self, task_id: str) -> int | None:
+        """Pid of a process this runner started, or None when it is not live."""
+
+        with self._lock:
+            process = self._live.get(task_id)
+        if process is None or process.poll() is not None:
+            return None
+        return int(process.pid)
+
     def cancel(self, task_id: str) -> bool:
         with self._lock:
             process = self._live.get(task_id)

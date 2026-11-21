@@ -1,11 +1,26 @@
-# Starts the local bridge listener. It does not launch the desktop app or dsh.
-param([switch]$Serve, [int]$Port = 8787)
+# Local diagnose helper. It does not launch desktop or dsh and does not edit the persistent PATH.
+param(
+  [Parameter(Mandatory = $true)][string]$PythonExe,
+  [string]$Config = "bridge.toml",
+  [string]$DataDir = "data",
+  [switch]$Serve,
+  [int]$Port = 8787
+)
 $ErrorActionPreference = "Stop"
-$root = Join-Path $env:LOCALAPPDATA "dsh-control-bridge"
-$exe = Join-Path $root "venv\Scripts\dsh-bridge.exe"
-$config = Join-Path $root "bridge.toml"
-if (-not (Test-Path $exe)) { Write-Error "Run Install-DshBridge.ps1 first."; exit 1 }
-& $exe --config $config diagnose
+if (-not (Test-Path -LiteralPath $PythonExe)) {
+  Write-Error "PythonExe not found: $PythonExe"
+  exit 1
+}
+if (-not (Test-Path -LiteralPath $Config)) {
+  Write-Error "Config not found: $Config. Copy examples\config.example.toml yourself. This script does not create it."
+  exit 1
+}
+$repo = [System.IO.Path]::GetFullPath((Split-Path (Split-Path $PSScriptRoot -Parent) -Parent))
+$env:PYTHONPATH = Join-Path $repo "src"
+$python = (Resolve-Path -LiteralPath $PythonExe).Path
+& $python -m dsh_control_bridge --config $Config --data-dir $DataDir diagnose
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 if ($Serve) {
-  & $exe --config $config serve --host 127.0.0.1 --port $Port
+  & $python -m dsh_control_bridge --config $Config --data-dir $DataDir serve --host 127.0.0.1 --port $Port
+  exit $LASTEXITCODE
 }

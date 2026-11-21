@@ -1,19 +1,16 @@
-# Installs the bridge into a new local directory. It does not start real dsh or Desktop.
+# Runs the fake self-check from this unpacked directory.
+# It does not download packages, edit the persistent PATH, or write outside Destination.
+param(
+  [Parameter(Mandatory = $true)][string]$Destination,
+  [Parameter(Mandatory = $true)][string]$PythonExe
+)
 $ErrorActionPreference = "Stop"
-$repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$python = $null
-if (Get-Command py -ErrorAction SilentlyContinue) { $python = @("py", "-3") }
-elseif (Get-Command python -ErrorAction SilentlyContinue) { $python = @("python") }
-else { Write-Error "Python 3.11 or newer is required."; exit 1 }
-& $python[0] @($python[1..($python.Length-1)] + @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"))
-if ($LASTEXITCODE -ne 0) { Write-Error "Python 3.11 or newer is required."; exit 1 }
-$root = Join-Path $env:LOCALAPPDATA "dsh-control-bridge"
-$work = Join-Path $root "isolated-workspace"
-New-Item -ItemType Directory -Force -Path $work | Out-Null
-$venvPy = Join-Path $root "venv\Scripts\python.exe"
-if (-not (Test-Path $venvPy)) {
-  & $python[0] @($python[1..($python.Length-1)] + @("-m", "venv", (Join-Path $root "venv")))
+$repo = [System.IO.Path]::GetFullPath((Split-Path (Split-Path $PSScriptRoot -Parent) -Parent))
+$dest = [System.IO.Path]::GetFullPath($Destination).TrimEnd('\')
+if ($dest -ne $repo.TrimEnd('\')) {
+  Write-Error "Destination must be this unpacked directory: $repo. Refusing to copy the package or write outside it."
+  exit 1
 }
-& $venvPy -m pip install $repo
-& $venvPy -m dsh_control_bridge.windows_selfcheck
-Write-Output "Stage 1 install and stage 2 fake-process self-check only. spawn stays off for a real dsh. No model call was made."
+$hostExe = (Get-Process -Id $PID).Path
+& $hostExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "Test-FakeDsh.ps1") -PythonExe $PythonExe
+exit $LASTEXITCODE

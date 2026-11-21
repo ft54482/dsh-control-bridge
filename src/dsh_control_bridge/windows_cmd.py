@@ -95,9 +95,12 @@ def terminate_tree(pid: int) -> None:
 
     Windows uses documented ``taskkill /F /T``. POSIX signals the process
     group created with ``start_new_session``. This does not start dsh.
+
+    ``pid`` must be a process the caller created. Values ``<= 4`` are ignored
+    so this cannot target the idle or system process, or POSIX init.
     """
 
-    if pid <= 0:
+    if pid <= 4:
         return
     if os.name == "nt":
         system_root = os.environ.get("SystemRoot", r"C:\Windows")

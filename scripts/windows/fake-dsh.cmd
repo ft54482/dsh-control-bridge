@@ -25,11 +25,11 @@ exit /b 1
 
 :hang
 echo {"type":"session","sessionId":"session-fake"}
-ping -n 120 127.0.0.1 >nul
+ping.exe -n 120 127.0.0.1 >nul
 exit /b 1
 
 :tree
 echo {"type":"session","sessionId":"session-fake"}
-start "" /b ping -n 120 127.0.0.1 >nul
-ping -n 120 127.0.0.1 >nul
+start "" /b cmd.exe /c "ping.exe -n 120 127.0.0.1 >nul"
+ping.exe -n 120 127.0.0.1 >nul
 exit /b 1
