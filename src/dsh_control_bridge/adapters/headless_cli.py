@@ -23,10 +23,10 @@ from typing import Protocol
 from dsh_control_bridge.adapters.base import CancelRequest, CancelResult, DispatchRequest, DispatchResult
 from dsh_control_bridge.config import Instance
 from dsh_control_bridge.errors import AdapterError
+from dsh_control_bridge.windows_cmd import plan_launch, popen_kwargs, terminate_tree
 
 _PROFILE = "headless"
 _SAFE_ARG = re.compile(r"^[A-Za-z0-9_.:-]{1,200}$")
-_META = set('%&|<>^\r\n"!`')
 _BOOTSTRAP = (
     "PATH",
     "PATHEXT",
@@ -90,33 +90,38 @@ class SubprocessRunner:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            shell=False,
+            **popen_kwargs(),
         )
         with self._lock:
             self._live[task_id] = process
         try:
             stdout, stderr = process.communicate(stdin, timeout=timeout)
         except subprocess.TimeoutExpired:
-            process.kill()
-            process.communicate()
-            raise AdapterError("headless process timed out and was killed") from None
+            terminate_tree(process.pid)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            raise AdapterError("headless process timed out with no accepted final") from None
         finally:
             with self._lock:
                 self._live.pop(task_id, None)
-        return ProcessResult(process.returncode or 0, stdout, stderr)
+        if process.poll() is None:
+            raise AdapterError("headless process did not exit")
+        return ProcessResult(process.returncode, stdout, stderr)
 
     def cancel(self, task_id: str) -> bool:
         with self._lock:
             process = self._live.get(task_id)
-        if process is None:
+        if process is None or process.poll() is not None:
             return False
-        process.terminate()
+        terminate_tree(process.pid)
         try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
             process.wait(timeout=5)
-        return True
+        except subprocess.TimeoutExpired:
+            return False
+        return process.poll() is not None
 
 
 class HeadlessCliAdapter:
@@ -234,14 +239,13 @@ class InterpretedRun:
 
 
 def build_argv(executable: str, session_id: str | None) -> list[str]:
-    if any(character in executable for character in _META):
-        raise AdapterError("executable path contains a shell metacharacter")
     argv = [executable, "--profile", _PROFILE, "--json"]
     if session_id:
         if not _SAFE_ARG.match(session_id):
             raise AdapterError("session id is not safe to pass as an argument")
         argv.extend(["--session-id", session_id])
     argv.append("-")
+    plan_launch(argv)
     return argv
 
 

@@ -8,6 +8,8 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![CI](https://github.com/ft54482/dsh-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/ft54482/dsh-control-bridge/actions/workflows/ci.yml)
 
+便携包里的使用顺序写在 [docs/windows-delivery.md](docs/windows-delivery.md)：安装桥、假进程自检、凭证配置、真实计费 smoke。默认不启动真实 `dsh`，也不发送模型请求。这个文件属于预览分支，不是默认分支首页。
+
 ## 这是什么
 
 一个人把目标交给协调代理。协调代理可以是你自己运行的 Grok Bot，也可以是别的总控程序。它不直接代替 Harness 写代码或改仓库，而是通过这座桥做三件事：读事件、写成给人看的阶段摘要、把下一份任务书派回正确的实例和工作区。

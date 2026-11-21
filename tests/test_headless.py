@@ -195,11 +195,11 @@ def test_example_headless_config_does_not_spawn():
     instance = config.instances["local-headless"]
     assert instance.spawn is False
     assert instance.workspaces["broadcast-cs"].cwd != instance.workspaces["auto-video"].cwd
-    source = (ROOT / "src" / "dsh_control_bridge" / "adapters" / "headless_cli.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "dsh_control_bridge" / "windows_cmd.py").read_text(encoding="utf-8")
     assert "17300" not in source
     assert "49290" not in source
     assert "3082" not in source
-    assert "shell=False" in source
+    assert '"shell": False' in source
 
 
 def test_cancel_waits_and_does_not_resume_early(tmp_path, monkeypatch):

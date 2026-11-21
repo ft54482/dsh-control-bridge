@@ -1,4 +1,4 @@
-# Installs the bridge for local use. It does not start dsh and does not touch a desktop session.
+# Installs the bridge into a new local directory. It does not start real dsh or Desktop.
 $ErrorActionPreference = "Stop"
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $python = $null
@@ -8,16 +8,12 @@ else { Write-Error "Python 3.11 or newer is required."; exit 1 }
 & $python[0] @($python[1..($python.Length-1)] + @("-c", "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"))
 if ($LASTEXITCODE -ne 0) { Write-Error "Python 3.11 or newer is required."; exit 1 }
 $root = Join-Path $env:LOCALAPPDATA "dsh-control-bridge"
-New-Item -ItemType Directory -Force -Path $root | Out-Null
-$venv = Join-Path $root "venv"
-if (-not (Test-Path (Join-Path $venv "Scripts\python.exe"))) {
-  & $python[0] @($python[1..($python.Length-1)] + @("-m", "venv", $venv))
+$work = Join-Path $root "isolated-workspace"
+New-Item -ItemType Directory -Force -Path $work | Out-Null
+$venvPy = Join-Path $root "venv\Scripts\python.exe"
+if (-not (Test-Path $venvPy)) {
+  & $python[0] @($python[1..($python.Length-1)] + @("-m", "venv", (Join-Path $root "venv")))
 }
-& (Join-Path $venv "Scripts\python.exe") -m pip install $repo
-$config = Join-Path $root "bridge.toml"
-if (-not (Test-Path $config)) {
-  Copy-Item (Join-Path $repo "examples\config.example.toml") $config
-}
-& (Join-Path $venv "Scripts\dsh-bridge.exe") --config $config self-check
-& (Join-Path $venv "Scripts\dsh-bridge.exe") --config $config diagnose
-Write-Output "self-check finished. Headless spawn stays off until you edit your private config. This script does not launch dsh."
+& $venvPy -m pip install $repo
+& $venvPy -m dsh_control_bridge.windows_selfcheck
+Write-Output "Stage 1 install and stage 2 fake-process self-check only. spawn stays off for a real dsh. No model call was made."
