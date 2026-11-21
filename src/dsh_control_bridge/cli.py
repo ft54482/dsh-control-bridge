@@ -14,11 +14,15 @@ from dsh_control_bridge import __version__
 from dsh_control_bridge.bridge import open_bridge
 from dsh_control_bridge.config import load_config
 from dsh_control_bridge.credentials import credentials_report
+from dsh_control_bridge.diagnose import diagnose
 from dsh_control_bridge.errors import BridgeError
 from dsh_control_bridge.http_server import serve
+from dsh_control_bridge.mcp_server import serve_stdio
 from dsh_control_bridge.mcp_tools import tool_catalog
-from dsh_control_bridge.models import Mandate, Task, parse_mandate
-from dsh_control_bridge.signing import signature_header
+from dsh_control_bridge.models import Mandate, Task, parse_mandate, utc_now
+from dsh_control_bridge.preflight import load_facts, preflight
+from dsh_control_bridge.selfcheck import run_self_check
+from dsh_control_bridge.signing import sign_request
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -76,14 +80,21 @@ def _parser() -> argparse.ArgumentParser:
 
     ingest = sub.add_parser("ingest", help="ingest one event file through the same checks as the webhook")
     ingest.add_argument("--body", type=Path, required=True)
+    ingest.add_argument("--instance", required=True)
 
     serve_cmd = sub.add_parser("serve", help="listen for signed webhook events")
     serve_cmd.add_argument("--host", default="127.0.0.1")
     serve_cmd.add_argument("--port", type=int, default=8787)
 
-    sub.add_parser("sign", help="print X-DSH-Signature for the body on stdin")
+    sign = sub.add_parser("sign", help="print the signed headers for the body on stdin")
+    sign.add_argument("--instance", required=True)
     sub.add_parser("check", help="validate config and report credential presence")
-    sub.add_parser("tools", help="print MCP tool descriptions")
+    sub.add_parser("diagnose", help="local preflight; does not contact Harness")
+    sub.add_parser("self-check", help="run the isolated fake install check")
+    facts = sub.add_parser("preflight", help="compare a redacted facts file with the connector contract")
+    facts.add_argument("--facts", type=Path)
+    sub.add_parser("mcp", help="serve the stdio MCP tool server")
+    sub.add_parser("tools", help="print the MCP tool catalog")
     sub.add_parser("recover", help="resume in-flight sends and cancels")
     return parser
 
@@ -92,20 +103,31 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "tools":
         _emit(args, tool_catalog())
         return 0
-    if args.command == "sign":
-        secret = os.environ.get("DSH_BRIDGE_WEBHOOK_SECRET", "")
-        if not secret:
-            raise BridgeError("set DSH_BRIDGE_WEBHOOK_SECRET before signing")
-        print(signature_header(secret, sys.stdin.buffer.read()))
+    if args.command == "self-check":
+        report = run_self_check()
+        _emit(args, report, human="self-check: ok\n" + "\n".join(f"- {item}" for item in report["checks"]))
         return 0
 
     config = load_config(Path(args.config))
+    if args.command == "sign":
+        _print_signature(config, args.instance, sys.stdin.buffer.read())
+        return 0
     if args.command == "check":
         _emit(args, _check_payload(config))
+        return 0
+    if args.command == "diagnose":
+        _emit(args, diagnose(config))
+        return 0
+    if args.command == "preflight":
+        facts = load_facts(args.facts) if args.facts else None
+        _emit(args, preflight(facts))
         return 0
 
     bridge = open_bridge(config, Path(args.data_dir))
     try:
+        if args.command == "mcp":
+            serve_stdio(bridge)
+            return 0
         if args.command == "recover":
             _emit(args, {"recovered": bridge.recovery_notes})
             return 0
@@ -150,11 +172,13 @@ def _run(args: argparse.Namespace) -> int:
             return 0
         if args.command == "ingest":
             body = args.body.read_bytes()
-            secret = os.environ.get(config.settings.webhook_secret_env, "")
-            signature = signature_header(secret, body) if secret and not config.settings.allow_unsigned else None
-            if not config.settings.allow_unsigned and signature is None:
-                raise BridgeError(f"set {config.settings.webhook_secret_env} before ingest")
-            result = bridge.ingest_bytes(body, signature)
+            timestamp, signature = _signature_parts(config, args.instance, body)
+            result = bridge.ingest_bytes(
+                body,
+                signature=signature,
+                timestamp=timestamp,
+                instance_id=args.instance,
+            )
             _emit(args, result.to_dict())
             return 0
         if args.command == "serve":
@@ -176,8 +200,25 @@ def _load_mandate(path: Path) -> Mandate:
     return parse_mandate(raw)
 
 
+def _print_signature(config: Any, instance_id: str, body: bytes) -> None:
+    timestamp, signature = _signature_parts(config, instance_id, body)
+    print(f"X-DSH-Timestamp: {timestamp}")
+    print(f"X-DSH-Instance: {instance_id}")
+    print(f"X-DSH-Signature: {signature}")
+
+
+def _signature_parts(config: Any, instance_id: str, body: bytes) -> tuple[str, str]:
+    instance = config.instance(instance_id)
+    if instance is None:
+        raise BridgeError(f"instance {instance_id!r} is not configured")
+    secret = os.environ.get(instance.event_secret_env, "")
+    if not secret:
+        raise BridgeError(f"set {instance.event_secret_env} before signing")
+    timestamp = str(int(utc_now().timestamp()))
+    return timestamp, sign_request(secret, timestamp, instance_id, body)
+
+
 def _check_payload(config: Any) -> dict[str, Any]:
-    secret_set = bool(os.environ.get(config.settings.webhook_secret_env))
     report = credentials_report()
     instances = []
     for instance in config.instances.values():
@@ -190,16 +231,20 @@ def _check_payload(config: Any) -> dict[str, Any]:
                 "base_url": instance.base_url,
                 "auth_env": instance.auth_env,
                 "auth_env_set": bool(os.environ.get(instance.auth_env)),
+                "event_secret_env": instance.event_secret_env,
+                "event_secret_set": bool(os.environ.get(instance.event_secret_env)),
                 "workspaces": list(instance.workspaces),
                 "supports_send": instance.adapter == "fake",
+                "connected_to_harness": False,
             }
         )
     return {
         "config": str(config.path),
         "default_mode": "draft",
-        "webhook_secret_env": config.settings.webhook_secret_env,
-        "webhook_secret_set": secret_set,
-        "allow_unsigned": config.settings.allow_unsigned,
+        "signature_window_seconds": config.settings.signature_window_seconds,
+        "allow_unsigned_effective": False,
+        "connected_to_harness": False,
+        "notify_mode": config.notify.mode,
         "credentials": report,
         "instances": instances,
     }
@@ -244,10 +289,28 @@ def _human_task(task: Task) -> str:
             f"  执行路径: {task.executor}",
             f"  会话: {task.session_id or '-'}",
             f"  {extra}",
-            f"  取消确认: {task.cancel_confirmation or '-'}",
+            f"  取消确认: {_cancel_line(task)}",
+            f"  额度声明: {_budget_line(task)}",
             f"  标题: {task.title}",
         ]
     )
+
+
+def _cancel_line(task: Task) -> str:
+    if task.cancel_confirmation == "unconfirmed":
+        return "unconfirmed（远端取消未确认，不能视为已经停止或已经交付）"
+    if task.cancel_confirmation == "confirmed":
+        return "confirmed（只表示取消请求已确认，不是验收通过）"
+    return "-"
+
+
+def _budget_line(task: Task) -> str:
+    stored = task.mandate or {}
+    inner = stored.get("mandate", stored) if isinstance(stored, dict) else {}
+    cap = inner.get("budget_cap") if isinstance(inner, dict) else None
+    if not cap:
+        return "-（没有额度声明；声明本身也不是执行许可）"
+    return f"{cap}（声明，不是执行许可，也不会触发调用）"
 
 
 def _human_status(payload: dict[str, Any]) -> str:

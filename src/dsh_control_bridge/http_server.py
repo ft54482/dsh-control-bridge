@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from dsh_control_bridge.bridge import MAX_BODY_BYTES, Bridge
@@ -34,7 +33,12 @@ def make_server(bridge: Bridge, host: str, port: int) -> ThreadingHTTPServer:
                 return
             body = self.rfile.read(size)
             try:
-                result = bridge.ingest_bytes(body, self.headers.get("X-DSH-Signature"))
+                result = bridge.ingest_bytes(
+                    body,
+                    signature=self.headers.get("X-DSH-Signature"),
+                    timestamp=self.headers.get("X-DSH-Timestamp"),
+                    instance_id=self.headers.get("X-DSH-Instance"),
+                )
             except SignatureError as exc:
                 self._json(401, {"ok": False, "error": str(exc)})
                 return
@@ -62,11 +66,8 @@ def make_server(bridge: Bridge, host: str, port: int) -> ThreadingHTTPServer:
 
 
 def serve(bridge: Bridge, host: str, port: int) -> None:
-    if not bridge.config.settings.allow_unsigned:
-        secret = os.environ.get(bridge.config.settings.webhook_secret_env, "")
-        if not secret:
-            env_name = bridge.config.settings.webhook_secret_env
-            raise SignatureError(f"set {env_name} before starting the webhook")
+    if host not in {"127.0.0.1", "localhost"}:
+        raise SignatureError("the quick-start listener only binds 127.0.0.1 or localhost")
     server = make_server(bridge, host, port)
     try:
         server.serve_forever()

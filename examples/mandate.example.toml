@@ -1,7 +1,10 @@
 # Example mandate. Sending requires a file like this, passed explicitly.
-# Replace expires_at with your own window. This file grants no production action:
-# release, merge, budget changes, and scope changes are not bridge actions.
+# The target below is bound to this mandate. budget_cap is a label, not an action.
+# Replace expires_at with your own window.
 
+instance_id = "local-desktop"
+workspace = "broadcast-cs"
+executor = "ordinary_session"
 objective = "完成任务书里已经写明的那一步。"
 scope = "只处理当前任务书。不发布，不合并，不扩大范围，不增加预算。"
 acceptance = "执行器返回后进入待验收。负责人接受之前不算交付。"

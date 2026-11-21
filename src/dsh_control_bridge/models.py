@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
@@ -55,6 +57,10 @@ _SHA = re.compile(r"^[0-9a-f]{7,64}$")
 _EVIDENCE = re.compile(r"^[A-Za-z0-9_./:-]{1,240}$")
 
 MANDATE_KEYS = (
+    "instance_id",
+    "workspace",
+    "executor",
+    "task_id",
     "objective",
     "scope",
     "acceptance",
@@ -63,7 +69,10 @@ MANDATE_KEYS = (
     "expires_at",
     "allowed_actions",
 )
+MANDATE_REQUIRED = tuple(key for key in MANDATE_KEYS if key != "task_id")
 MANDATE_ACTIONS = frozenset({"dispatch", "retry"})
+MANDATE_SOURCES = frozenset({"operator_file", "mcp_tool"})
+_SLUG = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 
 
 def utc_now() -> datetime:
@@ -89,6 +98,10 @@ def can_transition(source: str, target: str) -> bool:
 
 @dataclass
 class Mandate:
+    instance_id: str
+    workspace: str
+    executor: str
+    task_id: str | None
     objective: str
     scope: str
     acceptance: str
@@ -105,6 +118,11 @@ class Mandate:
     def allows(self, action: str) -> bool:
         return action in self.allowed_actions
 
+    def matches_target(self, *, instance_id: str, workspace: str, executor: str, task_id: str | None = None) -> bool:
+        if self.instance_id != instance_id or self.workspace != workspace or self.executor != executor:
+            return False
+        return self.task_id is None or self.task_id == task_id
+
 
 def parse_mandate(raw: Any) -> Mandate:
     if not isinstance(raw, dict):
@@ -112,9 +130,20 @@ def parse_mandate(raw: Any) -> Mandate:
     unknown = sorted(set(raw) - set(MANDATE_KEYS))
     if unknown:
         raise MandateRequired(f"unknown mandate fields: {', '.join(unknown)}")
-    missing = [key for key in MANDATE_KEYS if key not in raw]
+    missing = [key for key in MANDATE_REQUIRED if key not in raw]
     if missing:
         raise MandateRequired(f"mandate is missing: {', '.join(missing)}")
+    instance_id = raw.get("instance_id")
+    workspace = raw.get("workspace")
+    if not isinstance(instance_id, str) or not _SLUG.match(instance_id):
+        raise MandateRequired("mandate.instance_id must be a configured instance slug")
+    if not isinstance(workspace, str) or not _SLUG.match(workspace):
+        raise MandateRequired("mandate.workspace must be a declared workspace slug")
+    if raw.get("executor") not in EXECUTORS:
+        raise MandateRequired("mandate.executor must be ordinary_session or superagent")
+    task_id = raw.get("task_id")
+    if task_id is not None and (not isinstance(task_id, str) or not _EVENT_ID.match(task_id)):
+        raise MandateRequired("mandate.task_id must be a short token when it is set")
 
     def text(key: str, limit: int) -> str:
         value = raw[key]
@@ -145,15 +174,45 @@ def parse_mandate(raw: Any) -> Mandate:
         parse_utc(expires_at)
     except ValueError as exc:
         raise MandateRequired("mandate.expires_at must be UTC and end with Z") from exc
+    budget_cap = text("budget_cap", 80)
+    if any(marker in budget_cap.lower() for marker in ("dispatch", "deploy", "merge", "执行", "发布")):
+        # The text is still only a declaration. Rejecting command-shaped caps makes
+        # it harder to mistake a sentence for an authorization.
+        raise MandateRequired("mandate.budget_cap is a declaration, not an action")
     return Mandate(
+        instance_id=instance_id,
+        workspace=workspace,
+        executor=str(raw["executor"]),
+        task_id=task_id if isinstance(task_id, str) else None,
         objective=text("objective", 4000),
         scope=text("scope", 4000),
         acceptance=text("acceptance", 4000),
-        budget_cap=text("budget_cap", 80),
+        budget_cap=budget_cap,
         retry_limit=retry_limit,
         expires_at=expires_at,
         allowed_actions=normalized,
     )
+
+
+def pack_mandate(mandate: Mandate, source: str) -> dict[str, Any]:
+    if source not in MANDATE_SOURCES:
+        raise MandateRequired("mandate source is not an operator action")
+    body = mandate.to_dict()
+    encoded = json.dumps(body, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return {
+        "mandate": body,
+        "source": source,
+        "sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def open_mandate(stored: Any) -> tuple[Mandate, str]:
+    if not isinstance(stored, dict) or not isinstance(stored.get("mandate"), dict):
+        raise MandateRequired("mandate source is not an operator action")
+    source = stored.get("source")
+    if source not in MANDATE_SOURCES:
+        raise MandateRequired("mandate source is not an operator action")
+    return parse_mandate(stored["mandate"]), str(source)
 
 
 def ensure_mandate_active(mandate: Mandate, *, now: datetime | None = None) -> None:

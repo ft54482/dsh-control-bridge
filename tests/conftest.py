@@ -14,8 +14,11 @@ from dsh_control_bridge.store import Store
 
 CONFIG = """
 [bridge]
-webhook_secret_env = "DSH_BRIDGE_WEBHOOK_SECRET"
+signature_window_seconds = 300
 allow_unsigned = false
+
+[notify]
+mode = "off"
 
 [[instances]]
 id = "local-desktop"
@@ -24,6 +27,7 @@ kind = "desktop"
 adapter = "fake"
 base_url = "http://127.0.0.1:9"
 auth_env = "DSH_LOCAL_DESKTOP_TOKEN"
+event_secret_env = "DSH_LOCAL_DESKTOP_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"
@@ -40,17 +44,22 @@ kind = "remote"
 adapter = "fake"
 base_url = "http://127.0.0.1:10"
 auth_env = "DSH_LAB_SERVER_TOKEN"
+event_secret_env = "DSH_LAB_SERVER_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"
 description = "另一套实例上的同名工作区"
 """
 
+LOCAL_SECRET = "local-event-secret"
+LAB_SECRET = "lab-event-secret"
+
 
 @pytest.fixture
 def secret(monkeypatch: pytest.MonkeyPatch) -> str:
-    monkeypatch.setenv("DSH_BRIDGE_WEBHOOK_SECRET", "test-secret")
-    return "test-secret"
+    monkeypatch.setenv("DSH_LOCAL_DESKTOP_EVENT_SECRET", LOCAL_SECRET)
+    monkeypatch.setenv("DSH_LAB_SERVER_EVENT_SECRET", LAB_SECRET)
+    return LOCAL_SECRET
 
 
 @pytest.fixture
@@ -75,6 +84,10 @@ def bridge(tmp_path, config_path, secret):
 
 def make_mandate(**overrides) -> Mandate:
     values = {
+        "instance_id": "local-desktop",
+        "workspace": "broadcast-cs",
+        "executor": "ordinary_session",
+        "task_id": None,
         "objective": "完成已经写明的一步。",
         "scope": "不扩大范围，不发布，不合并，不增加预算。",
         "acceptance": "负责人验收后才算交付。",

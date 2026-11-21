@@ -3,8 +3,10 @@ from pathlib import Path
 
 import pytest
 
+from dataclasses import replace
+
 from dsh_control_bridge.adapters.fake import FakeAdapter
-from dsh_control_bridge.adapters.harness import PROBE_ITEMS, HarnessAdapter
+from dsh_control_bridge.adapters.harness import HarnessAdapter
 from dsh_control_bridge.bridge import open_bridge
 from dsh_control_bridge.config import load_config
 from dsh_control_bridge.errors import (
@@ -15,8 +17,8 @@ from dsh_control_bridge.errors import (
     SimulatedCrash,
     TargetRejected,
 )
-from dsh_control_bridge.signing import signature_header
-from tests.conftest import make_mandate
+from dsh_control_bridge.signing import sign_request
+from tests.conftest import LAB_SECRET, LOCAL_SECRET, make_mandate
 
 CANARY = "PLEASE_EXEC_CANARY"
 
@@ -31,6 +33,7 @@ def _db_bytes(bridge) -> bytes:
 
 
 def _send_ordinary(bridge, **overrides):
+    mandate = overrides.pop("mandate", None) or make_mandate()
     values = dict(
         instance_id="local-desktop",
         workspace="broadcast-cs",
@@ -38,9 +41,16 @@ def _send_ordinary(bridge, **overrides):
         title="整理阶段说明",
         objective="写出一页说明。",
         mode="send",
-        mandate=make_mandate(),
+        mandate=mandate,
     )
     values.update(overrides)
+    mandate = replace(
+        values["mandate"],
+        instance_id=values["instance_id"],
+        workspace=values["workspace"],
+        executor=values["executor"],
+    )
+    values["mandate"] = mandate
     return bridge.dispatch(**values)
 
 
@@ -62,10 +72,20 @@ def _event(task, event_type="stage_submitted", **extra):
     return body
 
 
-def _ingest(bridge, payload, *, secret="test-secret", signature=None):
+def _ingest(bridge, payload, *, instance="local-desktop", secret=LOCAL_SECRET, signature=None, timestamp=None, now=None):
     raw = json.dumps(payload).encode("utf-8")
-    header = signature_header(secret, raw) if signature is None else signature
-    return bridge.ingest_bytes(raw, header)
+    from dsh_control_bridge.models import utc_now
+
+    current = now or utc_now()
+    stamp = timestamp or str(int(current.timestamp()))
+    header = signature if signature is not None else sign_request(secret, stamp, instance, raw)
+    return bridge.ingest_bytes(
+        raw,
+        signature=header,
+        timestamp=stamp,
+        instance_id=instance,
+        now=current,
+    )
 
 
 def test_default_dispatch_is_a_draft(bridge):
@@ -182,9 +202,9 @@ def test_bad_signature_does_not_consume_the_event(bridge):
     payload = _event(task)
     raw = json.dumps(payload).encode("utf-8")
     with pytest.raises(SignatureError):
-        bridge.ingest_bytes(raw, "sha256=00")
+        bridge.ingest_bytes(raw, signature="sha256=00", timestamp=str(int(__import__("time").time())), instance_id="local-desktop")
     assert bridge.store.get_event("evt_stage_1") is None
-    result = bridge.ingest_bytes(raw, signature_header("test-secret", raw))
+    result = _ingest(bridge, payload)
     assert result.applied
     assert bridge.store.get_task(task.task_id).status == "awaiting_review"
 
@@ -363,8 +383,8 @@ def test_expired_mandate_is_not_sent_on_recovery(tmp_path, config_path):
     with pytest.raises(SimulatedCrash):
         _send_ordinary(first)
     task = first.store.list_tasks()[0]
-    expired = dict(task.mandate)
-    expired["expires_at"] = "2020-01-01T00:00:00Z"
+    expired = json.loads(json.dumps(task.mandate))
+    expired["mandate"]["expires_at"] = "2020-01-01T00:00:00Z"
     first.store.update_task(task.task_id, mandate_json=json.dumps(expired))
     first.store.close()
 
@@ -392,8 +412,11 @@ def test_harness_adapter_refuses_to_send(tmp_path):
     path.write_text(
         """
 [bridge]
-webhook_secret_env = "DSH_BRIDGE_WEBHOOK_SECRET"
+signature_window_seconds = 300
 allow_unsigned = false
+
+[notify]
+mode = "off"
 
 [[instances]]
 id = "local-desktop"
@@ -402,6 +425,7 @@ kind = "desktop"
 adapter = "harness"
 base_url = "http://127.0.0.1:9"
 auth_env = "DSH_LOCAL_DESKTOP_TOKEN"
+event_secret_env = "DSH_LOCAL_DESKTOP_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"
@@ -425,20 +449,23 @@ description = "示例"
         with pytest.raises(ProbeRequired) as caught:
             bridge.dispatch(task_id=draft.task_id, mode="send", mandate=make_mandate())
         assert draft.task_id
-        for item in PROBE_ITEMS:
+        for item in ("ordinary_session_request", "cli_help_verified"):
             assert item in str(caught.value)
         assert bridge.store.get_task(draft.task_id).delivery == "drafted"
         source = Path("src/dsh_control_bridge/adapters/harness.py").read_text(encoding="utf-8")
+        contract = Path("src/dsh_control_bridge/drivers/contract.py").read_text(encoding="utf-8")
         assert "urllib" not in source
         assert "requests" not in source
+        assert "subprocess" not in source
         assert "3082" not in source
+        assert "port_observed" in contract
     finally:
         bridge.store.close()
 
 
 def test_example_event_file_cannot_approve_or_dispatch(bridge):
     raw = Path("examples/event.stage_submitted.json").read_bytes()
-    result = bridge.ingest_bytes(raw, signature_header("test-secret", raw))
+    result = _ingest(bridge, json.loads(raw))
     assert result.rejected is False
     assert result.applied is False
     assert result.task_id is None

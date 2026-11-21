@@ -74,7 +74,7 @@ def tool_catalog() -> dict[str, Any]:
             },
             {
                 "name": "cancel",
-                "description": "取消任务，并请适配器通知对应会话或 SuperAgent。远端未确认时记录 unconfirmed。",
+                "description": "取消任务，并请适配器通知对应会话或 SuperAgent。远端未确认时记录 unconfirmed。取消不是验收，额度声明也不是执行。",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -84,6 +84,11 @@ def tool_catalog() -> dict[str, Any]:
                     "required": ["task_id", "reason"],
                     "additionalProperties": False,
                 },
+            },
+            {
+                "name": "diagnose",
+                "description": "读取本地配置预检。connected_to_harness 在没有新的受支持接口证据前始终为 false。不会访问网络。",
+                "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
             },
         ]
     }

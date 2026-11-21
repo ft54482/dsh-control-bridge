@@ -5,13 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from dsh_control_bridge.adapters.base import CancelRequest, DispatchRequest, DispatchResult
 from dsh_control_bridge.adapters.fake import FakeAdapter
 from dsh_control_bridge.adapters.harness import HarnessAdapter
-from dsh_control_bridge.config import Config
+from dsh_control_bridge.adapters.headless_cli import HeadlessCliAdapter
+from dsh_control_bridge.config import Config, dev_unsigned
 from dsh_control_bridge.errors import (
     AdapterError,
     BridgeError,
@@ -34,10 +36,13 @@ from dsh_control_bridge.models import (
     ensure_mandate_active,
     extract_event,
     format_utc,
-    parse_mandate,
+    open_mandate,
+    pack_mandate,
     utc_now,
 )
-from dsh_control_bridge.signing import signatures_match
+from dsh_control_bridge.notify import Notifier
+from dsh_control_bridge.redact import Redactor
+from dsh_control_bridge.signing import verify_request
 from dsh_control_bridge.store import Store, new_id
 from dsh_control_bridge.summary import render_summary
 
@@ -47,11 +52,24 @@ _DEFAULT_ACCEPTANCE = "由负责人对照证据验收。执行器自报完成不
 
 
 class Bridge:
-    def __init__(self, config: Config, store: Store, adapters: dict[str, Any]):
+    def __init__(
+        self,
+        config: Config,
+        store: Store,
+        adapters: dict[str, Any],
+        data_dir: Path | None = None,
+    ):
         self.config = config
         self.store = store
         self.adapters = adapters
+        self.data_dir = data_dir
         self.recovery_notes: list[str] = []
+        self.redactor = Redactor()
+        for instance in config.instances.values():
+            self.redactor.add(os.environ.get(instance.event_secret_env, ""))
+            self.redactor.add(os.environ.get(instance.auth_env, ""))
+        store.audit.redactor = self.redactor
+        self.notifier = Notifier(config.notify, data_dir, store, self.redactor)
 
     def dispatch(
         self,
@@ -65,6 +83,7 @@ class Bridge:
         acceptance: str = "",
         mode: str = "draft",
         mandate: Mandate | None = None,
+        mandate_source: str = "operator_file",
         task_id: str | None = None,
         session_id: str | None = None,
         parent_task_id: str | None = None,
@@ -76,6 +95,7 @@ class Bridge:
                 task_id,
                 mode=mode,
                 mandate=mandate,
+                mandate_source=mandate_source,
                 instance_id=instance_id,
                 workspace=workspace,
                 executor=executor,
@@ -86,7 +106,14 @@ class Bridge:
         if executor not in {"ordinary_session", "superagent"}:
             raise BridgeError("executor must be ordinary_session or superagent")
         if mode == "send":
-            self._require_sendable(instance_id, mandate)
+            self._require_sendable(instance_id, mandate, task_id=None)
+            if mandate is None or not mandate.matches_target(
+                instance_id=instance_id, workspace=workspace, executor=executor
+            ):
+                raise MandateRequired("mandate target does not match the dispatch target")
+            objective = mandate.objective
+            scope = mandate.scope
+            acceptance = mandate.acceptance
         title = _bounded(title, "title", 200)
         objective = _bounded(objective, "objective", 4000)
         scope = (scope or _DEFAULT_SCOPE).strip()
@@ -111,7 +138,7 @@ class Bridge:
             ticket_id=None,
             run_id=None,
             parent_task_id=parent_task_id,
-            mandate=mandate.to_dict() if mandate else None,
+            mandate=pack_mandate(mandate, mandate_source) if mandate else None,
             dispatch_mode=mode,
             retry_count=0,
             retry_limit=mandate.retry_limit if mandate else 0,
@@ -141,6 +168,7 @@ class Bridge:
             "summaries": self.store.summaries_for(task_id),
             "attempts": self.store.attempts_for(task_id),
             "dead_letters": self.store.dead_letters_for_task(task_id),
+            "notifications": self.store.notifications_for(task_id),
         }
 
     def inbox(self, *, instance_id: str | None = None, workspace: str | None = None) -> dict[str, Any]:
@@ -220,6 +248,7 @@ class Bridge:
                 task_id=task_id,
                 detail={"confirmation": "confirmed", "remote": False},
             )
+            self._notify("canceled", task_id)
             return self._require_task(task_id)
 
         adapter = self.adapters[task.instance_id]
@@ -238,25 +267,28 @@ class Bridge:
                 task_id=task_id,
                 detail={"confirmation": "unconfirmed", "remote": False},
             )
+            self._notify("canceled", task_id)
             return self._require_task(task_id)
         try:
             result = adapter.cancel(_cancel_request(task, reason))
         except SimulatedCrash:
             raise
         except AdapterError as exc:
-            self.store.finish_attempt(attempt_id, "failed", str(exc))
+            safe = self._safe(str(exc))
+            self.store.finish_attempt(attempt_id, "failed", safe)
             self.store.update_task(
                 task_id,
                 status="canceled",
                 cancel_confirmation="unconfirmed",
                 cancel_reason=reason,
-                last_error=str(exc),
+                last_error=safe,
             )
             self.store.audit.write(
                 "task.cancel",
                 task_id=task_id,
-                detail={"confirmation": "unconfirmed", "error": str(exc)},
+                detail={"confirmation": "unconfirmed", "error": safe},
             )
+            self._notify("canceled", task_id)
             return self._require_task(task_id)
         confirmation = "confirmed" if result.confirmed else "unconfirmed"
         self.store.finish_attempt(attempt_id, "succeeded", result.detail)
@@ -265,104 +297,28 @@ class Bridge:
             status="canceled",
             cancel_confirmation=confirmation,
             cancel_reason=reason,
-            last_error=None if result.confirmed else result.detail,
+            last_error=None if result.confirmed else self._safe(result.detail),
         )
         self.store.audit.write(
             "task.cancel",
             task_id=task_id,
             detail={"confirmation": confirmation, "remote": True},
         )
+        self._notify("canceled", task_id)
         return self._require_task(task_id)
-
-    def ingest_bytes(self, raw_body: bytes, signature: str | None) -> IngestResult:
-        if len(raw_body) > MAX_BODY_BYTES:
-            raise PayloadError("body is too large")
-        self._verify(raw_body, signature)
-        try:
-            payload = json.loads(raw_body.decode("utf-8"))
-        except (UnicodeError, json.JSONDecodeError) as exc:
-            raise PayloadError("body is not UTF-8 JSON") from exc
-        digest = hashlib.sha256(raw_body).hexdigest()
-        event = extract_event(payload)
-        existing = self.store.get_event(event.event_id)
-        if existing:
-            self.store.bump_duplicate(event.event_id)
-            self.store.audit.write("event.duplicate", event_id=event.event_id)
-            task = self.store.get_task(existing["task_id"]) if existing.get("task_id") else None
-            return IngestResult(
-                event_id=event.event_id,
-                duplicate=True,
-                rejected=existing["disposition"] == "rejected",
-                applied=False,
-                reason=existing.get("reject_reason"),
-                task_id=existing.get("task_id"),
-                status=task.status if task else None,
-                evidence_missing=event.evidence_missing,
-            )
-        problems = list(event.problems)
-        problems.extend(self._target_problems(event))
-        if problems:
-            reason = "; ".join(problems)
-            self._remember_event(event, digest, disposition="rejected", reason=reason, applied=False)
-            self.store.add_dead_letter(event_id=event.event_id, reason=reason)
-            self.store.audit.write("event.rejected", event_id=event.event_id, detail={"reason": reason})
-            return IngestResult(
-                event_id=event.event_id,
-                duplicate=False,
-                rejected=True,
-                applied=False,
-                reason=reason,
-                task_id=None,
-                status=None,
-                evidence_missing=event.evidence_missing,
-            )
-        task = self._locate_task(event)
-        applied = False
-        status = task.status if task else None
-        if task is not None:
-            status, applied = self._apply_event(task, event)
-        self._remember_event(
-            event,
-            digest,
-            disposition="accepted",
-            reason=None,
-            applied=applied,
-            task_id=task.task_id if task else event.task_id,
-        )
-        body = render_summary(event, task_status=status, applied=applied)
-        bound_task = task.task_id if task else None
-        self.store.insert_summary(
-            task_id=bound_task,
-            event_id=event.event_id,
-            body=body,
-            evidence_missing=event.evidence_missing,
-        )
-        self.store.audit.write(
-            "event.accepted",
-            event_id=event.event_id,
-            task_id=bound_task,
-            detail={"applied": applied, "event_type": event.event_type},
-        )
-        return IngestResult(
-            event_id=event.event_id,
-            duplicate=False,
-            rejected=False,
-            applied=applied,
-            reason=None,
-            task_id=bound_task,
-            status=status,
-            evidence_missing=event.evidence_missing,
-        )
 
     def recover(self) -> list[str]:
         notes: list[str] = []
         for attempt in self.store.in_flight_attempts():
             task = self.store.get_task(attempt["task_id"])
             if task is None:
-                self.store.finish_attempt(attempt["attempt_id"], "failed", "task missing")
+                self.store.finish_attempt_if(attempt["attempt_id"], "in_flight", "failed", "task missing")
+                continue
+            if not self.store.finish_attempt_if(
+                attempt["attempt_id"], "in_flight", "recovered", f"{attempt['kind']} interrupted"
+            ):
                 continue
             if attempt["kind"] == "cancel":
-                self.store.finish_attempt(attempt["attempt_id"], "recovered", "cancel interrupted")
                 if task.status != "canceled":
                     resumed = self.cancel(task.task_id, task.cancel_reason or "recovered cancel")
                     notes.append(f"{resumed.task_id}:cancel:{resumed.cancel_confirmation}")
@@ -370,15 +326,21 @@ class Bridge:
                     self.store.update_task(task.task_id, cancel_confirmation="unconfirmed")
                     notes.append(f"{task.task_id}:cancel:unconfirmed")
                 continue
-            self.store.finish_attempt(attempt["attempt_id"], "recovered", "dispatch interrupted")
-            if task.status == "pending":
+            if task.status == "pending" and task.delivery == "in_flight":
                 self.store.update_task(task.task_id, delivery="queued", dispatch_mode="send")
         for task in self.store.list_tasks(statuses=("pending",), delivery="queued"):
             if task.dispatch_mode != "send" or not task.mandate:
                 continue
             try:
-                mandate = parse_mandate(task.mandate)
+                mandate, _source = open_mandate(task.mandate)
                 ensure_mandate_active(mandate)
+                if not mandate.matches_target(
+                    instance_id=task.instance_id,
+                    workspace=task.workspace,
+                    executor=task.executor,
+                    task_id=task.task_id,
+                ):
+                    raise MandateRequired("mandate target does not match the task")
             except MandateRequired as exc:
                 self._dead_letter(task, str(exc))
                 notes.append(f"{task.task_id}:dead-letter")
@@ -389,15 +351,30 @@ class Bridge:
                 self._dead_letter(self._require_task(task.task_id), str(exc))
                 notes.append(f"{task.task_id}:probe")
                 continue
+            except BridgeError as exc:
+                if "already in progress" in str(exc):
+                    notes.append(f"{task.task_id}:in-progress")
+                    continue
+                raise
             notes.append(f"{updated.task_id}:{updated.status}")
         return notes
 
-    def _require_sendable(self, instance_id: str, mandate: Mandate | None) -> Mandate:
+    def _require_sendable(self, instance_id: str, mandate: Mandate | None, *, task_id: str | None) -> Mandate:
         if mandate is None:
             raise MandateRequired("send requires a mandate")
         ensure_mandate_active(mandate)
         if not mandate.allows("dispatch"):
             raise MandateRequired("mandate does not allow dispatch")
+        if not mandate.matches_target(
+            instance_id=instance_id,
+            workspace=mandate.workspace,
+            executor=mandate.executor,
+            task_id=task_id,
+        ):
+            raise MandateRequired("mandate target does not match the dispatch target")
+        self.config.require_target(mandate.instance_id, mandate.workspace)
+        if mandate.instance_id != instance_id:
+            raise MandateRequired("mandate instance does not match the dispatch target")
         adapter = self.adapters[instance_id]
         if not adapter.supports_send:
             raise ProbeRequired(adapter.probe_items)
@@ -409,6 +386,7 @@ class Bridge:
         *,
         mode: str,
         mandate: Mandate | None,
+        mandate_source: str,
         instance_id: str | None,
         workspace: str | None,
         executor: str | None,
@@ -426,10 +404,18 @@ class Bridge:
             raise BridgeError(f"task {task_id} is not a draft waiting for approval")
         if mandate is None:
             raise MandateRequired("send requires a mandate")
-        self._require_sendable(task.instance_id, mandate)
+        self._require_sendable(task.instance_id, mandate, task_id=task.task_id)
+        if not mandate.matches_target(
+            instance_id=task.instance_id,
+            workspace=task.workspace,
+            executor=task.executor,
+            task_id=task.task_id,
+        ):
+            raise MandateRequired("mandate target does not match the drafted task")
+        packed = pack_mandate(mandate, mandate_source)
         self.store.update_task(
             task_id,
-            mandate_json=json.dumps(mandate.to_dict(), ensure_ascii=False, sort_keys=True),
+            mandate_json=json.dumps(packed, ensure_ascii=False, sort_keys=True),
             retry_limit=mandate.retry_limit,
             dispatch_mode="send",
             delivery="queued",
@@ -437,17 +423,28 @@ class Bridge:
             scope=mandate.scope,
             acceptance=mandate.acceptance,
         )
-        self.store.audit.write("task.mandate_accepted", task_id=task_id)
+        self.store.audit.write(
+            "task.mandate_accepted",
+            task_id=task_id,
+            detail={"source": mandate_source, "sha256": packed["sha256"]},
+        )
         return self._send(self._require_task(task_id), mandate)
 
     def _send(self, task: Task, mandate: Mandate | None) -> Task:
         if mandate is None:
             if not task.mandate:
                 raise MandateRequired("send requires a mandate")
-            mandate = parse_mandate(task.mandate)
+            mandate, _source = open_mandate(task.mandate)
         ensure_mandate_active(mandate)
         if not mandate.allows("dispatch"):
             raise MandateRequired("mandate does not allow dispatch")
+        if not mandate.matches_target(
+            instance_id=task.instance_id,
+            workspace=task.workspace,
+            executor=task.executor,
+            task_id=task.task_id,
+        ):
+            raise MandateRequired("mandate target does not match the task")
         adapter = self.adapters[task.instance_id]
         if not adapter.supports_send:
             raise ProbeRequired(adapter.probe_items)
@@ -459,29 +456,35 @@ class Bridge:
         while tries < remaining:
             tries += 1
             current = self._require_task(task.task_id)
+            if not self.store.claim_delivery(task.task_id, ("drafted", "queued"), "in_flight"):
+                current = self._require_task(task.task_id)
+                if current.status == "running" and current.delivery == "acked":
+                    return current
+                raise BridgeError("dispatch already in progress")
             attempt_id = self.store.begin_attempt(task.task_id, "dispatch")
-            self.store.update_task(task.task_id, delivery="in_flight", status="pending")
             try:
                 result = adapter.dispatch(_dispatch_request(current))
             except SimulatedCrash:
                 raise
             except AdapterError as exc:
-                self.store.finish_attempt(attempt_id, "failed", str(exc))
+                safe = self._safe(str(exc))
+                self.store.finish_attempt(attempt_id, "failed", safe)
                 self.store.update_task(
                     task.task_id,
                     retry_count=current.retry_count + 1,
-                    last_error=str(exc),
+                    last_error=safe,
                     delivery="queued",
                     status="pending",
                 )
                 if tries >= remaining:
-                    return self._dead_letter(self._require_task(task.task_id), str(exc))
+                    return self._dead_letter(self._require_task(task.task_id), safe)
                 continue
             try:
                 _validate_result(current, result)
             except AdapterError as exc:
-                self.store.finish_attempt(attempt_id, "failed", str(exc))
-                return self._dead_letter(self._require_task(task.task_id), str(exc))
+                safe = self._safe(str(exc))
+                self.store.finish_attempt(attempt_id, "failed", safe)
+                return self._dead_letter(self._require_task(task.task_id), safe)
             self.store.finish_attempt(attempt_id, "succeeded", "acked")
             self.store.update_task(
                 task.task_id,
@@ -501,21 +504,189 @@ class Bridge:
         return self._dead_letter(self._require_task(task.task_id), "retry limit reached")
 
     def _dead_letter(self, task: Task, reason: str) -> Task:
-        self.store.update_task(task.task_id, status="failed", delivery="dead_letter", last_error=reason)
-        self.store.add_dead_letter(task_id=task.task_id, reason=reason)
-        self.store.audit.write("task.dead_letter", task_id=task.task_id, detail={"reason": reason})
+        safe = self._safe(reason)
+        self.store.update_task(task.task_id, status="failed", delivery="dead_letter", last_error=safe)
+        self.store.add_dead_letter(task_id=task.task_id, reason=safe)
+        self.store.audit.write("task.dead_letter", task_id=task.task_id, detail={"reason": safe})
+        self._notify("failed", task.task_id)
         return self._require_task(task.task_id)
 
-    def _verify(self, raw_body: bytes, signature: str | None) -> None:
-        if self.config.settings.allow_unsigned:
-            return
-        secret = os.environ.get(self.config.settings.webhook_secret_env, "")
-        if not secret:
-            raise SignatureError(
-                f"set {self.config.settings.webhook_secret_env} or the bridge will refuse events"
+    def _safe(self, text: str) -> str:
+        return self.redactor.redact(text)[:500]
+
+    def _notify(self, kind: str, task_id: str, event_id: str | None = None) -> None:
+        self.notifier.emit(kind=kind, task_id=task_id, event_id=event_id, detail={"kind": kind})
+
+    def ingest_bytes(
+        self,
+        raw_body: bytes,
+        *,
+        signature: str | None,
+        timestamp: str | None,
+        instance_id: str | None,
+        now: datetime | None = None,
+    ) -> IngestResult:
+        if len(raw_body) > MAX_BODY_BYTES:
+            raise PayloadError("body is too large")
+        current = now or utc_now()
+        self._verify(raw_body, signature=signature, timestamp=timestamp, instance_id=instance_id, now=current)
+        try:
+            payload = json.loads(raw_body.decode("utf-8"))
+        except (UnicodeError, json.JSONDecodeError) as exc:
+            raise PayloadError("body is not UTF-8 JSON") from exc
+        event = extract_event(payload)
+        if not dev_unsigned(self.config.settings) and event.instance_id != instance_id:
+            raise SignatureError("signature rejected")
+        digest = hashlib.sha256(raw_body).hexdigest()
+        existing = self.store.get_event(event.event_id)
+        if existing:
+            self.store.bump_duplicate(event.event_id)
+            self.store.audit.write("event.duplicate", event_id=event.event_id)
+            task = self.store.get_task(existing["task_id"]) if existing.get("task_id") else None
+            return IngestResult(
+                event_id=event.event_id,
+                duplicate=True,
+                rejected=existing["disposition"] == "rejected",
+                applied=False,
+                reason=existing.get("reject_reason"),
+                task_id=existing.get("task_id"),
+                status=task.status if task else None,
+                evidence_missing=not json.loads(existing["evidence_json"] or "[]"),
             )
-        if not signatures_match(secret, raw_body, signature):
-            raise SignatureError("webhook signature does not match")
+        problems = list(event.problems)
+        problems.extend(self._target_problems(event))
+        if problems:
+            reason = "; ".join(problems)
+            claimed = self.store.begin_event(
+                **self._event_fields(event, digest, disposition="rejected", reason=reason, applied=False)
+            )
+            if claimed == "duplicate":
+                return self._duplicate_result(event)
+            self.store.add_dead_letter(event_id=event.event_id, reason=reason)
+            self.store.audit.write("event.rejected", event_id=event.event_id, detail={"reason": reason})
+            return IngestResult(
+                event_id=event.event_id,
+                duplicate=False,
+                rejected=True,
+                applied=False,
+                reason=reason,
+                task_id=None,
+                status=None,
+                evidence_missing=event.evidence_missing,
+            )
+        task = self._locate_task(event)
+        claimed = self.store.begin_event(
+            **self._event_fields(
+                event,
+                digest,
+                disposition="accepted",
+                reason=None,
+                applied=False,
+                task_id=task.task_id if task else None,
+            )
+        )
+        if claimed == "duplicate":
+            return self._duplicate_result(event)
+        applied = False
+        status = task.status if task else None
+        if task is not None:
+            status, applied = self._apply_event(task, event)
+        body = render_summary(event, task_status=status, applied=applied)
+        bound_task = task.task_id if task else None
+        self.store.insert_summary(
+            task_id=bound_task,
+            event_id=event.event_id,
+            body=body,
+            evidence_missing=event.evidence_missing,
+        )
+        self.store.audit.write(
+            "event.accepted",
+            event_id=event.event_id,
+            task_id=bound_task,
+            detail={"applied": applied, "event_type": event.event_type},
+        )
+        if applied and status in {"awaiting_review", "failed", "canceled"}:
+            self._notify(status, bound_task or "", event.event_id)
+        return IngestResult(
+            event_id=event.event_id,
+            duplicate=False,
+            rejected=False,
+            applied=applied,
+            reason=None,
+            task_id=bound_task,
+            status=status,
+            evidence_missing=event.evidence_missing,
+        )
+
+    def _verify(
+        self,
+        raw_body: bytes,
+        *,
+        signature: str | None,
+        timestamp: str | None,
+        instance_id: str | None,
+        now: datetime,
+    ) -> None:
+        if dev_unsigned(self.config.settings):
+            return
+        instance = self.config.instance(instance_id or "")
+        secret = ""
+        if instance is not None:
+            secret = os.environ.get(instance.event_secret_env, "")
+        verify_request(
+            secret=secret,
+            timestamp=timestamp,
+            instance_id=instance_id,
+            body=raw_body,
+            signature=signature,
+            now=now,
+            window_seconds=self.config.settings.signature_window_seconds,
+        )
+
+    def _event_fields(
+        self,
+        event: ExtractedEvent,
+        digest: str,
+        *,
+        disposition: str,
+        reason: str | None,
+        applied: bool,
+        task_id: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "event_id": event.event_id,
+            "event_type": event.event_type,
+            "occurred_at": event.occurred_at,
+            "instance_id": event.instance_id,
+            "workspace": event.workspace,
+            "executor": event.executor,
+            "task_id": task_id,
+            "session_id": event.session_id,
+            "ticket_id": event.ticket_id,
+            "run_id": event.run_id,
+            "commit_sha": event.commit_sha,
+            "evidence": event.evidence,
+            "payload_sha256": digest,
+            "disposition": disposition,
+            "reject_reason": reason,
+            "applied": applied,
+        }
+
+    def _duplicate_result(self, event: ExtractedEvent) -> IngestResult:
+        self.store.audit.write("event.duplicate", event_id=event.event_id)
+        existing = self.store.get_event(event.event_id) or {}
+        task = self.store.get_task(existing["task_id"]) if existing.get("task_id") else None
+        evidence = json.loads(existing.get("evidence_json") or "[]")
+        return IngestResult(
+            event_id=event.event_id,
+            duplicate=True,
+            rejected=existing.get("disposition") == "rejected",
+            applied=False,
+            reason=existing.get("reject_reason"),
+            task_id=existing.get("task_id"),
+            status=task.status if task else None,
+            evidence_missing=not evidence,
+        )
 
     def _target_problems(self, event: ExtractedEvent) -> list[str]:
         problems: list[str] = []
@@ -532,8 +703,12 @@ class Bridge:
         return problems
 
     def _locate_task(self, event: ExtractedEvent) -> Task | None:
+        def same(task: Task) -> bool:
+            return task.instance_id == event.instance_id and task.workspace == event.workspace
+
         if event.task_id:
-            return self.store.get_task(event.task_id)
+            task = self.store.get_task(event.task_id)
+            return task if task is not None and same(task) else None
         for column, value in (
             ("session_id", event.session_id),
             ("ticket_id", event.ticket_id),
@@ -541,7 +716,7 @@ class Bridge:
         ):
             if not value:
                 continue
-            matches = self.store.find_by(column, value)
+            matches = [task for task in self.store.find_by(column, value) if same(task)]
             for task in matches:
                 if task.status not in TERMINAL_STATUSES:
                     return task
@@ -550,14 +725,6 @@ class Bridge:
         return None
 
     def _apply_event(self, task: Task, event: ExtractedEvent) -> tuple[str, bool]:
-        if task.delivery == "drafted":
-            self.store.audit.write(
-                "event.ignored",
-                event_id=event.event_id,
-                task_id=task.task_id,
-                detail={"reason": "task was not sent"},
-            )
-            return task.status, False
         if event.instance_id != task.instance_id or event.workspace != task.workspace:
             self.store.audit.write(
                 "event.ignored",
@@ -572,6 +739,14 @@ class Bridge:
                 event_id=event.event_id,
                 task_id=task.task_id,
                 detail={"reason": "executor does not match the task"},
+            )
+            return task.status, False
+        if not _event_may_touch(task, event):
+            self.store.audit.write(
+                "event.ignored",
+                event_id=event.event_id,
+                task_id=task.task_id,
+                detail={"reason": "event cannot grant execution or acceptance"},
             )
             return task.status, False
         if event.event_type == "cancel_ack":
@@ -591,7 +766,7 @@ class Bridge:
             )
             return task.status, False
         desired = EVENT_TARGET_STATUS[event.event_type or ""]
-        if desired is None:
+        if desired is None or desired == "done":
             return task.status, False
         if desired == task.status:
             return task.status, True
@@ -603,7 +778,21 @@ class Bridge:
                 detail={"reason": f"cannot move {task.status} -> {desired}"},
             )
             return task.status, False
+        before = {
+            "objective": task.objective,
+            "scope": task.scope,
+            "acceptance": task.acceptance,
+            "mandate": task.mandate,
+        }
         self.store.update_task(task.task_id, status=desired)
+        after = self._require_task(task.task_id)
+        if (
+            after.objective != before["objective"]
+            or after.scope != before["scope"]
+            or after.acceptance != before["acceptance"]
+            or after.mandate != before["mandate"]
+        ):
+            raise BridgeError("event changed mandate or scope")
         self.store.audit.write(
             "task.transition",
             task_id=task.task_id,
@@ -658,11 +847,27 @@ def open_bridge(config: Config, data_dir: Path, *, adapters: dict[str, Any] | No
                     instance.id,
                     data_dir / "adapters" / f"fake-{instance.id}.json",
                 )
+            elif instance.adapter == "headless_cli":
+                adapters[instance.id] = HeadlessCliAdapter(
+                    instance,
+                    data_dir / "adapters" / f"headless-{instance.id}.json",
+                    data_dir=data_dir,
+                )
             else:
                 adapters[instance.id] = HarnessAdapter(instance.id, instance.auth_env)
-    bridge = Bridge(config, store, adapters)
+    bridge = Bridge(config, store, adapters, data_dir=data_dir)
     bridge.recovery_notes = bridge.recover()
     return bridge
+
+
+def _event_may_touch(task: Task, event: ExtractedEvent) -> bool:
+    """Events never accept work, never send work, and never move a draft."""
+
+    if event.event_type == "cancel_ack":
+        return task.status == "canceled"
+    if task.delivery == "acked":
+        return True
+    return task.delivery == "in_flight" and event.event_type in {"started", "error", "exited"}
 
 
 def _dispatch_request(task: Task) -> DispatchRequest:

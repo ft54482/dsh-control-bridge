@@ -38,6 +38,7 @@ class FakeAdapter:
         self.cancel_confirms = cancel_confirms
         self.crash_after_accept = crash_after_accept
         self.calls: list[tuple[str, str]] = []
+        self.requests: list[DispatchRequest] = []
         self.starts = 0
         self._issued: dict[str, dict[str, str | None]] = {}
         self._load()
@@ -48,6 +49,7 @@ class FakeAdapter:
                 f"fake adapter {self.instance_id} refused instance {request.instance_id}"
             )
         self.calls.append(("dispatch", request.task_id))
+        self.requests.append(request)
         existing = self._issued.get(request.task_id)
         if existing is not None:
             return _result(existing)

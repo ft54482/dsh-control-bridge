@@ -1,12 +1,9 @@
-"""Skeleton for a future documented DeepSeek Harness adapter.
+"""Skeleton. It records the declared local facts and does not call them.
 
-This class does not call a vendor API. Public material describes ordinary
-sessions and a longer-running SuperAgent path, but this repository does not
-ship a verified request shape for creating a session, opening a SuperAgent
-ticket, canceling either one, or reading evidence. Those stay probe items.
-
-Do not point this adapter at an undocumented panel route and treat it as
-supported. Drafts still work, because drafting never leaves the bridge.
+The observed SuperAgent plugin exposes a localhost management API. That API
+is not an ordinary-session dispatch API, and this class does not request it.
+The desktop CLI exists, but its --help output has not been verified, so this
+class does not spawn it. Harness webhook inbound is not a supported source.
 """
 
 from __future__ import annotations
@@ -19,13 +16,14 @@ from dsh_control_bridge.adapters.base import (
     DispatchRequest,
     DispatchResult,
 )
+from dsh_control_bridge.drivers.contract import DECLARED_FACTS
 from dsh_control_bridge.errors import ProbeRequired
 
 PROBE_ITEMS = (
-    "documented_session_open_or_resume",
-    "documented_superagent_ticket_and_run",
-    "documented_cancel",
-    "documented_event_signature",
+    "ordinary_session_request",
+    "cli_help_verified",
+    "documented_cancel_for_ordinary_session",
+    "event_signature_compatibility",
     "documented_evidence_read",
 )
 
@@ -44,7 +42,11 @@ class HarnessAdapter:
         return bool(os.environ.get(self.auth_env))
 
     def dispatch(self, request: DispatchRequest) -> DispatchResult:
+        del request
         raise ProbeRequired(self.probe_items)
+
+    def facts(self) -> dict:
+        return DECLARED_FACTS
 
     def cancel(self, request: CancelRequest) -> CancelResult:
         raise ProbeRequired(self.probe_items)

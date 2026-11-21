@@ -3,11 +3,17 @@ import threading
 from urllib.request import Request, urlopen
 
 from dsh_control_bridge.http_server import make_server
-from dsh_control_bridge.signing import signature_header
+from dsh_control_bridge.models import utc_now
+from dsh_control_bridge.signing import sign_request
+from tests.conftest import LOCAL_SECRET
 
 
-def _post(port: int, body: bytes, signature: str | None):
-    headers = {"Content-Type": "application/json"}
+def _post(port: int, body: bytes, signature: str | None, timestamp: str, instance: str = "local-desktop"):
+    headers = {
+        "Content-Type": "application/json",
+        "X-DSH-Timestamp": timestamp,
+        "X-DSH-Instance": instance,
+    }
     if signature is not None:
         headers["X-DSH-Signature"] = signature
     request = Request(
@@ -41,14 +47,16 @@ def test_webhook_rejects_a_bad_signature_then_accepts_the_same_body(bridge):
         }
     ).encode("utf-8")
     try:
-        status, payload = _post(port, body, "sha256=deadbeef")
+        stamp = str(int(utc_now().timestamp()))
+        status, payload = _post(port, body, "sha256=deadbeef", stamp)
         assert status == 401
         assert bridge.store.get_event("evt_http_1") is None
-        status, payload = _post(port, body, signature_header("test-secret", body))
+        good = sign_request(LOCAL_SECRET, stamp, "local-desktop", body)
+        status, payload = _post(port, body, good, stamp)
         assert status == 202
         assert payload["rejected"] is False
         assert bridge.store.get_event("evt_http_1")["duplicate_count"] == 0
-        status, again = _post(port, body, signature_header("test-secret", body))
+        status, again = _post(port, body, good, stamp)
         assert status == 200
         assert again["duplicate"] is True
         health = urlopen(f"http://127.0.0.1:{port}/health")

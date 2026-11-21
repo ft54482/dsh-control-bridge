@@ -1,13 +1,17 @@
 # 多实例配置样例。
 # 端点是文档占位，fake 适配器不会连接它们。
 # 不要把真实内网地址、令牌或客户路径写进这个文件。
-# 密钥放在环境变量，或放在仓库之外的 ~/.dsh-control-bridge/credentials.toml。
+# 每个实例使用自己的事件密钥环境变量。绝对安装路径留在本机，不要提交。
 
 [bridge]
-webhook_secret_env = "DSH_BRIDGE_WEBHOOK_SECRET"
+signature_window_seconds = 300
 allow_unsigned = false
 
+[notify]
+mode = "off"
+
 # 本机 Desktop 与远程 Harness 必须分成两个实例，即使工作区名字相同。
+# 不要把 profile 名字写进这里来猜测工作区归属。
 
 [[instances]]
 id = "local-desktop"
@@ -16,6 +20,7 @@ kind = "desktop"
 adapter = "fake"
 base_url = "http://127.0.0.1:9"
 auth_env = "DSH_LOCAL_DESKTOP_TOKEN"
+event_secret_env = "DSH_LOCAL_DESKTOP_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"
@@ -32,6 +37,7 @@ kind = "remote"
 adapter = "fake"
 base_url = "http://127.0.0.1:10"
 auth_env = "DSH_LAB_SERVER_TOKEN"
+event_secret_env = "DSH_LAB_SERVER_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"

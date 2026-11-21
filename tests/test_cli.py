@@ -77,7 +77,7 @@ def test_cli_draft_then_status(tmp_path, capsys):
 def test_cli_tools_match_the_documented_catalog():
     catalog = tool_catalog()
     names = [tool["name"] for tool in catalog["tools"]]
-    assert names == ["inbox", "acknowledge", "dispatch", "status", "cancel"]
+    assert names == ["inbox", "acknowledge", "dispatch", "status", "cancel", "diagnose"]
     documented = json.loads((ROOT / "docs" / "mcp-tools.json").read_text(encoding="utf-8"))
     assert documented == catalog
 

@@ -50,10 +50,7 @@ def test_inline_secret_is_rejected(tmp_path: Path):
 
 def test_auto_send_is_rejected(tmp_path: Path):
     text = (ROOT / "examples" / "config.example.toml").read_text(encoding="utf-8")
-    text = text.replace(
-        'webhook_secret_env = "DSH_BRIDGE_WEBHOOK_SECRET"',
-        'webhook_secret_env = "DSH_BRIDGE_WEBHOOK_SECRET"\nauto_send = true',
-    )
+    text = text.replace("allow_unsigned = false", "allow_unsigned = false\nauto_send = true")
     path = tmp_path / "bridge.toml"
     path.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigError) as caught:

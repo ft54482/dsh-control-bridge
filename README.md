@@ -127,21 +127,30 @@ python examples/e2e_fake.py
 dsh-bridge --config examples/config.example.toml --data-dir /tmp/dsh-bridge-demo check
 ```
 
-本地事件入口：
+本地事件入口只绑定本机回环地址。每个实例使用自己的事件密钥：
 
 ```bash
-export DSH_BRIDGE_WEBHOOK_SECRET='choose-a-local-secret'
+export DSH_LOCAL_DESKTOP_EVENT_SECRET='choose-a-local-secret'
+export DSH_LAB_SERVER_EVENT_SECRET='choose-another-local-secret'
 dsh-bridge --config examples/config.example.toml --data-dir /tmp/dsh-bridge-demo serve
 ```
 
-另一个终端用同一份字节计算签名。这个密钥只存在于当前环境，不要写进仓库：
+另一个终端用同一份字节计算签名。密钥只存在于当前环境，不要写进仓库：
 
 ```bash
-export DSH_BRIDGE_WEBHOOK_SECRET='choose-a-local-secret'
-SIG=$(dsh-bridge sign < examples/event.stage_submitted.json)
+export DSH_LOCAL_DESKTOP_EVENT_SECRET='choose-a-local-secret'
+dsh-bridge --config examples/config.example.toml sign --instance local-desktop \
+  < examples/event.stage_submitted.json
+```
+
+`sign` 打印三行头：`X-DSH-Timestamp`、`X-DSH-Instance`、`X-DSH-Signature`。签名覆盖 `v1`、时间戳、实例 id 和正文。时间戳超出配置窗口（默认 300 秒，最大 900 秒）会被拒绝，旧报文不能隔天重放。
+
+```bash
 curl -sS -X POST http://127.0.0.1:8787/v1/events \
   -H "Content-Type: application/json" \
-  -H "X-DSH-Signature: $SIG" \
+  -H "X-DSH-Timestamp: <上面打印的时间戳>" \
+  -H "X-DSH-Instance: local-desktop" \
+  -H "X-DSH-Signature: <上面打印的签名>" \
   --data-binary @examples/event.stage_submitted.json
 ```
 
@@ -153,8 +162,11 @@ curl -sS -X POST http://127.0.0.1:8787/v1/events \
 
 ```toml
 [bridge]
-webhook_secret_env = "DSH_BRIDGE_WEBHOOK_SECRET"
+signature_window_seconds = 300
 allow_unsigned = false
+
+[notify]
+mode = "off"
 
 [[instances]]
 id = "local-desktop"
@@ -163,6 +175,7 @@ kind = "desktop"
 adapter = "fake"          # fake 或 harness
 base_url = "http://127.0.0.1:9"
 auth_env = "DSH_LOCAL_DESKTOP_TOKEN"
+event_secret_env = "DSH_LOCAL_DESKTOP_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"
@@ -175,6 +188,7 @@ kind = "remote"
 adapter = "fake"
 base_url = "http://127.0.0.1:10"
 auth_env = "DSH_LAB_SERVER_TOKEN"
+event_secret_env = "DSH_LAB_SERVER_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"
@@ -184,11 +198,12 @@ description = "另一套实例上的工作区"
 约束：
 
 - 实例 id、工作区名是小写 slug。工作区只在所属实例内唯一，不同实例可以同名。
-- 两个实例不能共用同一个 `base_url`，也不能共用同一个 `auth_env`。
+- 两个实例不能共用 `base_url`、`auth_env` 或 `event_secret_env`。事件密钥也不能复用登录凭证的变量名。
 - 配置里不能出现 `token`、`secret`、`password` 或其他密钥字段，也不能写 `auto_send`。默认就是起草；发送是每一次单独的决定。
-- `adapter = "fake"` 用于本地和 CI。`adapter = "harness"` 可以起草，但发送会被拒绝，直到有一份核对过的公开接口。见 [docs/local-harness.md](docs/local-harness.md)。
+- `allow_unsigned = true` 本身不会关闭验签。只有同时设置环境变量 `DSH_BRIDGE_DEV_UNSIGNED=1` 才在本机测试时跳过签名。
+- `adapter = "fake"` 用于本地自检和 CI。`adapter = "harness"` 可以起草，但发送会被拒绝。见 [docs/connector-contract.md](docs/connector-contract.md)。
 
-批准发送时另附 mandate，样例是 [`examples/mandate.example.toml`](examples/mandate.example.toml)。允许的动作只有 `dispatch` 和 `retry`。发布、合并、改验收、扩大范围、增加预算都不是这座桥能批准的动作。
+批准发送时另附 mandate，样例是 [`examples/mandate.example.toml`](examples/mandate.example.toml)。它必须写明 `instance_id`、`workspace` 和 `executor`，并且和任务上的目标一致。允许的动作只有 `dispatch` 和 `retry`。`budget_cap` 只是一句额度声明，不能写成动作。发布、合并、改验收、扩大范围、增加预算都不是这座桥能批准的动作。来源只能是操作者的 mandate 文件或 MCP 工具参数，不能来自事件正文。
 
 ## 命令
 
@@ -210,23 +225,36 @@ dsh-bridge --config bridge.toml accept TASK_ID
 
 `dispatch` 不写 `--mode` 时是 `draft`。把样例复制成你自己的 `bridge.toml`；下面的命令用这个名字代表它。新建任务必须给出 instance、workspace 和 executor。`--json` 打印机器可读结果。`next` 只起草下一阶段，不发送。`accept` 才把待验收标成 `done`。
 
-协调代理可以读同一组工具描述：
+`dsh-bridge mcp` 是实际的 stdio MCP 服务：`initialize`、`tools/list`、`tools/call`。目录写在 [`docs/mcp-tools.json`](docs/mcp-tools.json)，和服务器返回的是同一份。工具调用默认起草。`mode=send` 必须在参数里带上操作者的 mandate，事件正文不能充当这个参数。
 
-```bash
-dsh-bridge tools
+## Windows 快速安装
+
+非开发使用不需要克隆后再手写虚拟环境。在仓库根目录用 Windows PowerShell：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Start-DshBridge.ps1
 ```
 
-描述文件也放在 [`docs/mcp-tools.json`](docs/mcp-tools.json)。这是工具清单，不是第二个会自动派工的运行时。
+安装脚本检查 Python 3.11+，在 `%LOCALAPPDATA%\dsh-control-bridge` 创建虚拟环境，安装本仓库（没有额外运行时依赖），复制样例配置（不覆盖已有文件），然后运行 `self-check` 和 `diagnose`。自检只用内置 fake 适配器。它不搜索本机的 Harness 安装目录，也不请求管理端口。`Start-DshBridge.ps1 -Serve` 才在 `127.0.0.1:8787` 上监听。
 
 ## 事件
 
-`POST /v1/events` 要求头 `X-DSH-Signature: sha256=<hmac>`，密钥来自 `webhook_secret_env` 指向的环境变量。请求体上限 64 KiB。
+`POST /v1/events` 要求三个头：`X-DSH-Timestamp`、`X-DSH-Instance`、`X-DSH-Signature`。密钥来自该实例的 `event_secret_env`。一台实例的密钥不能给另一台实例签名。请求体上限 64 KiB。
 
 只提取这些字段：`event_id`、`event_type`、`occurred_at`、`instance_id`、`workspace`、`executor`、`task_id`、`session_id`、`ticket_id`、`run_id`、`commit_sha`、`evidence`。其余内容不执行、不写入数据库、不写进摘要。证据引用必须是相对路径；桥不会按 payload 去打开文件。
 
-`event_type` 可以是 `stage_submitted`、`error`、`awaiting_input`、`exited`、`started`、`cancel_ack`。重复的 `event_id` 记一次重复并保持原状态。签名错误不会占用这个 id。未登记的实例或工作区进入死信。
+事件不能把任务标成 `done`，不能创建或改写 mandate，不能把草稿说成已经在执行，也不能借 session id 碰到另一个实例或工作区的任务。`cancel_ack` 只确认本地已经发起的取消。`unconfirmed` 表示远端取消没有得到确认，不能当成已经停止或已经交付。
 
-进程在“已批准但还没写回远程 id”时停掉的话，下次启动会按 `task_id` 续上。fake 适配器对同一个 `task_id` 返回同一组 id。mandate 过期之后不再续发。
+`event_type` 可以是 `stage_submitted`、`error`、`awaiting_input`、`exited`、`started`、`cancel_ack`。重复的 `event_id` 记一次重复并保持原状态。签名错误或超出时间窗不会占用这个 id。未登记的实例或工作区进入死信。
+
+进程在“已批准但还没写回远程 id”时停掉的话，下次启动会按 `task_id` 续上，并且只有一个恢复过程能领走这次发送。fake 适配器对同一个 `task_id` 返回同一组 id。mandate 过期、来源不是操作者，或目标和任务不一致时，不再续发。
+
+通知默认 `off`。`file` 把脱敏后的记录写进数据目录。`webhook` 只有在配置了 URL 且主机在 `allowed_hosts` 里时才会发送；失败记为 `failed`，不会被写成已送达。审计和错误文本会去掉密钥形状的片段。
+
+## 本机连接预检
+
+`dsh-bridge diagnose` 和 `dsh-bridge preflight` 只读配置和一份脱敏事实文件，不访问网络。当前 `connected_to_harness` 固定为 false。已记录的只读事实和仍缺的证据在 [docs/connector-contract.md](docs/connector-contract.md)。普通会话接口还没有证据。SuperAgent 文档里的 `127.0.0.1` 管理路由是管理面，本仓库不调用它，也不把它当成派工接口。Harness 主动的 webhook 回程目前没有被当成已支持的入站。
 
 ## 安全
 
@@ -241,18 +269,20 @@ dsh-bridge tools
 | 能力 | 状态 |
 | --- | --- |
 | 多实例、多工作区配置，以及无效配置的明确错误 | 已实现 |
-| 签名校验、事件去重、不可信 payload | 已实现 |
+| 带时间窗的按实例签名、事件去重、不可信 payload | 已实现 |
 | 任务状态机、SQLite、JSONL 审计、有限重试和死信 | 已实现 |
-| 默认起草；mandate 仍有效才发送 | 已实现 |
+| 默认起草；mandate 绑定目标、期限和动作后才发送 | 已实现 |
 | ordinary_session 与 superagent 分流 | 已实现 |
 | 取消，以及远端未确认时的 `unconfirmed` | 已实现 |
-| 进程中断后的 in-flight 恢复 | 已实现 |
+| 进程中断后的 in-flight 恢复，同一次发送只会被领走一次 | 已实现 |
 | fake / dry-run 适配器，CI 不连接真实 Harness | 已实现 |
-| CLI：`inbox`、`acknowledge`、`dispatch`、`status`、`cancel` | 已实现 |
-| DeepSeek Harness 的真实创建、续跑和取消 | 探测项，适配器拒绝发送 |
+| CLI，以及 stdio MCP（`dsh-bridge mcp`） | 已实现 |
+| 本地自检、diagnose、preflight | 已实现 |
+| 通知出站：默认关闭；失败状态可查询 | 已实现 |
+| DeepSeek Harness 的真实创建、续跑和取消 | 未实现。管理面事实已记录，普通会话证据仍缺 |
 | 看板、托管网关、A2A 协议、商业 Harness CI 插件 | 不在本仓库 |
 
-真实下发还缺一份核对过的公开接口：如何打开或续上普通会话、如何创建 SuperAgent 的 ticket 与 run、如何取消、事件签名以哪份文档为准、证据文件从哪里读。在这之前，`harness` 适配器不会编造请求，也不会去调用未公开的面板接口。细节在 [docs/adapters.md](docs/adapters.md)。
+细节在 [docs/headless-cli.md](docs/headless-cli.md) 和 [docs/connector-contract.md](docs/connector-contract.md)。`connected_to_harness` 仍是 false：headless 进程默认不启动，SuperAgent 长任务继续拒绝。
 
 恢复语义是至少一次：适配器必须按 `task_id` 去重。首版不计量厂商额度，`budget_cap` 只是写进 mandate 的上限声明。
 

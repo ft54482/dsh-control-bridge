@@ -15,10 +15,11 @@ from dsh_control_bridge.bridge import open_bridge
 from dsh_control_bridge.config import load_config
 from dsh_control_bridge.errors import TargetRejected
 from dsh_control_bridge.models import Mandate, format_utc, utc_now
-from dsh_control_bridge.signing import signature_header
+from dsh_control_bridge.signing import sign_request
 
 CANARY = "PLEASE_EXEC_CANARY"
-SECRET_ENV = "DSH_BRIDGE_WEBHOOK_SECRET"
+LOCAL_SECRET = "demo-local-event-secret"
+LAB_SECRET = "demo-lab-event-secret"
 
 
 def run_demo(root: Path) -> dict[str, object]:
@@ -29,8 +30,10 @@ def run_demo(root: Path) -> dict[str, object]:
     config_path = root / "bridge.toml"
     data_dir = root / "data"
     config_path.write_text(_config_text(), encoding="utf-8")
-    previous = os.environ.get(SECRET_ENV)
-    os.environ[SECRET_ENV] = "demo-secret-not-a-credential"
+    previous_local = os.environ.get("DSH_LOCAL_DESKTOP_EVENT_SECRET")
+    previous_lab = os.environ.get("DSH_LAB_SERVER_EVENT_SECRET")
+    os.environ["DSH_LOCAL_DESKTOP_EVENT_SECRET"] = LOCAL_SECRET
+    os.environ["DSH_LAB_SERVER_EVENT_SECRET"] = LAB_SECRET
     try:
         bridge = open_bridge(load_config(config_path), data_dir)
         try:
@@ -38,10 +41,8 @@ def run_demo(root: Path) -> dict[str, object]:
         finally:
             bridge.store.close()
     finally:
-        if previous is None:
-            os.environ.pop(SECRET_ENV, None)
-        else:
-            os.environ[SECRET_ENV] = previous
+        _restore("DSH_LOCAL_DESKTOP_EVENT_SECRET", previous_local)
+        _restore("DSH_LAB_SERVER_EVENT_SECRET", previous_lab)
 
 
 def _story(bridge) -> dict[str, object]:
@@ -95,8 +96,14 @@ def _story(bridge) -> dict[str, object]:
         },
         ensure_ascii=False,
     ).encode("utf-8")
-    signature = signature_header(os.environ[SECRET_ENV], body)
-    ingested = bridge.ingest_bytes(body, signature)
+    timestamp = str(int(utc_now().timestamp()))
+    signature = sign_request(LOCAL_SECRET, timestamp, "local-desktop", body)
+    ingested = bridge.ingest_bytes(
+        body,
+        signature=signature,
+        timestamp=timestamp,
+        instance_id="local-desktop",
+    )
     reviewed = bridge.store.get_task(approved.task_id)
     summary = bridge.store.summaries_for(approved.task_id)[-1]["body"]
     audit = bridge.store.audit.path.read_text(encoding="utf-8")
@@ -157,7 +164,7 @@ def _story(bridge) -> dict[str, object]:
         title="拆分并持续推进的长程示例",
         objective="用 SuperAgent 路径跟踪一个需要独立交付的多步骤示例。",
         mode="send",
-        mandate=_mandate(),
+        mandate=_mandate_for("lab-server", "broadcast-cs", "superagent"),
     )
     _check(super_task.status == "running", "superagent task should be running")
     _check(super_task.ticket_id is not None and super_task.run_id is not None, "superagent ids")
@@ -188,6 +195,10 @@ def _story(bridge) -> dict[str, object]:
 def _mandate() -> Mandate:
     expires = format_utc(utc_now() + timedelta(days=2))
     return Mandate(
+        instance_id="local-desktop",
+        workspace="broadcast-cs",
+        executor="ordinary_session",
+        task_id=None,
         objective="完成示例中已经写明的那一步。",
         scope="只处理当前任务书。不发布，不合并，不扩大范围，不增加预算。",
         acceptance="执行器返回后进入待验收。负责人接受之前不算交付。",
@@ -198,11 +209,31 @@ def _mandate() -> Mandate:
     )
 
 
+def _mandate_for(instance_id: str, workspace: str, executor: str) -> Mandate:
+    base = _mandate()
+    return Mandate(
+        instance_id=instance_id,
+        workspace=workspace,
+        executor=executor,
+        task_id=None,
+        objective=base.objective,
+        scope=base.scope,
+        acceptance=base.acceptance,
+        budget_cap=base.budget_cap,
+        retry_limit=base.retry_limit,
+        expires_at=base.expires_at,
+        allowed_actions=base.allowed_actions,
+    )
+
+
 def _config_text() -> str:
     return """
 [bridge]
-webhook_secret_env = "DSH_BRIDGE_WEBHOOK_SECRET"
+signature_window_seconds = 300
 allow_unsigned = false
+
+[notify]
+mode = "off"
 
 [[instances]]
 id = "local-desktop"
@@ -211,6 +242,7 @@ kind = "desktop"
 adapter = "fake"
 base_url = "http://127.0.0.1:9"
 auth_env = "DSH_LOCAL_DESKTOP_TOKEN"
+event_secret_env = "DSH_LOCAL_DESKTOP_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"
@@ -227,11 +259,19 @@ kind = "remote"
 adapter = "fake"
 base_url = "http://127.0.0.1:10"
 auth_env = "DSH_LAB_SERVER_TOKEN"
+event_secret_env = "DSH_LAB_SERVER_EVENT_SECRET"
 
 [[instances.workspaces]]
 name = "broadcast-cs"
 description = "与本机同名，但是另一套实例上的工作区"
 """.strip() + "\n"
+
+
+def _restore(name: str, value: str | None) -> None:
+    if value is None:
+        os.environ.pop(name, None)
+    else:
+        os.environ[name] = value
 
 
 def _stored_bytes(db_path: Path) -> bytes:

@@ -1,0 +1,33 @@
+# Headless CLI example. spawn is false, so nothing is executed.
+# Replace the paths locally. Do not point cwd at a desktop workspace that is already open.
+# credential_envs names variables. It does not contain secret values.
+
+[bridge]
+signature_window_seconds = 300
+allow_unsigned = false
+
+[notify]
+mode = "off"
+
+[[instances]]
+id = "local-headless"
+label = "本机 headless CLI（与 desktop 会话分开）"
+kind = "desktop"
+adapter = "headless_cli"
+base_url = "http://127.0.0.1:9"
+auth_env = "DSH_LOCAL_HEADLESS_TOKEN"
+event_secret_env = "DSH_LOCAL_HEADLESS_EVENT_SECRET"
+executable = "C:/Tools/dsh.cmd"
+spawn = false
+timeout_seconds = 0
+credential_envs = ["DEEPSEEK_API_KEY"]
+
+[[instances.workspaces]]
+name = "broadcast-cs"
+description = "示例绝对目录，不代表真实业务路径"
+cwd = "C:/dsh-workspaces/broadcast-cs"
+
+[[instances.workspaces]]
+name = "auto-video"
+description = "另一个绝对目录。不能和 broadcast-cs 共用。"
+cwd = "C:/dsh-workspaces/auto-video"

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -31,17 +31,45 @@ _FORBIDDEN = frozenset(
     }
 )
 _AUTO_SEND = frozenset({"default_mode", "default_dispatch", "auto_dispatch", "auto_send"})
-_BRIDGE_KEYS = frozenset({"webhook_secret_env", "allow_unsigned"})
-_INSTANCE_KEYS = frozenset({"id", "label", "kind", "adapter", "base_url", "auth_env", "workspaces"})
-_WORKSPACE_KEYS = frozenset({"name", "description"})
+_BRIDGE_KEYS = frozenset({"signature_window_seconds", "allow_unsigned"})
+_INSTANCE_KEYS = frozenset(
+    {
+        "id",
+        "label",
+        "kind",
+        "adapter",
+        "base_url",
+        "auth_env",
+        "event_secret_env",
+        "workspaces",
+        "executable",
+        "spawn",
+        "timeout_seconds",
+        "credential_envs",
+        "profile",
+    }
+)
+_NOTIFY_KEYS = frozenset({"mode", "file_name", "webhook_url", "allowed_hosts"})
+_FILE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+_WORKSPACE_KEYS = frozenset({"name", "description", "cwd"})
 _KINDS = frozenset({"desktop", "remote"})
-_ADAPTERS = frozenset({"fake", "harness"})
+_ADAPTERS = frozenset({"fake", "harness", "headless_cli"})
+_META = set('%&|<>^\r\n"!`')
 
 
 @dataclass(frozen=True)
 class Workspace:
     name: str
     description: str
+    cwd: str
+
+
+@dataclass(frozen=True)
+class NotifySettings:
+    mode: str
+    file_name: str
+    webhook_url: str
+    allowed_hosts: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -52,18 +80,24 @@ class Instance:
     adapter: str
     base_url: str
     auth_env: str
+    event_secret_env: str
     workspaces: dict[str, Workspace]
+    executable: str = ""
+    spawn: bool = False
+    timeout_seconds: int = 0
+    credential_envs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
 class BridgeSettings:
-    webhook_secret_env: str
+    signature_window_seconds: int
     allow_unsigned: bool
 
 
 @dataclass(frozen=True)
 class Config:
     settings: BridgeSettings
+    notify: NotifySettings
     instances: dict[str, Instance]
     path: Path
 
@@ -98,17 +132,26 @@ def load_config(path: Path) -> Config:
         raise ConfigError(["config root must be a table"])
     errors: list[str] = []
     _reject_forbidden(raw, "$", errors)
-    unknown_root = sorted(set(raw) - {"bridge", "instances"})
+    unknown_root = sorted(set(raw) - {"bridge", "instances", "notify"})
     for key in unknown_root:
         if key in _AUTO_SEND:
             errors.append(f"{key} is not allowed; tasks are drafted unless a person sends them")
         else:
             errors.append(f"unknown top-level field {key!r}")
     settings = _parse_bridge(raw.get("bridge", {}), errors)
+    notify = _parse_notify(raw.get("notify", {}), errors)
     instances = _parse_instances(raw.get("instances"), errors)
     if errors:
         raise ConfigError(errors)
-    return Config(settings=settings, instances=instances, path=path.resolve())
+    return Config(settings=settings, notify=notify, instances=instances, path=path.resolve())
+
+
+def dev_unsigned(settings: BridgeSettings) -> bool:
+    """Unsigned ingest is a local test switch, not a config-file choice by itself."""
+
+    import os
+
+    return settings.allow_unsigned and os.environ.get("DSH_BRIDGE_DEV_UNSIGNED") == "1"
 
 
 def _parse_bridge(raw: Any, errors: list[str]) -> BridgeSettings:
@@ -116,23 +159,67 @@ def _parse_bridge(raw: Any, errors: list[str]) -> BridgeSettings:
         raw = {}
     if not isinstance(raw, dict):
         errors.append("[bridge] must be a table")
-        return BridgeSettings("DSH_BRIDGE_WEBHOOK_SECRET", False)
+        return BridgeSettings(300, False)
     for key in sorted(set(raw) - _BRIDGE_KEYS):
-        if key in _AUTO_SEND:
+        if key in _AUTO_SEND or key == "webhook_secret_env":
             errors.append(
-                f"bridge.{key} is not allowed; the default is draft, and each send is a separate decision"
+                f"bridge.{key} is not allowed; each instance has its own event_secret_env, "
+                "and send is always an explicit decision"
             )
         else:
             errors.append(f"unknown bridge field {key!r}")
-    secret_env = raw.get("webhook_secret_env", "DSH_BRIDGE_WEBHOOK_SECRET")
-    if not isinstance(secret_env, str) or not _ENV.match(secret_env):
-        errors.append("bridge.webhook_secret_env must be an environment variable name")
-        secret_env = "DSH_BRIDGE_WEBHOOK_SECRET"
+    window = raw.get("signature_window_seconds", 300)
+    if isinstance(window, bool) or not isinstance(window, int) or not 30 <= window <= 900:
+        errors.append("bridge.signature_window_seconds must be an integer from 30 to 900")
+        window = 300
     allow = raw.get("allow_unsigned", False)
     if not isinstance(allow, bool):
         errors.append("bridge.allow_unsigned must be a boolean")
         allow = False
-    return BridgeSettings(webhook_secret_env=secret_env, allow_unsigned=allow)
+    return BridgeSettings(signature_window_seconds=window, allow_unsigned=allow)
+
+
+def _parse_notify(raw: Any, errors: list[str]) -> NotifySettings:
+    if raw is None:
+        raw = {}
+    if not isinstance(raw, dict):
+        errors.append("[notify] must be a table")
+        return NotifySettings("off", "notifications.jsonl", "", ())
+    for key in sorted(set(raw) - _NOTIFY_KEYS):
+        errors.append(f"unknown notify field {key!r}")
+    mode = raw.get("mode", "off")
+    if mode not in {"off", "file", "webhook"}:
+        errors.append("notify.mode must be off, file, or webhook")
+        mode = "off"
+    file_name = raw.get("file_name", "notifications.jsonl")
+    if not isinstance(file_name, str) or not _FILE_NAME.match(file_name):
+        errors.append("notify.file_name must be a file name inside the data directory")
+        file_name = "notifications.jsonl"
+    webhook_url = raw.get("webhook_url", "")
+    if not isinstance(webhook_url, str):
+        errors.append("notify.webhook_url must be a string")
+        webhook_url = ""
+    hosts_raw = raw.get("allowed_hosts", [])
+    hosts: list[str] = []
+    if hosts_raw and not isinstance(hosts_raw, list):
+        errors.append("notify.allowed_hosts must be a list")
+    elif isinstance(hosts_raw, list):
+        for host in hosts_raw:
+            if not isinstance(host, str) or not host or "/" in host or " " in host:
+                errors.append("notify.allowed_hosts entries must be hostnames")
+            else:
+                hosts.append(host)
+    if mode == "webhook":
+        parsed = urlparse(webhook_url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            errors.append("notify.webhook_url must be an http(s) URL when mode is webhook")
+        elif parsed.username or parsed.password:
+            errors.append("notify.webhook_url must not contain credentials")
+        elif parsed.hostname not in hosts:
+            errors.append("notify.webhook_url host must be listed in allowed_hosts")
+    elif webhook_url:
+        errors.append("notify.webhook_url is only allowed when mode is webhook")
+    return NotifySettings(mode=mode, file_name=file_name, webhook_url=webhook_url, allowed_hosts=tuple(hosts))
 
 
 def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
@@ -142,6 +229,7 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
     instances: dict[str, Instance] = {}
     urls: dict[str, str] = {}
     envs: dict[str, str] = {}
+    event_envs: dict[str, str] = {}
     for index, item in enumerate(raw):
         where = f"instances[{index}]"
         if not isinstance(item, dict):
@@ -189,7 +277,53 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
             )
         else:
             envs[auth_env] = instance_id
+        event_secret_env = item.get("event_secret_env")
+        if not isinstance(event_secret_env, str) or not _ENV.match(event_secret_env):
+            errors.append(f"{where}.event_secret_env must name an environment variable, not a secret")
+            event_secret_env = ""
+        elif event_secret_env in event_envs:
+            errors.append(
+                f"{where}.event_secret_env repeats {event_envs[event_secret_env]}; "
+                "each instance signs with its own secret"
+            )
+        elif event_secret_env in envs or event_secret_env == auth_env:
+            errors.append(f"{where}.event_secret_env must not reuse an auth_env")
+        else:
+            event_envs[event_secret_env] = instance_id
         workspaces = _parse_workspaces(item.get("workspaces"), where, errors)
+        profile = item.get("profile", "headless" if adapter == "headless_cli" else "")
+        if profile == "desktop" or (isinstance(profile, str) and profile.lower() == "desktop"):
+            errors.append(f"{where}.profile desktop cannot be booted by the CLI")
+            profile = ""
+        executable = item.get("executable", "")
+        if not isinstance(executable, str):
+            errors.append(f"{where}.executable must be a path string")
+            executable = ""
+        elif any(character in executable for character in _META):
+            errors.append(f"{where}.executable contains a shell metacharacter")
+            executable = ""
+        spawn = item.get("spawn", False)
+        if not isinstance(spawn, bool):
+            errors.append(f"{where}.spawn must be a boolean")
+            spawn = False
+        timeout = item.get("timeout_seconds", 0)
+        if isinstance(timeout, bool) or not isinstance(timeout, int) or timeout < 0 or timeout > 3600:
+            errors.append(f"{where}.timeout_seconds must be an integer from 0 to 3600")
+            timeout = 0
+        credential_envs = _parse_env_names(item.get("credential_envs", []), where, errors)
+        if adapter == "headless_cli":
+            if not executable:
+                errors.append(f"{where}.executable is required for headless_cli")
+            if spawn and timeout <= 0:
+                errors.append(f"{where}.timeout_seconds is required when spawn is true")
+            cwds = [workspace.cwd for workspace in workspaces.values()]
+            if any(not cwd for cwd in cwds):
+                errors.append(f"{where} headless workspaces require an absolute cwd")
+            normalized = [_normalize_cwd(cwd) for cwd in cwds if cwd]
+            if len(normalized) != len(set(normalized)):
+                errors.append(f"{where} headless workspaces must use distinct directories")
+        elif executable or spawn or credential_envs:
+            errors.append(f"{where} executable, spawn, and credential_envs belong only to headless_cli")
         instances[instance_id] = Instance(
             id=instance_id,
             label=str(label).strip(),
@@ -197,7 +331,12 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
             adapter=str(adapter),
             base_url=base_url,
             auth_env=auth_env,
+            event_secret_env=event_secret_env,
             workspaces=workspaces,
+            executable=executable,
+            spawn=spawn,
+            timeout_seconds=timeout,
+            credential_envs=tuple(credential_envs),
         )
     return instances
 
@@ -225,8 +364,37 @@ def _parse_workspaces(raw: Any, where: str, errors: list[str]) -> dict[str, Work
         if not isinstance(description, str) or len(description) > 300:
             errors.append(f"{spot}.description must be a short string")
             description = ""
-        found[name] = Workspace(name=name, description=description.strip())
+        cwd = item.get("cwd", "")
+        if not isinstance(cwd, str):
+            errors.append(f"{spot}.cwd must be a path string")
+            cwd = ""
+        elif cwd and not _is_absolute(cwd):
+            errors.append(f"{spot}.cwd must be an absolute directory")
+            cwd = ""
+        elif cwd and any(character in cwd for character in _META):
+            errors.append(f"{spot}.cwd contains a shell metacharacter")
+            cwd = ""
+        found[name] = Workspace(name=name, description=description.strip(), cwd=cwd)
     return found
+
+
+def _parse_env_names(raw: Any, where: str, errors: list[str]) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(item, str) and _ENV.match(item) for item in raw):
+        errors.append(f"{where}.credential_envs must be a list of environment variable names")
+        return []
+    return list(dict.fromkeys(raw))
+
+
+def _is_absolute(value: str) -> bool:
+    return Path(value).is_absolute() or PureWindowsPath(value).is_absolute()
+
+
+def _normalize_cwd(value: str) -> str:
+    if PureWindowsPath(value).is_absolute() and not Path(value).is_absolute():
+        return str(PureWindowsPath(value))
+    return str(Path(value))
 
 
 def _normalize_url(value: Any, where: str, errors: list[str]) -> str:

@@ -42,8 +42,12 @@ class AuditLog:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
+        self.redactor = None
 
     def write(self, kind: str, **detail: Any) -> None:
+        if self.redactor is not None:
+            kind = self.redactor.redact(kind)
+            detail = self.redactor.redact_obj(detail)
         record = {"ts": format_utc(utc_now()), "kind": kind, **detail}
         line = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         with self._lock:
@@ -138,6 +142,15 @@ class Store:
                 event_id TEXT,
                 body TEXT NOT NULL,
                 evidence_missing INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS notifications (
+                notification_id TEXT PRIMARY KEY,
+                task_id TEXT,
+                event_id TEXT,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL,
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
@@ -421,6 +434,110 @@ class Store:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT * FROM summaries WHERE task_id=? ORDER BY created_at",
+                (task_id,),
+            ).fetchall()
+        return [_plain(row) for row in rows]
+
+    def begin_event(self, **fields: Any) -> str:
+        """Insert an event once. Returns 'inserted' or 'duplicate'."""
+
+        with self._lock:
+            existing = self._conn.execute(
+                "SELECT event_id FROM events WHERE event_id=?",
+                (fields["event_id"],),
+            ).fetchone()
+            if existing:
+                self._conn.execute(
+                    "UPDATE events SET duplicate_count = duplicate_count + 1 WHERE event_id=?",
+                    (fields["event_id"],),
+                )
+                self._conn.commit()
+                return "duplicate"
+            self._conn.execute(
+                """
+                INSERT INTO events (
+                    event_id, event_type, occurred_at, received_at, instance_id, workspace,
+                    executor, task_id, session_id, ticket_id, run_id, commit_sha,
+                    evidence_json, payload_sha256, disposition, reject_reason, acked,
+                    duplicate_count, applied
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,0,?)
+                """,
+                (
+                    fields["event_id"],
+                    fields.get("event_type"),
+                    fields.get("occurred_at"),
+                    format_utc(utc_now()),
+                    fields.get("instance_id"),
+                    fields.get("workspace"),
+                    fields.get("executor"),
+                    fields.get("task_id"),
+                    fields.get("session_id"),
+                    fields.get("ticket_id"),
+                    fields.get("run_id"),
+                    fields.get("commit_sha"),
+                    json.dumps(fields.get("evidence") or [], ensure_ascii=False),
+                    fields["payload_sha256"],
+                    fields["disposition"],
+                    fields.get("reject_reason"),
+                    1 if fields.get("applied") else 0,
+                ),
+            )
+            self._conn.commit()
+            return "inserted"
+
+    def claim_delivery(self, task_id: str, allowed: tuple[str, ...], new: str) -> bool:
+        marks = ",".join("?" for _ in allowed)
+        with self._lock:
+            cursor = self._conn.execute(
+                f"""
+                UPDATE tasks
+                SET delivery=?, updated_at=?
+                WHERE task_id=? AND status='pending' AND delivery IN ({marks})
+                """,
+                (new, format_utc(utc_now()), task_id, *allowed),
+            )
+            self._conn.commit()
+            return cursor.rowcount == 1
+
+    def finish_attempt_if(self, attempt_id: str, expected: str, status: str, detail: str) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                """
+                UPDATE attempts
+                SET status=?, finished_at=?, detail=?
+                WHERE attempt_id=? AND status=?
+                """,
+                (status, format_utc(utc_now()), detail[:500], attempt_id, expected),
+            )
+            self._conn.commit()
+            return cursor.rowcount == 1
+
+    def add_notification(
+        self,
+        *,
+        kind: str,
+        status: str,
+        reason: str,
+        task_id: str | None = None,
+        event_id: str | None = None,
+    ) -> str:
+        notification_id = new_id("ntf")
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO notifications (
+                    notification_id, task_id, event_id, kind, status, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (notification_id, task_id, event_id, kind, status, reason[:500], format_utc(utc_now())),
+            )
+            self._conn.commit()
+        return notification_id
+
+    def notifications_for(self, task_id: str) -> list[dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM notifications WHERE task_id=? ORDER BY created_at",
                 (task_id,),
             ).fetchall()
         return [_plain(row) for row in rows]
