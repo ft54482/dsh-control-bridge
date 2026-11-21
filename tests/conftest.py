@@ -88,6 +88,7 @@ def make_mandate(**overrides) -> Mandate:
         "workspace": "broadcast-cs",
         "executor": "ordinary_session",
         "task_id": None,
+        "session_id": None,
         "objective": "完成已经写明的一步。",
         "scope": "不扩大范围，不发布，不合并，不增加预算。",
         "acceptance": "负责人验收后才算交付。",

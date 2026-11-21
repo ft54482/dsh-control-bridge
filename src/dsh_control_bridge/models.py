@@ -61,6 +61,7 @@ MANDATE_KEYS = (
     "workspace",
     "executor",
     "task_id",
+    "session_id",
     "objective",
     "scope",
     "acceptance",
@@ -69,8 +70,8 @@ MANDATE_KEYS = (
     "expires_at",
     "allowed_actions",
 )
-MANDATE_REQUIRED = tuple(key for key in MANDATE_KEYS if key != "task_id")
-MANDATE_ACTIONS = frozenset({"dispatch", "retry"})
+MANDATE_REQUIRED = tuple(key for key in MANDATE_KEYS if key not in {"task_id", "session_id"})
+MANDATE_ACTIONS = frozenset({"dispatch", "retry", "resume", "read"})
 MANDATE_SOURCES = frozenset({"operator_file", "mcp_tool"})
 _SLUG = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 
@@ -102,6 +103,7 @@ class Mandate:
     workspace: str
     executor: str
     task_id: str | None
+    session_id: str | None
     objective: str
     scope: str
     acceptance: str
@@ -144,6 +146,9 @@ def parse_mandate(raw: Any) -> Mandate:
     task_id = raw.get("task_id")
     if task_id is not None and (not isinstance(task_id, str) or not _EVENT_ID.match(task_id)):
         raise MandateRequired("mandate.task_id must be a short token when it is set")
+    session_id = raw.get("session_id")
+    if session_id is not None and (not isinstance(session_id, str) or not _EVENT_ID.match(session_id)):
+        raise MandateRequired("mandate.session_id must be a short token when it is set")
 
     def text(key: str, limit: int) -> str:
         value = raw[key]
@@ -161,11 +166,13 @@ def parse_mandate(raw: Any) -> Mandate:
     alien = [item for item in normalized if item not in MANDATE_ACTIONS]
     if alien:
         raise MandateRequired(
-            "mandate.allowed_actions only accepts dispatch and retry; "
+            "mandate.allowed_actions only accepts dispatch, retry, resume, and read; "
             "release, budget changes, and scope changes are not bridge actions"
         )
-    if "dispatch" not in normalized:
-        raise MandateRequired("mandate.allowed_actions must include dispatch")
+    if "retry" in normalized and "dispatch" not in normalized:
+        raise MandateRequired("mandate retry requires dispatch")
+    if not ({"dispatch", "resume", "read"} & set(normalized)):
+        raise MandateRequired("mandate.allowed_actions must include dispatch, resume, or read")
     retry_limit = raw["retry_limit"]
     if isinstance(retry_limit, bool) or not isinstance(retry_limit, int) or not 0 <= retry_limit <= 10:
         raise MandateRequired("mandate.retry_limit must be an integer from 0 to 10")
@@ -184,6 +191,7 @@ def parse_mandate(raw: Any) -> Mandate:
         workspace=workspace,
         executor=str(raw["executor"]),
         task_id=task_id if isinstance(task_id, str) else None,
+        session_id=session_id if isinstance(session_id, str) else None,
         objective=text("objective", 4000),
         scope=text("scope", 4000),
         acceptance=text("acceptance", 4000),

@@ -64,6 +64,7 @@ def _parser() -> argparse.ArgumentParser:
     dispatch.add_argument("--mode", choices=["draft", "send"], default="draft")
     dispatch.add_argument("--mandate", type=Path)
     dispatch.add_argument("--task", dest="task_id")
+    dispatch.add_argument("--session", dest="session_id")
 
     status = sub.add_parser("status", help="show one task")
     status.add_argument("task_id")
@@ -96,6 +97,15 @@ def _parser() -> argparse.ArgumentParser:
     sub.add_parser("mcp", help="serve the stdio MCP tool server")
     sub.add_parser("tools", help="print the MCP tool catalog")
     sub.add_parser("recover", help="resume in-flight sends and cancels")
+    sessions = sub.add_parser("sessions", help="list authorized workspace and session metadata")
+    sessions.add_argument("--instance", required=True)
+    history = sub.add_parser("history", help="page the redacted transcript of a bridge-started run")
+    history.add_argument("--instance", required=True)
+    history.add_argument("--session", required=True)
+    history.add_argument("--offset", type=int, default=0)
+    history.add_argument("--limit", type=int, default=20)
+    home = sub.add_parser("home", help="print the non-secret home plan")
+    home.add_argument("--instance", required=True)
     return parser
 
 
@@ -130,6 +140,15 @@ def _run(args: argparse.Namespace) -> int:
             return 0
         if args.command == "recover":
             _emit(args, {"recovered": bridge.recovery_notes})
+            return 0
+        if args.command == "sessions":
+            _emit(args, bridge.session_catalog(args.instance))
+            return 0
+        if args.command == "history":
+            _emit(args, bridge.session_history(args.instance, args.session, offset=args.offset, limit=args.limit))
+            return 0
+        if args.command == "home":
+            _emit(args, bridge.home_plan(args.instance))
             return 0
         if args.command == "inbox":
             payload = bridge.inbox(instance_id=args.instance, workspace=args.workspace)
@@ -167,6 +186,7 @@ def _run(args: argparse.Namespace) -> int:
                 mode=args.mode,
                 mandate=mandate,
                 task_id=args.task_id,
+                session_id=args.session_id,
             )
             _emit(args, task.to_dict(), human=_human_task(task))
             return 0

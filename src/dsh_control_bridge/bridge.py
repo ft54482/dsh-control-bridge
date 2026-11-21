@@ -24,6 +24,7 @@ from dsh_control_bridge.errors import (
     ProbeRequired,
     SignatureError,
     SimulatedCrash,
+    TargetRejected,
 )
 from dsh_control_bridge.models import (
     EVENT_TARGET_STATUS,
@@ -106,7 +107,7 @@ class Bridge:
         if executor not in {"ordinary_session", "superagent"}:
             raise BridgeError("executor must be ordinary_session or superagent")
         if mode == "send":
-            self._require_sendable(instance_id, mandate, task_id=None)
+            self._require_sendable(instance_id, mandate, task_id=None, session_id=session_id)
             if mandate is None or not mandate.matches_target(
                 instance_id=instance_id, workspace=workspace, executor=executor
             ):
@@ -359,11 +360,30 @@ class Bridge:
             notes.append(f"{updated.task_id}:{updated.status}")
         return notes
 
-    def _require_sendable(self, instance_id: str, mandate: Mandate | None, *, task_id: str | None) -> Mandate:
+    def _require_sendable(
+        self,
+        instance_id: str,
+        mandate: Mandate | None,
+        *,
+        task_id: str | None,
+        session_id: str | None = None,
+    ) -> Mandate:
         if mandate is None:
             raise MandateRequired("send requires a mandate")
         ensure_mandate_active(mandate)
-        if not mandate.allows("dispatch"):
+        instance = self.config.instance(instance_id)
+        shared_resume = (
+            instance is not None
+            and instance.adapter == "headless_cli"
+            and instance.home_mode == "shared"
+            and bool(session_id)
+        )
+        if shared_resume:
+            if not mandate.allows("resume"):
+                raise MandateRequired("shared-home resume requires mandate action resume")
+            if mandate.session_id != session_id:
+                raise MandateRequired("mandate.session_id does not match the resume target")
+        elif not mandate.allows("dispatch"):
             raise MandateRequired("mandate does not allow dispatch")
         if not mandate.matches_target(
             instance_id=instance_id,
@@ -404,7 +424,7 @@ class Bridge:
             raise BridgeError(f"task {task_id} is not a draft waiting for approval")
         if mandate is None:
             raise MandateRequired("send requires a mandate")
-        self._require_sendable(task.instance_id, mandate, task_id=task.task_id)
+        self._require_sendable(task.instance_id, mandate, task_id=task.task_id, session_id=task.session_id)
         if not mandate.matches_target(
             instance_id=task.instance_id,
             workspace=task.workspace,
@@ -436,8 +456,12 @@ class Bridge:
                 raise MandateRequired("send requires a mandate")
             mandate, _source = open_mandate(task.mandate)
         ensure_mandate_active(mandate)
-        if not mandate.allows("dispatch"):
-            raise MandateRequired("mandate does not allow dispatch")
+        self._require_sendable(
+            task.instance_id,
+            mandate,
+            task_id=task.task_id,
+            session_id=task.session_id,
+        )
         if not mandate.matches_target(
             instance_id=task.instance_id,
             workspace=task.workspace,
@@ -828,6 +852,69 @@ class Bridge:
             reject_reason=reason,
             applied=applied,
         )
+
+    def session_catalog(self, instance_id: str) -> dict[str, Any]:
+        from dsh_control_bridge.home_access import catalog
+
+        instance = self.config.instance(instance_id)
+        if instance is None:
+            self.config.require_target(instance_id, "")
+            raise TargetRejected(f"instance {instance_id!r} is not configured")
+        recorded: dict[str, dict[str, str]] = {}
+        adapter = self.adapters.get(instance_id)
+        recorded_fn = getattr(adapter, "recorded_sessions", None)
+        if recorded_fn is not None:
+            recorded = recorded_fn()
+        workspaces = [
+            {
+                "name": workspace.name,
+                "cwd": workspace.cwd,
+                "allow_new_session": workspace.allow_new_session,
+                "occupancy": workspace.occupancy,
+            }
+            for workspace in instance.workspaces.values()
+        ]
+        return catalog(
+            instance_id=instance.id,
+            home_mode=instance.home_mode,
+            dsh_home=instance.dsh_home,
+            credential_mode=instance.credential_mode,
+            workspaces=workspaces,
+            grants=instance.session_grants,
+            recorded=recorded,
+        )
+
+    def session_history(self, instance_id: str, session_id: str, *, offset: int = 0, limit: int = 20) -> dict[str, Any]:
+        from dsh_control_bridge.home_access import read_transcript
+
+        listed = self.session_catalog(instance_id)
+        known = {item["session_id"] for item in listed["sessions"]}
+        if session_id not in known:
+            raise AdapterError("unknown session id")
+        if self.data_dir is None:
+            raise AdapterError("history needs a bridge data directory")
+        return read_transcript(self.data_dir, instance_id, session_id, offset=offset, limit=limit)
+
+    def home_plan(self, instance_id: str) -> dict[str, Any]:
+        from dsh_control_bridge.home_access import non_secret_operator_fields, surface_matrix
+
+        instance = self.config.instance(instance_id)
+        if instance is None:
+            self.config.require_target(instance_id, "")
+            raise TargetRejected(f"instance {instance_id!r} is not configured")
+        return {
+            "instance_id": instance.id,
+            "home_mode": instance.home_mode,
+            "credential_mode": instance.credential_mode,
+            "spawn": instance.spawn,
+            "timeout_seconds": instance.timeout_seconds,
+            "official_patch": instance.credential_mode == "official_store",
+            "copies_credentials": False,
+            "reads_credentials": False,
+            "real_model_call": False,
+            "operator_fields": non_secret_operator_fields(),
+            "surfaces": surface_matrix(),
+        }
 
     def _require_task(self, task_id: str) -> Task:
         task = self.store.get_task(task_id)

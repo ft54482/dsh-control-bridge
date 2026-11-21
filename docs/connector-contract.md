@@ -11,8 +11,11 @@
 - stdout 是 NDJSON：开头 `session`，中间可以有 `status`、`text`、`thinking`、`tool_call`、`tool_result`，结尾 `final`。
 - 完成必须同时是退出码 0 和 `final.reason.kind == completed`。
 - `desktop` profile 由 Electron 独占，CLI 不能启动它。headless 也不是当前打开的桌面工作区。
-- 默认 headless 不使用 GUI 保存的登录。凭证只来自显式列出的环境变量。适配器把 `DSH_HOME` 指到桥自己的数据目录，不读取、不复制桌面凭证文件。
-- 取消会等待原进程退出，然后才允许恢复。
+- 默认 headless 不使用 GUI 保存的登录。适配器把 `DSH_HOME` 指到桥自己的数据目录。可选的 `home_mode = "shared"` 才把子进程的 `DSH_HOME` 指到操作者写明的那一个目录，并且只允许配置里点名的工作区和 session。共享 home 不会自动开放里面的全部会话。
+- 官方凭证复用是同一 `DSH_HOME` 里的托管存储。headless 默认关掉 `credentials`、`authorization`、`deepseek-account`。`credential_mode = "official_store"` 用桥数据目录里的 `--patch` 覆盖把这三行重新打开，交给官方组件读取。桥不读取、不复制 `.credentials.yaml`，也不把 Key 放进仓库。
+- 没有官方的 `dsh session list` 或会话导出命令。会话文件不是受支持的 resume。能恢复的只有 headless `--session-id`，并且 cwd、profile 和授权必须一致。
+- Desktop 没有外部配对，不能把 Electron 进程接过来。Web 主机的 RPC 是内部线路，不是稳定接口。SuperAgent 的 `state` 仍然不能派工。旧的 `dsh-agent-bridge` 驱动的是 Web Session，不解决这次的 headless home。
+- 取消只结束桥自己启动的进程。外部占用确认不了就拒绝写。
 
 实现和限制写在 [headless-cli.md](headless-cli.md)。默认 `spawn = false`。
 

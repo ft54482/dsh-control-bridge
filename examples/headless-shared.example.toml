@@ -1,0 +1,43 @@
+# Opt-in shared home. spawn stays false, so this file does not launch dsh.
+# Replace dsh_home and the demo cwd locally. Do not commit the real home.
+# Do not add busy desktop workspaces or their session ids.
+# credential_mode official_store asks the official headless components to read
+# the managed store in that same home. This file does not contain key material.
+
+[bridge]
+signature_window_seconds = 300
+allow_unsigned = false
+
+[notify]
+mode = "off"
+
+[[instances]]
+id = "local-headless"
+label = "本机 headless，显式复用一个已有 home"
+kind = "desktop"
+adapter = "headless_cli"
+base_url = "http://127.0.0.1:9"
+auth_env = "DSH_LOCAL_HEADLESS_TOKEN"
+event_secret_env = "DSH_LOCAL_HEADLESS_EVENT_SECRET"
+executable = "C:/Tools/dsh.cmd"
+spawn = false
+timeout_seconds = 120
+credential_envs = ["DEEPSEEK_API_KEY"]
+home_mode = "shared"
+dsh_home = "C:/dsh-homes/operator-home"
+credential_mode = "official_store"
+
+[[instances.workspaces]]
+name = "demo"
+description = "人工授权的隔离演示目录，不是正在忙的业务目录"
+cwd = "C:/dsh-workspaces/demo"
+allow_new_session = false
+occupancy = "unknown"
+
+[[instances.session_grants]]
+session_id = "session-demo"
+workspace = "demo"
+profile = "headless"
+cwd = "C:/dsh-workspaces/demo"
+access = "read"
+occupancy = "unknown"

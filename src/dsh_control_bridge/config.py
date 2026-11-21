@@ -13,7 +13,8 @@ from urllib.parse import urlparse
 
 import tomllib
 
-from dsh_control_bridge.errors import ConfigError
+from dsh_control_bridge.errors import AdapterError, ConfigError
+from dsh_control_bridge.home_access import SessionGrant, validate_configured_path
 
 _SLUG = re.compile(r"^[a-z][a-z0-9-]{1,63}$")
 _ENV = re.compile(r"^[A-Z][A-Z0-9_]{2,80}$")
@@ -47,11 +48,17 @@ _INSTANCE_KEYS = frozenset(
         "timeout_seconds",
         "credential_envs",
         "profile",
+        "home_mode",
+        "dsh_home",
+        "credential_mode",
+        "session_grants",
     }
 )
 _NOTIFY_KEYS = frozenset({"mode", "file_name", "webhook_url", "allowed_hosts"})
 _FILE_NAME = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
-_WORKSPACE_KEYS = frozenset({"name", "description", "cwd"})
+_WORKSPACE_KEYS = frozenset({"name", "description", "cwd", "allow_new_session", "occupancy"})
+_GRANT_KEYS = frozenset({"session_id", "workspace", "profile", "cwd", "access", "occupancy"})
+_GRANT_PROFILES = frozenset({"headless", "desktop", "web", "superagent"})
 _KINDS = frozenset({"desktop", "remote"})
 _ADAPTERS = frozenset({"fake", "harness", "headless_cli"})
 _META = set('%&|<>^\r\n"!`')
@@ -62,6 +69,8 @@ class Workspace:
     name: str
     description: str
     cwd: str
+    allow_new_session: bool = False
+    occupancy: str = "unknown"
 
 
 @dataclass(frozen=True)
@@ -86,6 +95,10 @@ class Instance:
     spawn: bool = False
     timeout_seconds: int = 0
     credential_envs: tuple[str, ...] = ()
+    home_mode: str = "isolated"
+    dsh_home: str = ""
+    credential_mode: str = "environment"
+    session_grants: tuple[SessionGrant, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -324,6 +337,39 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
                 errors.append(f"{where} headless workspaces must use distinct directories")
         elif executable or spawn or credential_envs:
             errors.append(f"{where} executable, spawn, and credential_envs belong only to headless_cli")
+        home_mode = item.get("home_mode", "isolated")
+        if home_mode not in {"isolated", "shared"}:
+            errors.append(f"{where}.home_mode must be isolated or shared")
+            home_mode = "isolated"
+        dsh_home = item.get("dsh_home", "")
+        if not isinstance(dsh_home, str):
+            errors.append(f"{where}.dsh_home must be a path string")
+            dsh_home = ""
+        elif dsh_home:
+            try:
+                dsh_home = validate_configured_path(dsh_home, label=f"{where}.dsh_home")
+            except AdapterError as exc:
+                errors.append(str(exc))
+                dsh_home = ""
+        credential_mode = item.get("credential_mode", "environment")
+        if credential_mode not in {"environment", "official_store"}:
+            errors.append(f"{where}.credential_mode must be environment or official_store")
+            credential_mode = "environment"
+        if home_mode == "shared" and not dsh_home:
+            errors.append(f"{where}.dsh_home is required when home_mode is shared")
+        if home_mode == "isolated" and dsh_home:
+            errors.append(f"{where}.dsh_home belongs only to home_mode shared")
+        grants = _parse_grants(item.get("session_grants", []), workspaces, where, errors)
+        shared_fields = home_mode != "isolated" or bool(dsh_home) or credential_mode != "environment" or bool(grants)
+        workspace_shared = any(item.allow_new_session or item.occupancy != "unknown" for item in workspaces.values())
+        if adapter != "headless_cli" and (shared_fields or workspace_shared):
+            errors.append(f"{where} home and session grants belong only to headless_cli")
+        if adapter == "headless_cli" and home_mode == "shared":
+            for grant in grants:
+                if grant.access == "write" and grant.profile != "headless":
+                    errors.append(f"{where} session {grant.session_id} cannot be written on profile {grant.profile}")
+                if grant.access == "write" and grant.occupancy != "operator_confirmed_idle":
+                    errors.append(f"{where} session {grant.session_id} refuses write until occupancy is operator_confirmed_idle")
         instances[instance_id] = Instance(
             id=instance_id,
             label=str(label).strip(),
@@ -337,6 +383,10 @@ def _parse_instances(raw: Any, errors: list[str]) -> dict[str, Instance]:
             spawn=spawn,
             timeout_seconds=timeout,
             credential_envs=tuple(credential_envs),
+            home_mode=str(home_mode),
+            dsh_home=dsh_home,
+            credential_mode=str(credential_mode),
+            session_grants=tuple(grants),
         )
     return instances
 
@@ -374,7 +424,96 @@ def _parse_workspaces(raw: Any, where: str, errors: list[str]) -> dict[str, Work
         elif cwd and any(character in cwd for character in _META):
             errors.append(f"{spot}.cwd contains a shell metacharacter")
             cwd = ""
-        found[name] = Workspace(name=name, description=description.strip(), cwd=cwd)
+        elif cwd and ".." in cwd.replace("\\", "/").split("/"):
+            errors.append(f"{spot}.cwd must not contain ..")
+            cwd = ""
+        allow_new = item.get("allow_new_session", False)
+        if not isinstance(allow_new, bool):
+            errors.append(f"{spot}.allow_new_session must be a boolean")
+            allow_new = False
+        occupancy = item.get("occupancy", "unknown")
+        if occupancy not in {"unknown", "operator_confirmed_idle"}:
+            errors.append(f"{spot}.occupancy must be unknown or operator_confirmed_idle")
+            occupancy = "unknown"
+        if allow_new and occupancy != "operator_confirmed_idle":
+            errors.append(f"{spot} allow_new_session requires occupancy operator_confirmed_idle")
+        found[name] = Workspace(
+            name=name,
+            description=description.strip(),
+            cwd=cwd,
+            allow_new_session=allow_new,
+            occupancy=occupancy,
+        )
+    return found
+
+
+def _parse_grants(
+    raw: Any,
+    workspaces: dict[str, Workspace],
+    where: str,
+    errors: list[str],
+) -> list[SessionGrant]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        errors.append(f"{where}.session_grants must be a list")
+        return []
+    found: list[SessionGrant] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        spot = f"{where}.session_grants[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{spot} must be a table")
+            continue
+        for key in sorted(set(item) - _GRANT_KEYS):
+            errors.append(f"{spot} has unknown field {key!r}")
+        session_id = item.get("session_id")
+        if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,200}", session_id):
+            errors.append(f"{spot}.session_id must be a safe token")
+            continue
+        if session_id in seen:
+            errors.append(f"{where} repeats session {session_id!r}")
+            continue
+        seen.add(session_id)
+        workspace_name = item.get("workspace")
+        if not isinstance(workspace_name, str) or workspace_name not in workspaces:
+            errors.append(f"{spot}.workspace must be one of this instance's workspaces")
+            continue
+        profile = item.get("profile", "headless")
+        if profile not in _GRANT_PROFILES:
+            errors.append(f"{spot}.profile must be headless, desktop, web, or superagent")
+            profile = "headless"
+        access = item.get("access", "read")
+        if access not in {"read", "write"}:
+            errors.append(f"{spot}.access must be read or write")
+            access = "read"
+        occupancy = item.get("occupancy", "unknown")
+        if occupancy not in {"unknown", "operator_confirmed_idle"}:
+            errors.append(f"{spot}.occupancy must be unknown or operator_confirmed_idle")
+            occupancy = "unknown"
+        cwd = item.get("cwd", "")
+        if not isinstance(cwd, str) or not cwd:
+            errors.append(f"{spot}.cwd is required")
+            continue
+        try:
+            cwd = validate_configured_path(cwd, label=f"{spot}.cwd")
+        except AdapterError as exc:
+            errors.append(str(exc))
+            continue
+        expected = _normalize_cwd(workspaces[workspace_name].cwd) if workspaces[workspace_name].cwd else ""
+        if not expected or _normalize_cwd(cwd) != expected:
+            errors.append(f"{spot}.cwd must be the declared cwd of workspace {workspace_name!r}")
+            continue
+        found.append(
+            SessionGrant(
+                session_id=session_id,
+                workspace=workspace_name,
+                profile=str(profile),
+                cwd=cwd,
+                access=str(access),
+                occupancy=str(occupancy),
+            )
+        )
     return found
 
 

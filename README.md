@@ -242,6 +242,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 
 `Start-DshBridge.ps1 -PythonExe D:\Python312\python.exe` 只做本机 `diagnose`。加上 `-Serve` 才在 `127.0.0.1:8787` 监听。它不启动 desktop，也不启动真实 `dsh`。
 
+既有 home 默认不用。`home_mode = "shared"` 只打开配置里点名的工作区和 session，不能把读到历史文件当成原生 resume。Desktop、Web、SuperAgent 没有受支持的接管接口。见 [docs/headless-cli.md](docs/headless-cli.md)。
+
 ## 事件
 
 `POST /v1/events` 要求三个头：`X-DSH-Timestamp`、`X-DSH-Instance`、`X-DSH-Signature`。密钥来自该实例的 `event_secret_env`。一台实例的密钥不能给另一台实例签名。请求体上限 64 KiB。

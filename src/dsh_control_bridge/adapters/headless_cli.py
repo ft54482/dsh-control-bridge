@@ -23,6 +23,15 @@ from typing import Protocol
 from dsh_control_bridge.adapters.base import CancelRequest, CancelResult, DispatchRequest, DispatchResult
 from dsh_control_bridge.config import Instance
 from dsh_control_bridge.errors import AdapterError
+from dsh_control_bridge.home_access import (
+    CREDENTIALS_FILENAME,
+    append_transcript,
+    authorize_new_session,
+    authorize_resume,
+    isolated_home,
+    official_patch_path,
+    seal_local_directory,
+)
 from dsh_control_bridge.windows_cmd import plan_launch, popen_kwargs, terminate_tree
 
 _PROFILE = "headless"
@@ -152,6 +161,8 @@ class HeadlessCliAdapter:
         self.data_dir = data_dir
         self._sessions: dict[str, dict[str, str]] = {}
         self._by_task: dict[str, str] = {}
+        self._held: set[str] = set()
+        self._hold_lock = threading.Lock()
         self._load()
 
     def dispatch(self, request: DispatchRequest) -> DispatchResult:
@@ -167,27 +178,41 @@ class HeadlessCliAdapter:
         cwd = workspace.cwd
         session_id = request.session_id or self._by_task.get(request.task_id)
         if session_id:
-            self._require_resumable(session_id, cwd)
-        argv = build_argv(self.instance.executable, session_id)
-        env = build_child_env(
-            self.instance.credential_envs,
-            dsh_home=self._dsh_home(),
-        )
-        result = self.runner.run(
-            task_id=request.task_id,
-            argv=argv,
-            cwd=cwd,
-            env=env,
-            stdin=task_stdin(request.objective),
-            timeout=self.instance.timeout_seconds,
-        )
-        interpreted = interpret_run(result.stdout, result.returncode)
-        self._remember(request.task_id, interpreted.session_id, cwd)
-        if not interpreted.ok:
-            raise AdapterError(interpreted.detail)
-        if not interpreted.session_id:
-            raise AdapterError("headless run completed without a session id")
-        return DispatchResult(acked=True, session_id=interpreted.session_id)
+            self._require_resumable(session_id, request.workspace, cwd)
+        else:
+            authorize_new_session(
+                home_mode=self.instance.home_mode,
+                allow_new_session=workspace.allow_new_session,
+                occupancy=workspace.occupancy,
+            )
+        dsh_home = self._dsh_home()
+        patch = self._patch_argument(dsh_home)
+        argv = build_argv(self.instance.executable, session_id, patch=patch)
+        env = build_child_env(self.instance.credential_envs, dsh_home=dsh_home)
+        held = self._acquire(request.task_id, session_id)
+        try:
+            result = self.runner.run(
+                task_id=request.task_id,
+                argv=argv,
+                cwd=cwd,
+                env=env,
+                stdin=task_stdin(request.objective),
+                timeout=self.instance.timeout_seconds,
+            )
+            interpreted = interpret_run(result.stdout, result.returncode)
+            if interpreted.session_id and self.data_dir is not None:
+                append_transcript(self.data_dir, self.instance_id, interpreted.session_id, result.stdout)
+            self._remember(request.task_id, interpreted.session_id, cwd, request.workspace)
+            if not interpreted.ok:
+                raise AdapterError(interpreted.detail)
+            if not interpreted.session_id:
+                raise AdapterError("headless run completed without a session id")
+            return DispatchResult(acked=True, session_id=interpreted.session_id)
+        finally:
+            self._release(held)
+
+    def recorded_sessions(self) -> dict[str, dict[str, str]]:
+        return {key: dict(value) for key, value in self._sessions.items()}
 
     def cancel(self, request: CancelRequest) -> CancelResult:
         if request.executor != "ordinary_session":
@@ -200,26 +225,71 @@ class HeadlessCliAdapter:
             )
         return CancelResult(confirmed=True, detail="headless process exited before any resume")
 
-    def _require_resumable(self, session_id: str, cwd: str) -> None:
+    def _require_resumable(self, session_id: str, workspace: str, cwd: str) -> None:
         if not _SAFE_ARG.match(session_id):
             raise AdapterError("session id is not safe to pass as an argument")
-        recorded = self._sessions.get(session_id)
-        if recorded is None:
-            raise AdapterError("unknown session id")
-        if recorded.get("cwd") != cwd or recorded.get("profile") != _PROFILE:
-            raise AdapterError("session cwd or profile does not match this workspace")
+        authorize_resume(
+            home_mode=self.instance.home_mode,
+            workspace=workspace,
+            cwd=cwd,
+            session_id=session_id,
+            grants=self.instance.session_grants,
+            recorded=self._sessions.get(session_id),
+        )
 
-    def _remember(self, task_id: str, session_id: str | None, cwd: str) -> None:
+    def _remember(self, task_id: str, session_id: str | None, cwd: str, workspace: str) -> None:
         if not session_id or not _SAFE_ARG.match(session_id):
             return
-        self._sessions[session_id] = {"cwd": cwd, "profile": _PROFILE}
+        if any(grant.session_id == session_id for grant in self.instance.session_grants):
+            self._by_task[task_id] = session_id
+            self._save()
+            return
+        occupancy = "operator_confirmed_idle"
+        if self.instance.home_mode == "shared":
+            occupancy = self.instance.workspaces[workspace].occupancy
+        self._sessions[session_id] = {
+            "cwd": cwd,
+            "profile": _PROFILE,
+            "workspace": workspace,
+            "origin": "bridge_created",
+            "occupancy": occupancy,
+        }
         self._by_task[task_id] = session_id
         self._save()
 
     def _dsh_home(self) -> str:
-        root = (self.data_dir or self.state_path.parent) / "dsh-home" / self.instance_id
-        root.mkdir(parents=True, exist_ok=True)
+        if self.instance.home_mode == "shared":
+            return seal_local_directory(self.instance.dsh_home, label="dsh_home", must_exist=True)
+        root = isolated_home(self.data_dir or self.state_path.parent, self.instance_id)
         return str(root)
+
+    def _patch_argument(self, dsh_home: str) -> str | None:
+        if self.instance.credential_mode != "official_store":
+            return None
+        if self.data_dir is None:
+            raise AdapterError("official credential patch needs a bridge data directory")
+        path = official_patch_path(self.data_dir, self.instance_id)
+        if any(character in str(path) for character in " \t\r\n%&|<>^!\""):
+            raise AdapterError("official credential patch path is not safe to pass to a batch file")
+        if CREDENTIALS_FILENAME in path.read_text(encoding="utf-8"):
+            raise AdapterError("official credential patch must not name the credentials file")
+        del dsh_home
+        return str(path)
+
+    def _acquire(self, task_id: str, session_id: str | None) -> tuple[str, ...]:
+        keys = [f"task:{task_id}"]
+        if session_id:
+            keys.append(f"session:{session_id}")
+        with self._hold_lock:
+            if any(key in self._held for key in keys):
+                raise AdapterError("session is already running in this bridge")
+            self._held.update(keys)
+        return tuple(keys)
+
+    def _release(self, keys: tuple[str, ...]) -> None:
+        with self._hold_lock:
+            for key in keys:
+                self._held.discard(key)
 
     def _load(self) -> None:
         if not self.state_path.is_file():
@@ -247,8 +317,11 @@ class InterpretedRun:
     detail: str
 
 
-def build_argv(executable: str, session_id: str | None) -> list[str]:
-    argv = [executable, "--profile", _PROFILE, "--json"]
+def build_argv(executable: str, session_id: str | None, *, patch: str | None = None) -> list[str]:
+    argv = [executable, "--profile", _PROFILE]
+    if patch:
+        argv.extend(["--patch", patch])
+    argv.append("--json")
     if session_id:
         if not _SAFE_ARG.match(session_id):
             raise AdapterError("session id is not safe to pass as an argument")

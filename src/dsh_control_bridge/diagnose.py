@@ -50,6 +50,9 @@ def diagnose(config: Config) -> dict[str, Any]:
                 if instance.adapter == "headless_cli"
                 else False,
                 "credential_env_names": list(instance.credential_envs),
+                "home_mode": instance.home_mode,
+                "credential_mode": instance.credential_mode,
+                "session_grant_count": len(instance.session_grants),
                 "connected_to_harness": False,
             }
         )
@@ -75,6 +78,9 @@ def diagnose(config: Config) -> dict[str, Any]:
             "desktop_profile_cli_boot": False,
             "headless_is_desktop_workspace": False,
             "headless_reads_gui_credential_files": False,
+            "shared_home_default": False,
+            "official_history_read": False,
+            "desktop_attach": False,
             "superagent_state_can_dispatch": False,
             "unused_ports": [17300, 49290],
             "harness_webhook_is_completion_callback": False,

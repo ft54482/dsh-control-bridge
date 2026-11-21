@@ -64,6 +64,7 @@ def _scenario(bridge) -> dict[str, object]:
         workspace="broadcast-cs",
         executor="ordinary_session",
         task_id=None,
+        session_id=None,
         objective="完成自检的这一步。",
         scope="不扩大范围，不发布，不合并，不增加预算。",
         acceptance="进入待验收之前不算交付。",
