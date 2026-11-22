@@ -19,6 +19,25 @@ function realOrNull(target) {
   }
 }
 
+/** Existing absolute directory identity, including Windows junction resolution. */
+export function canonicalDirectory(target) {
+  if (typeof target !== 'string' || !path.isAbsolute(target)) return null
+  const real = realOrNull(target)
+  try {
+    return real && fs.statSync(real).isDirectory() ? real : null
+  } catch {
+    return null
+  }
+}
+
+/** Legacy exact spelling is valid; other spellings must resolve to one existing directory. */
+export function sameDirectory(left, right) {
+  if (typeof left !== 'string' || !left || typeof right !== 'string' || !right) return false
+  if (left === right) return true
+  const real = canonicalDirectory(left)
+  return real !== null && real === canonicalDirectory(right)
+}
+
 function isInside(rootReal, candidateReal) {
   const relative = path.relative(rootReal, candidateReal)
   return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative)
@@ -27,15 +46,8 @@ function isInside(rootReal, candidateReal) {
 function normaliseRoots(roots) {
   const out = []
   for (const root of Array.isArray(roots) ? roots : []) {
-    if (typeof root !== 'string' || !path.isAbsolute(root)) continue
-    const real = realOrNull(root)
-    if (!real) continue
-    try {
-      if (!fs.statSync(real).isDirectory()) continue
-    } catch {
-      continue
-    }
-    if (!out.includes(real)) out.push(real)
+    const real = canonicalDirectory(root)
+    if (real && !out.includes(real)) out.push(real)
   }
   return out
 }

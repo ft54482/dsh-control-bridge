@@ -12,6 +12,7 @@
  */
 
 import { eventKind, eventText, redactText } from './host_read.js'
+import { sameDirectory } from './paths.js'
 
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/
 
@@ -150,7 +151,7 @@ export function authorizeSession(grants, session, options = {}) {
     return { ok: false, reason: 'cross_profile', started_task: false, detail: 'caller profile is not desktop' }
   }
   const expected = workspace.workspace && workspace.workspace.cwd
-  if (session.cwd && expected && session.cwd !== expected) {
+  if (session.cwd && expected && !sameDirectory(session.cwd, expected)) {
     return { ok: false, reason: 'cwd_mismatch', started_task: false }
   }
   return { ok: true, grant, workspace: workspace.workspace, access: grant.access, started_task: false }
@@ -214,7 +215,7 @@ export function visibleSessions(grants, workspaceId, sessions) {
     ok: true,
     sessions: (sessions || [])
       .filter((item) => item.sessionId && allowed.has(item.sessionId))
-      .filter((item) => !item.cwd || !workspace.workspace.cwd || item.cwd === workspace.workspace.cwd)
+      .filter((item) => !item.cwd || !workspace.workspace.cwd || sameDirectory(item.cwd, workspace.workspace.cwd))
       .map((item) => ({
         session_id: item.sessionId,
         workspace_id: workspaceId,

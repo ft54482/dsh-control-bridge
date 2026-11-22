@@ -8,7 +8,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { hasRoots, resolveWithinRoots } from '../paths.js'
+import { hasRoots, resolveWithinRoots, sameDirectory } from '../paths.js'
 
 function layout() {
   const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-paths-')))
@@ -27,6 +27,11 @@ test('no roots means no capability', () => {
   assert.equal(verdict.reason, 'no_allowed_roots')
   assert.equal(hasRoots([]), false)
   assert.equal(hasRoots(['relative-only']), false)
+})
+
+test('two different missing directory names cannot establish shared identity', () => {
+  const { root } = layout()
+  assert.equal(sameDirectory(path.join(root, 'missing-a'), path.join(root, 'missing-b')), false)
 })
 
 test('existing directories inside a root pass; outside, sibling-prefix and the root itself do not', () => {

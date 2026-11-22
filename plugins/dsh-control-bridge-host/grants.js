@@ -45,6 +45,7 @@ function normalizeSession(item) {
     sessionId,
     workspaceId: text(item.workspaceId || item.workspace_id),
     access: ACCESS.has(item.access) ? item.access : 'read',
+    ...(text(item.agentPreset) ? { agentPreset: item.agentPreset } : {}),
     cwd: text(item.cwd),
     profile: text(item.profile) || 'desktop',
     model: text(item.model) || null,
@@ -295,6 +296,17 @@ export function createGrantStore({ file, initial, now = () => Date.now() } = {})
     get file() { return file || '' },
     snapshot,
     refresh,
+    /** Recheck live authorization in the same serialized write that adds the new Session. */
+    grantFreshSession(session, deny) {
+      return withState((next) => {
+        const reason = warnings.length ? 'allowlist_unavailable' : deny(next)
+        if (reason) throw Object.assign(new Error(reason), { code: reason, refused: true })
+        if (next.sessionAllowlist.some((row) => row.sessionId === session.sessionId)) {
+          throw Object.assign(new Error('Session already granted'), { code: 'session_already_granted', refused: true })
+        }
+        next.sessionAllowlist.push(normalizeSession(session))
+      })
+    },
     /** Merge (never replace) workspaces and sessions, then persist. */
     grant({ workspace, workspaceAllowlist, session, sessionAllowlist, spentBootstrapHash } = {}) {
       return withState((next) => {

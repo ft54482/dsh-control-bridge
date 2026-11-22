@@ -2,7 +2,7 @@ import http from 'node:http'
 import { bootstrapSourceFromSecret, createStaticBootstrapSource, hashSecret, matchesSecretHash } from './bootstrap.js'
 import { eventsSince, journalStart } from './journal.js'
 import { createOutbox } from './outbox.js'
-import { hasRoots, resolveWithinRoots } from './paths.js'
+import { canonicalDirectory, hasRoots, resolveWithinRoots, sameDirectory } from './paths.js'
 import { assembleCatalog, assembleDiscovery, findTurnForRequest, readObservation, readSnapshot, safeError, turnAnswer } from './host_read.js'
 import {
   agentIdle, agentSelection, checkSelection, executionModelForTurn, effortSupport, liveAgent,
@@ -93,6 +93,11 @@ function lastSeqOf(snapshot) {
   return last
 }
 
+function beforeFirstTurn(snapshot, sessionId) {
+  return snapshot.header?.id === sessionId && snapshot.inherited === 0
+    && !snapshot.events.some((event) => ['turn/start', 'request/header', 'user/message', 'assistant/message'].includes(event.type))
+}
+
 function sleep(ms, signal) {
   return new Promise((resolve, reject) => {
     if (signal && signal.aborted) {
@@ -127,6 +132,7 @@ export function createHostServer(ctx, config, secret) {
   let pairingTail = Promise.resolve()
   const live = new Map()
   const inflight = new Map()
+  const firstTurnAdmissions = new Set()
   const waiters = new Map()
   const ledger = config.ledger || createRequestLedger({ file: config.requestsFile || '' })
   const outbox = config.outbox || createOutbox({
@@ -147,10 +153,8 @@ export function createHostServer(ctx, config, secret) {
   const pollIntervalMs = Math.max(50, Number(config.pollIntervalMs) || DEFAULT_POLL_INTERVAL_MS)
   const pollMaxIntervalMs = Math.max(pollIntervalMs, Number(config.pollMaxIntervalMs) || DEFAULT_POLL_MAX_INTERVAL_MS)
   const globalDefault = typeof config.globalDefault === 'function' ? config.globalDefault : undefined
-  // Write-capable directory/session creation is opt-in twice: a capability flag
-  // and an explicit root list. With neither configured, all three endpoints
-  // refuse and explain; nothing is guessed from the process cwd.
   const workspaceRoots = Array.isArray(config.workspaceRoots) ? config.workspaceRoots : []
+  const presetSessionWorkspaceIds = new Set(Array.isArray(config.presetSessionWorkspaceIds) ? config.presetSessionWorkspaceIds : [])
   const createSessionEnabled = config.allowCreateSession === true
   const createWorkspaceEnabled = config.allowCreateWorkspace === true
   const openPathEnabled = config.allowOpenPath === true
@@ -160,6 +164,37 @@ export function createHostServer(ctx, config, secret) {
     return typeof ctx.get?.('agentPresets')?.resolve === 'function'
       && typeof ctx.sessionController?.create === 'function'
       && typeof ctx.sessionController?.projections === 'function'
+  }
+
+  function registeredWorkspace(id) {
+    try {
+      const registry = ctx.workspaceRegistry
+      const row = registry?.get?.(id) || registry?.list?.().find((item) => String(item.id) === id)
+      const workspace = workspaceView(row)
+      return workspace?.id === id ? workspace : null
+    } catch {
+      return null
+    }
+  }
+
+  // Both the pre-create check and the serialized grant commit read current
+  // membership. Keep the original canonical directory across the async create.
+  function presetGrantDenial(current, id, directory, access, newSessionId) {
+    if (current.warnings?.length) return 'allowlist_unavailable'
+    const authorized = authorizeWorkspace(current, id)
+    if (!authorized.ok) return authorized.reason
+    const workspace = registeredWorkspace(id)
+    if (!workspace) return 'workspace_not_found'
+    if (!directory || canonicalDirectory(workspace.path) !== directory
+      || canonicalDirectory(authorized.workspace.cwd) !== directory) return 'cwd_mismatch'
+    if (!presetSessionWorkspaceIds.has(id) && !resolveWithinRoots(workspaceRoots, directory).ok) {
+      return 'outside_allowed_roots'
+    }
+    if (newSessionId && !workspace.sessionIds.includes(newSessionId)) return 'workspace_mismatch'
+    if (access === 'write' && !current.sessionAllowlist.some((row) => row.workspaceId === id
+      && row.access === 'write' && row.profile === 'desktop' && workspace.sessionIds.includes(row.sessionId)
+      && canonicalDirectory(row.cwd) === directory)) return 'workspace_write_not_granted'
+    return null
   }
 
   function state() {
@@ -331,7 +366,13 @@ export function createHostServer(ctx, config, secret) {
     return send(res, status, { ok: false, reason: code, started_task: false, detail, ...(status >= 500 ? serverErrorFields : {}) })
   }
 
-  function bodyOfRequest(record) {    if (record.phase === 'terminal' && record.response) return { status: record.http_status || 200, body: record.response }
+  function bodyOfRequest(record) {
+    if (record.phase === 'terminal' && record.response) {
+      const body = record.terminal_scope === 'official'
+        ? { ...record.response, phase: record.phase, terminal_scope: record.terminal_scope }
+        : record.response
+      return { status: record.http_status || 200, body }
+    }
     if (record.phase === 'unknown') {
       return {
         status: 409,
@@ -369,7 +410,7 @@ export function createHostServer(ctx, config, secret) {
 
   async function recoverStored(sessionId, requestId, record) {
     if (record && record.response && record.phase === 'terminal') {
-      return { status: record.http_status || 200, body: record.response }
+      return bodyOfRequest(record)
     }
     let snap
     try {
@@ -544,7 +585,7 @@ export function createHostServer(ctx, config, secret) {
       terminal_scope: 'official',
       session_id: sessionId,
       request_id: requestId,
-      model_selection: record.explicit_model ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+      model_selection: record.model_selection || (record.explicit_model ? 'session_selected_by_bridge' : 'session_recorded_not_overridden'),
       requested_model: record.requested_model,
       confirmed_selection: confirmedSelection,
       execution_model: execution,
@@ -587,8 +628,8 @@ export function createHostServer(ctx, config, secret) {
     try {
       const snapshot = await readSnapshot(ctx.sessionQuery, sessionId)
       const fromEvents = modelStateFromEvents(snapshot.events)
-      if (fromEvents.lastUsed || fromEvents.pending) return { ...fromEvents, source: 'session_log' }
-      return fromRow()
+      const result = fromEvents.lastUsed || fromEvents.pending ? { ...fromEvents, source: 'session_log' } : fromRow()
+      return { ...result, firstTurn: snapshot.header?.id === sessionId ? beforeFirstTurn(snapshot, sessionId) : null }
     } catch (error) {
       const fallback = fromRow()
       if (fallback.next) return fallback
@@ -612,6 +653,48 @@ export function createHostServer(ctx, config, secret) {
     return { status: row ? 'ok' : 'missing', loaded, row }
   }
 
+  async function firstTurnDenial(sessionId, workspaceId, profile, requireAgent) {
+    const found = await findSessionRow(sessionId)
+    if (!found.row) return found.status === 'missing' ? 'missing_session' : 'session_list_read_failed'
+    const listed = found.loaded.sessionIndex.get(sessionId)?.row
+    if (!listed || typeof listed.running !== 'boolean') return 'session_state_unverified'
+    const view = adapterSession(found.row)
+    if (view.workspaceId !== workspaceId) return 'workspace_mismatch'
+    if (view.running) return 'busy'
+    const auth = () => {
+      const grantsNow = state()
+      if (grantsNow.warnings?.length) return { ok: false, reason: 'allowlist_unavailable' }
+      const allowed = authorizeSession(grantsNow, view, { workspaceId, profile, need: 'write' })
+      if (!allowed.ok) return allowed
+      const workspace = registeredWorkspace(workspaceId)
+      if (!workspace?.sessionIds.includes(sessionId)) return { ok: false, reason: 'workspace_mismatch' }
+      if (allowed.grant.agentPreset !== 'master-control' || allowed.grant.profile !== 'desktop') return { ok: false, reason: 'grant_changed' }
+      const directory = canonicalDirectory(workspace.path)
+      if (!directory || canonicalDirectory(allowed.grant.cwd) !== directory || canonicalDirectory(view.cwd) !== directory) {
+        return { ok: false, reason: 'cwd_mismatch' }
+      }
+      return allowed
+    }
+    const initial = auth()
+    if (!initial.ok) return initial.reason
+    try {
+      const snapshot = await readSnapshot(ctx.sessionQuery, sessionId)
+      if (!beforeFirstTurn(snapshot, sessionId)) return 'session_no_longer_blank'
+      const projection = await ctx.sessionController.projections({ sessionId }, new AbortController().signal)
+      if (projection?.kind !== 'sequenced' || projection.values?.agentPreset !== 'master-control') return 'agent_preset_unverified'
+    } catch {
+      return 'first_turn_unverified'
+    }
+    const current = auth()
+    if (!current.ok) return current.reason
+    const agent = liveAgent(ctx, sessionId)
+    if (requireAgent || agent) {
+      if (agent?.session?.id !== sessionId) return 'agent_identity_unverified'
+      if (agent.status !== 'idle') return 'busy'
+    }
+    return null
+  }
+
   const server = http.createServer(async (req, res) => {
     const remote = req.socket.remoteAddress || ''
     if (!loopbackPeer(remote)) return send(res, 401, { ok: false, reason: 'unauthorized' })
@@ -624,6 +707,7 @@ export function createHostServer(ctx, config, secret) {
     }
     const scope = auth.scope
     const url = new URL(req.url || '/', 'http://127.0.0.1')
+    let firstTurnSession
     try {
       if (url.pathname.startsWith('/v1/bootstrap/')) {
         if (scope !== 'bootstrap') return send(res, 403, { ok: false, reason: 'bootstrap_required' })
@@ -838,16 +922,25 @@ export function createHostServer(ctx, config, secret) {
         if (!ctx.sessionController || typeof ctx.sessionController.create !== 'function') {
           return send(res, 501, { ok: false, reason: 'session_create_unavailable', detail: 'the official sessionController.create is not mounted' })
         }
-        if (rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
         const body = await readJson(req)
         let workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id : ''
         const preset = body.agent_preset
+        if (preset === undefined && rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
         if (preset !== undefined) {
           if (typeof preset !== 'string' || !preset.trim() || preset !== preset.trim()) {
             return send(res, 400, { ok: false, reason: 'invalid_agent_preset', started_task: false })
           }
           if (body.session_id !== undefined) {
             return send(res, 400, { ok: false, reason: 'omit_session_id_for_preset_create', started_task: false })
+          }
+          if (!workspaceId || body.create_workspace === true || body.create_directory === true) {
+            return send(res, 400, { ok: false, reason: 'existing_workspace_required', started_task: false })
+          }
+          if (body.profile !== undefined && body.profile !== 'desktop') {
+            return send(res, 403, { ok: false, reason: 'cross_profile', started_task: false })
+          }
+          if (body.access !== undefined && body.access !== 'write' && body.access !== 'read') {
+            return send(res, 400, { ok: false, reason: 'invalid_access', started_task: false })
           }
           // Without a preset roster the official fresh-create path can silently
           // compose the default. Resolve the exact id before creating anything.
@@ -865,23 +958,11 @@ export function createHostServer(ctx, config, secret) {
         }
         let workspace = null
         if (workspaceId) {
-          const registry = ctx.workspaceRegistry
-          let found = null
-          try {
-            if (registry && typeof registry.get === 'function') found = registry.get(workspaceId)
-            if (!found && registry && typeof registry.list === 'function') {
-              found = (registry.list() || []).find((item) => String(item.id) === workspaceId) || null
-            }
-          } catch { found = null }
-          if (!found) return send(res, 404, { ok: false, reason: 'workspace_not_found', workspace_id: workspaceId })
-          workspace = workspaceView(found)
-          const resolved = resolveWithinRoots(workspaceRoots, String(found.path || ''), { createDirectory: false })
-          if (!resolved.ok) {
-            return send(res, 403, {
-              ok: false,
-              reason: resolved.reason,
-              detail: 'the workspace directory is outside the configured workspaceRoots',
-            })
+          workspace = registeredWorkspace(workspaceId)
+          if (!workspace) return send(res, 404, { ok: false, reason: 'workspace_not_found', workspace_id: workspaceId })
+          if (preset === undefined) {
+            const resolved = resolveWithinRoots(workspaceRoots, workspace.path)
+            if (!resolved.ok) return send(res, 403, { ok: false, reason: resolved.reason, started_task: false })
           }
         } else {
           if (body.create_workspace !== true) {
@@ -939,8 +1020,14 @@ export function createHostServer(ctx, config, secret) {
           }
           plannedEffortUnverified = Boolean(plannedSelection.reasoningEffort && !support.known)
         }
+        const access = body.access === 'write' ? 'write' : 'read'
         const createRequest = { workspaceId }
-        if (preset !== undefined) createRequest.agentPreset = preset
+        const presetDirectory = preset === undefined ? null : canonicalDirectory(workspace.path)
+        if (preset !== undefined) {
+          const reason = presetGrantDenial(state(), workspaceId, presetDirectory, access)
+          if (reason) return send(res, 403, { ok: false, reason, workspace_id: workspaceId, started_task: false })
+          createRequest.agentPreset = preset
+        }
         if (typeof body.session_id === 'string' && body.session_id) createRequest.sessionId = body.session_id
         let created
         try {
@@ -978,22 +1065,31 @@ export function createHostServer(ctx, config, secret) {
             })
           }
         }
-        const access = body.access === 'write' ? 'write' : 'read'
         const sessionGrant = {
           sessionId,
           workspaceId,
           access,
+          ...(preset === undefined ? {} : { agentPreset: created.agentPreset }),
           cwd: workspace.path || '',
           profile: typeof body.profile === 'string' && body.profile ? body.profile : 'desktop',
           title: typeof body.title === 'string' ? body.title : '',
         }
         let after
         try {
-          after = await grants.grant({
-            workspace: { id: workspace.id, cwd: workspace.path || '', title: workspace.title || '' },
-            session: sessionGrant,
-          })
+          if (preset !== undefined) {
+            after = await grants.grantFreshSession(sessionGrant, (current) =>
+              presetGrantDenial(current, workspaceId, presetDirectory, access, sessionId))
+          } else {
+            after = await grants.grant({
+              workspace: { id: workspace.id, cwd: workspace.path || '', title: workspace.title || '' },
+              session: sessionGrant,
+            })
+          }
         } catch (error) {
+          if (error?.refused) return send(res, 403, {
+            ok: false, reason: error.code, session_id: sessionId, workspace_id: workspaceId,
+            saved: false, started_task: false, manual_reconcile: true,
+          })
           const detail = safeError(error, 'grants.save')
           note(config, [detail])
           return send(res, 500, {
@@ -1313,7 +1409,7 @@ export function createHostServer(ctx, config, secret) {
         if (body.text.length > MAX_TEXT_CHARS) {
           return send(res, 413, { accepted: false, reason: 'text_too_long', session_id: sessionId, started_task: false })
         }
-        if (inflight.has(sessionId)) {
+        if (inflight.has(sessionId) || firstTurnAdmissions.has(sessionId)) {
           return send(res, 409, {
             accepted: false,
             reason: 'bridge_request_in_flight',
@@ -1404,17 +1500,50 @@ export function createHostServer(ctx, config, secret) {
             return send(res, 400, { accepted: false, completed: false, reason: 'invalid_requested_model', session_id: sessionId, started_task: false })
           }
         }
+        let agentAtStart = liveAgent(ctx, sessionId)
+        const workspaceId = body.workspace_id || view.workspaceId
+        const refuseFirstTurn = (reason) => send(res, 409, {
+          accepted: false, completed: false, session_id: sessionId, reason, started_task: false,
+        })
+        const presetBound = grantsNow.sessionAllowlist.some((item) => item.sessionId === sessionId && item.agentPreset === 'master-control')
+        if (presetBound && typeof models.firstTurn !== 'boolean') return refuseFirstTurn('first_turn_unverified')
+        if (presetBound && models.firstTurn) {
+          if (firstTurnAdmissions.has(sessionId) || inflight.has(sessionId)) return refuseFirstTurn('bridge_request_in_flight')
+          firstTurnAdmissions.add(sessionId)
+          firstTurnSession = sessionId
+          const denial = await firstTurnDenial(sessionId, workspaceId, body.profile, false)
+          if (denial) return refuseFirstTurn(denial)
+          if (!agentAtStart) {
+            if (typeof ctx.sessionController.resolveAgent !== 'function') return refuseFirstTurn('agent_resolution_unavailable')
+            let resolved
+            try {
+              resolved = await ctx.sessionController.resolveAgent(sessionId)
+            } catch {
+              return refuseFirstTurn('agent_resolution_failed')
+            }
+            if (resolved?.error || !resolved?.agent) return refuseFirstTurn('agent_resolution_failed')
+            agentAtStart = resolved.agent
+          }
+          if (agentAtStart.session?.id !== sessionId) return refuseFirstTurn('agent_identity_unverified')
+          if (agentAtStart.status !== 'idle') return refuseFirstTurn('busy')
+          const check = await firstTurnDenial(sessionId, workspaceId, body.profile, true)
+          if (check) return refuseFirstTurn(check)
+          if (!requested) requested = agentSelection(agentAtStart)
+        }
+        const selectionSource = explicitModel ? 'session_selected_by_bridge'
+          : (firstTurnSession && !models.next ? 'session_live_effective' : 'session_recorded_not_overridden')
         if (!requested) {
           return send(res, 409, {
             accepted: false,
             completed: false,
             reason: 'model_unknown',
             session_id: sessionId,
-            detail: 'the session records no model selection; set one with POST /v1/model or in the Desktop UI',
+            detail: firstTurnSession
+              ? 'the session agent has no effective route; supply a supported model in this resume request'
+              : 'the session records no model selection; set one with POST /v1/model or in the Desktop UI',
             started_task: false,
           })
         }
-        const agentAtStart = liveAgent(ctx, sessionId)
         // The effort a caller asked for must be checked against what the
         // registered route advertises, when the deployment enumerates it. An
         // unenumerable list is reported as unverified, not silently accepted as
@@ -1465,6 +1594,11 @@ export function createHostServer(ctx, config, secret) {
           if (!agentIdle(agentAtStart)) {
             return send(res, 409, { accepted: false, completed: false, reason: 'busy', session_id: sessionId, started_task: false })
           }
+          if (firstTurnSession) {
+            const denial = await firstTurnDenial(sessionId, workspaceId, body.profile, true)
+            if (denial) return refuseFirstTurn(denial)
+            agentAtStart = liveAgent(ctx, sessionId)
+          }
           const selected = selectOnAgent(agentAtStart, requested)
           if (!selected.ok) {
             return send(res, selected.reason === 'readback_mismatch' ? 500 : 409, {
@@ -1478,7 +1612,7 @@ export function createHostServer(ctx, config, secret) {
             })
           }
         }
-        const confirmed = agentSelection(liveAgent(ctx, sessionId)) || requested
+        const confirmed = agentSelection(liveAgent(ctx, sessionId)) || (firstTurnSession ? null : requested)
         if (!sameSelection(confirmed, requested)) {
           return send(res, 409, {
             accepted: false,
@@ -1542,7 +1676,7 @@ export function createHostServer(ctx, config, secret) {
           await ledger.append(requestId, 'recorded', {
             session_id: sessionId,
             explicit_model: explicitModel,
-          }, { effort_unverified: effortUnverified })
+          }, { effort_unverified: effortUnverified, model_selection: selectionSource })
         } catch { /* a failed journal append must not undo a durable claim */ }
         const publish = async (status, payload, patch) => {
           let nextStatus = status
@@ -1637,6 +1771,17 @@ export function createHostServer(ctx, config, secret) {
             }, { prompt_attempted: false })
           }
           try {
+            if (firstTurnSession) {
+              let reason = await firstTurnDenial(sessionId, workspaceId, body.profile, true)
+              if (!reason && !sameSelection(agentSelection(liveAgent(ctx, sessionId)), confirmed)) reason = 'model_changed_before_send'
+              if (reason) {
+                const rejected = { accepted: false, completed: false, session_id: sessionId, reason, started_task: false }
+                return publish(409, rejected, {
+                  phase: 'terminal', terminal_scope: 'admission', prompt_attempted: false, crash_window: false,
+                  accepted: false, started_task: false, response: rejected, http_status: 409,
+                })
+              }
+            }
             accepted = await ctx.sessionController.prompt(promptBody({
               sessionId,
               requestId,
@@ -1708,7 +1853,7 @@ export function createHostServer(ctx, config, secret) {
               wait: 'none',
               session_id: sessionId,
               request_id: requestId,
-              model_selection: explicitModel ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+              model_selection: selectionSource,
               requested_model: requested,
               confirmed_selection: confirmed,
               started_task: true,
@@ -1763,7 +1908,7 @@ export function createHostServer(ctx, config, secret) {
                 completed: false,
                 session_id: sessionId,
                 request_id: requestId,
-                model_selection: explicitModel ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+                model_selection: selectionSource,
                 requested_model: requested,
                 confirmed_selection: confirmed,
                 execution_model: null,
@@ -1791,7 +1936,7 @@ export function createHostServer(ctx, config, secret) {
               completed: false,
               session_id: sessionId,
               request_id: requestId,
-              model_selection: explicitModel ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+              model_selection: selectionSource,
               requested_model: requested,
               confirmed_selection: confirmed,
               execution_model: executionModelForTurn(lastSnapshot.events, turn),
@@ -1831,9 +1976,11 @@ export function createHostServer(ctx, config, secret) {
           const result = {
             accepted: true,
             completed: terminal === 'completed',
+            phase: 'terminal',
+            terminal_scope: 'official',
             session_id: sessionId,
             request_id: requestId,
-            model_selection: explicitModel ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+            model_selection: selectionSource,
             requested_model: requested,
             confirmed_selection: confirmed,
             execution_model: execution,
@@ -1918,7 +2065,7 @@ export function createHostServer(ctx, config, secret) {
         }
         if (wanted === 'write') {
           const workspace = authorizeWorkspace(grantsNow, view.workspaceId)
-          if (!workspace.ok || (view.cwd && workspace.workspace.cwd && view.cwd !== workspace.workspace.cwd)) {
+          if (!workspace.ok || (view.cwd && workspace.workspace.cwd && !sameDirectory(view.cwd, workspace.workspace.cwd))) {
             return send(res, 403, { ok: false, reason: workspace.ok ? 'cwd_mismatch' : workspace.reason, started_task: false })
           }
         }
@@ -2319,6 +2466,8 @@ export function createHostServer(ctx, config, secret) {
       const detail = safeError(error, 'request')
       note(config, [detail])
       return send(res, 500, { ok: false, reason: 'request_failed', ...detail })
+    } finally {
+      if (firstTurnSession) firstTurnAdmissions.delete(firstTurnSession)
     }
   })
   server.on('close', () => {
