@@ -331,6 +331,17 @@ def test_terminate_tree_does_not_signal_system_pids(monkeypatch: pytest.MonkeyPa
     assert calls == []
 
 
+def test_popen_kwargs_hide_the_child_console_on_windows():
+    from dsh_control_bridge.windows_cmd import popen_kwargs
+
+    kwargs = popen_kwargs()
+    if os.name == "nt":
+        assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+        assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs["start_new_session"] is True
+
+
 def test_windows_scripts_do_not_pip_or_write_localappdata():
     root = Path(__file__).resolve().parents[1] / "scripts" / "windows"
     install = (root / "Install-DshBridge.ps1").read_text(encoding="utf-8")

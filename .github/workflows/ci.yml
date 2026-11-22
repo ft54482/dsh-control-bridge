@@ -26,6 +26,6 @@ jobs:
       - name: Test
         run: pytest
       - name: Host plugin contract
-        run: node --test --test-force-exit plugins/dsh-control-bridge-host/test/host.test.js plugins/dsh-control-bridge-host/test/official-contract.test.js plugins/dsh-control-bridge-host/test/lifecycle.test.js plugins/dsh-control-bridge-host/test/rearm.test.js
+        run: node --test --test-force-exit plugins/dsh-control-bridge-host/test/host.test.js plugins/dsh-control-bridge-host/test/official-contract.test.js plugins/dsh-control-bridge-host/test/lifecycle.test.js plugins/dsh-control-bridge-host/test/rearm.test.js plugins/dsh-control-bridge-host/test/control.test.js plugins/dsh-control-bridge-host/test/create.test.js plugins/dsh-control-bridge-host/test/paths.test.js
       - name: Fake end to end
         run: python examples/e2e_fake.py

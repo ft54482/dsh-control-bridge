@@ -501,6 +501,179 @@ export async function assembleCatalog(ctx, options = {}) {
   }
 }
 
+/**
+ * Read-only discovery across every workspace the Desktop registry knows.
+ *
+ * This does NOT use the grant allowlist: it is the operator-anointed global
+ * view. It reads metadata only (never message content), never hoists a
+ * subagent into a top-level list, and never invents a terminal status: when the
+ * projection does not say, the answer is `unknown`.
+ */
+export async function assembleDiscovery(ctx, query = {}) {
+  const warnings = []
+  let workspaceStatus = 'ok'
+  let workspaceRows = []
+  try {
+    workspaceRows = await readWorkspaceRows(ctx.workspaceRegistry)
+    if (workspaceRows.length === 0) workspaceStatus = 'empty'
+  } catch (error) {
+    workspaceStatus = 'read_failed'
+    warnings.push(safeError(error, 'workspaceRegistry.list'))
+  }
+  const workspaces = []
+  for (const row of workspaceRows) {
+    try {
+      workspaces.push({
+        id: String(row.id),
+        title: redactText(row.title || ''),
+        path: row.path || row.cwd || '',
+        sessionIds: Array.isArray(row.sessionIds) ? row.sessionIds.map(String) : [],
+      })
+    } catch (error) {
+      warnings.push(safeError(error, 'workspaceRegistry.list.item'))
+    }
+  }
+  let sessionStatus = 'ok'
+  let sessionRows = []
+  try {
+    sessionRows = await readSessionRows(ctx.sessionController)
+    if (sessionRows.length === 0) sessionStatus = 'empty'
+  } catch (error) {
+    sessionStatus = 'read_failed'
+    warnings.push(safeError(error, 'sessionController.list'))
+  }
+  const workspaceOfSession = new Map()
+  for (const workspace of workspaces) {
+    for (const sessionId of workspace.sessionIds) workspaceOfSession.set(sessionId, workspace)
+  }
+  const failures = []
+  const seen = new Set()
+  const items = []
+  for (const row of sessionStatus === 'read_failed' ? [] : sessionRows) {
+    try {
+      const sessionId = String(row.sessionId ?? row.id ?? '')
+      if (!sessionId) {
+        failures.push({ method: 'session.metadata', code: 'missing_session_id' })
+        continue
+      }
+      if (seen.has(sessionId)) continue
+      seen.add(sessionId)
+      const workspace = workspaceOfSession.get(sessionId)
+        || (row.workspaceId ? workspaces.find((item) => item.id === String(row.workspaceId)) : null)
+        || null
+      const workspaceId = workspace ? workspace.id : (row.workspaceId ? String(row.workspaceId) : '')
+      const normalized = normalizeSessionRow(row, workspaceId, {})
+      const kind = normalized.origin === 'subagent'
+        ? 'subagent'
+        : (normalized.origin === 'worker'
+          ? 'worker'
+          : (normalized.top ? 'top' : 'subagent'))
+      const derived = discoveryStatus(row, normalized)
+      const cwd = normalized.cwd || (workspace && workspace.path) || ''
+      items.push({
+        session_id: sessionId,
+        workspace_id: workspaceId,
+        workspace_title: workspace ? workspace.title : '',
+        title: normalized.title || '',
+        title_source: normalized.title_source,
+        kind,
+        origin: normalized.origin || 'unknown',
+        parent: normalized.parent || null,
+        status: derived.status,
+        status_source: derived.status_source,
+        running: Boolean(normalized.running),
+        agent_available: Boolean(normalized.agent_available),
+        cwd,
+        cwd_source: normalized.cwd ? 'session_row' : (workspace && workspace.path ? 'workspace' : 'missing'),
+        profile: normalized.profile,
+        model: normalized.model,
+        provider: normalized.provider,
+        reasoning_effort: normalized.reasoning_effort || null,
+        model_source: normalized.model_source,
+        updated_at: typeof row.updatedAt === 'string' ? row.updatedAt : null,
+      })
+    } catch (error) {
+      failures.push(safeError(error, 'session.metadata'))
+    }
+  }
+  const wantedWorkspace = query.workspace_id ? String(query.workspace_id) : ''
+  const wantedKind = query.kind ? String(query.kind) : ''
+  const wantedStatus = query.status ? String(query.status) : ''
+  const filtered = items
+    .filter((item) => !wantedWorkspace || item.workspace_id === wantedWorkspace)
+    .filter((item) => !wantedKind || item.kind === wantedKind)
+    .filter((item) => !wantedStatus || item.status === wantedStatus)
+    .sort((left, right) => {
+      if (left.workspace_id !== right.workspace_id) return left.workspace_id < right.workspace_id ? -1 : 1
+      return left.session_id < right.session_id ? -1 : (left.session_id > right.session_id ? 1 : 0)
+    })
+  const offset = Math.max(0, Number(query.offset) || 0)
+  const limit = Math.min(200, Math.max(1, Number(query.limit) || 50))
+  const counts = { top: 0, subagent: 0, worker: 0, unknown: 0 }
+  const statusCounts = { running: 0, waiting_input: 0, error: 0, terminal: 0, unknown: 0 }
+  for (const item of filtered) {
+    counts[item.kind] = (counts[item.kind] || 0) + 1
+    statusCounts[item.status] = (statusCounts[item.status] || 0) + 1
+  }
+  return {
+    ok: workspaceStatus !== 'read_failed' && sessionStatus !== 'read_failed',
+    source: 'official_registry_all_workspaces',
+    discovered: true,
+    includes_history: false,
+    workspace_status: workspaceStatus,
+    session_status: sessionStatus,
+    not_an_empty_history: sessionStatus === 'read_failed',
+    warnings,
+    failures,
+    workspaces: workspaces.map((workspace) => ({
+      id: workspace.id,
+      title: workspace.title,
+      path: workspace.path,
+      sessions_total: workspace.sessionIds.length,
+    })),
+    total: filtered.length,
+    offset,
+    limit,
+    counts,
+    status_counts: statusCounts,
+    items: filtered.slice(offset, offset + limit),
+  }
+}
+
+function discoveryStatus(row, normalized) {
+  const values = (row && row.projections && row.projections.values) || {}
+  if (normalized.running) return { status: 'running', status_source: 'session_list.running' }
+  // Official pending-input signals: approvals, questions, inbox items.
+  const approval = values.approvalState
+  const questions = values.userQuestions
+  const inbox = values.inbox
+  const approvalPending = Boolean(approval && (
+    approval.pending === true
+    || (typeof approval.kind === 'string' && approval.kind !== 'none' && approval.kind !== 'resolved')
+    || (Array.isArray(approval.items) && approval.items.length > 0)
+  ))
+  const questionPending = Array.isArray(questions) ? questions.length > 0 : Boolean(questions && questions.pending === true)
+  const inboxPending = Array.isArray(inbox) ? inbox.length > 0 : false
+  if (approvalPending || questionPending || inboxPending) {
+    return { status: 'waiting_input', status_source: 'projection' }
+  }
+  // A non-null continuation projection means the last turn ended in a
+  // resumable error state (official semantics); null means no such marker.
+  if (values.conversationContinuation !== undefined && values.conversationContinuation !== null) {
+    return { status: 'error', status_source: 'projection' }
+  }
+  const raw = values.sessionState ?? values.state ?? values.turnState ?? null
+  const text = typeof raw === 'string' ? raw : ((raw && (raw.kind || raw.status)) || null)
+  if (text === 'input-required' || text === 'waiting-input' || text === 'waiting_input') {
+    return { status: 'waiting_input', status_source: 'projection' }
+  }
+  if (text === 'error' || text === 'failed') return { status: 'error', status_source: 'projection' }
+  if (text === 'idle' || text === 'completed' || text === 'terminal') {
+    return { status: 'terminal', status_source: 'projection' }
+  }
+  return { status: 'unknown', status_source: 'unknown' }
+}
+
 export function buildMembership(input) {
   const listed = input.listed || new Map()
   const failed = new Set(input.metadataFailed || [])

@@ -44,6 +44,9 @@ export function officialCtx(overrides = {}) {
     // and what the fixture records as the request header of a prompted turn.
     selection: { provider: 'example-provider', model: 'example-model' },
     selectCalls: [],
+    // When set, listModels() advertises these reasoning efforts for a model;
+    // leaving it unset is the "deployment does not enumerate efforts" case.
+    modelEfforts: {},
     liveSessions: new Set(['session-demo', 'session-busy']),
     providers: ['example-provider'],
     providerModels: { 'example-provider': ['example-model'] },
@@ -127,11 +130,74 @@ export function officialCtx(overrides = {}) {
     state,
     workspaceRegistry: {
       list() { return workspaces },
+      get(id) { return workspaces.find((item) => item.id === id) },
+      async resolveByPath(target) {
+        const real = fs.existsSync(target) ? fs.realpathSync.native(target) : null
+        return workspaces.find((item) => item.path === real || item.path === target)
+      },
+      async create(target, title) {
+        if (typeof target !== 'string' || !fs.existsSync(target) || !fs.statSync(target).isDirectory()) {
+          const error = new Error('workspace path must be an existing directory')
+          error.code = 'workspace/invalid-path'
+          throw error
+        }
+        const real = fs.realpathSync.native(target)
+        const known = workspaces.find((item) => item.path === real)
+        if (known) return known
+        const workspace = {
+          id: `ws-created-${workspaces.length}`,
+          title: title || real.split(/[\\/]/).pop(),
+          path: real,
+          sessionIds: [],
+        }
+        workspaces.push(workspace)
+        state.createdWorkspaces = (state.createdWorkspaces || 0) + 1
+        return workspace
+      },
     },
     sessionController: {
       async list(request, signal) {
         if (!signal) throw new TypeError('sessionController.list requires a signal')
         return { items: state.sessions }
+      },
+      async create(request) {
+        if (!request || typeof request !== 'object') throw new TypeError('create needs a request')
+        if (request.workspaceId && request.cwd) {
+          const error = new Error('workspaceId and cwd are mutually exclusive')
+          error.code = 'gateway/bad-request'
+          throw error
+        }
+        const workspace = request.workspaceId
+          ? workspaces.find((item) => item.id === request.workspaceId)
+          : null
+        if (request.workspaceId && !workspace) {
+          const error = new Error('unknown workspace')
+          error.code = 'workspace/not-found'
+          throw error
+        }
+        const sessionId = request.sessionId || `session-new-${state.sessions.length}`
+        const cwd = workspace ? workspace.path : request.cwd
+        state.sessions.push({
+          sessionId,
+          updatedAt: Date.now(),
+          running: false,
+          blank: false,
+          agentAvailable: true,
+          cwd,
+          projections: { kind: 'cached', asOfSeq: 0, values: { title: request.agentPreset || 'New chat' } },
+        })
+        if (workspace) workspace.sessionIds.push(sessionId)
+        state.liveSessions.add(sessionId)
+        state.createCalls = state.createCalls || []
+        state.createCalls.push({ ...request, sessionId })
+        return { sessionId, agentPreset: request.agentPreset }
+      },
+      canOpenWorkspacePath() { return state.canOpen !== false },
+      async openWorkspacePath(request, signal) {
+        if (!signal) throw new TypeError('openWorkspacePath requires a signal')
+        state.openCalls = state.openCalls || []
+        state.openCalls.push({ ...request })
+        return { opened: true }
       },
       async prompt(body, signal) {
         if (!body || typeof body.sessionId !== 'string') throw new TypeError('prompt needs a sessionId')
@@ -218,6 +284,14 @@ export function officialCtx(overrides = {}) {
             select(selection) {
               state.selectCalls.push({ ...selection })
               state.selection = { ...selection }
+              // Official select() persists the choice as a model/selection event
+              // and makes it the Session's next selection. The sessionId tag is a
+              // fixture detail so one shared log does not leak across sessions.
+              state.events.push({ seq: ++state.seq, type: 'model/selection', time: Date.now(), data: { ...selection, sessionId } })
+              const row = state.sessions.find((item) => item.sessionId === sessionId)
+              if (row && row.projections && row.projections.values && row.projections.values.modelSelection) {
+                row.projections.values.modelSelection.next = { ...selection }
+              }
             },
           },
         }
@@ -230,7 +304,20 @@ export function officialCtx(overrides = {}) {
         return state.providers.map((id) => ({ id, displayName: id }))
       },
       async listModels(provider) {
-        return (state.providerModels[provider] || []).map((id) => ({ id, name: id }))
+        return (state.providerModels[provider] || []).map((id) => {
+          const efforts = state.modelEfforts && state.modelEfforts[id]
+          return efforts ? { id, name: id, reasoningEfforts: efforts } : { id, name: id }
+        })
+      },
+      async resolveModelInfo(provider, model) {
+        state.resolveModelInfoCalls = (state.resolveModelInfoCalls || 0) + 1
+        const efforts = state.modelEfforts && state.modelEfforts[model]
+        return {
+          provider,
+          id: model,
+          name: model,
+          ...(efforts ? { reasoning: { efforts: efforts.map((id) => ({ id, name: id })) } } : {}),
+        }
       },
       async resolveCallConfig(config) {
         if (!state.providers.includes(config.provider)) {
@@ -246,7 +333,9 @@ export function officialCtx(overrides = {}) {
         return {
           session: { id: sessionId, cwd: CWD, createdAt: 1_700_000_000_000 },
           inheritedEventCount: 0,
-          events: state.events.map((event) => ({ ...event })),
+          events: state.events
+            .filter((event) => event.type !== 'model/selection' || !event.data.sessionId || event.data.sessionId === sessionId)
+            .map((event) => ({ ...event })),
         }
       },
       async observeSession(sessionId) {
@@ -256,7 +345,11 @@ export function officialCtx(overrides = {}) {
           source: 'live',
           header: { id: sessionId, cwd: CWD, createdAt: 1_700_000_000_000 },
           inheritedEventCount: 0,
-          get events() { return state.events.map((event) => ({ ...event })) },
+          get events() {
+            return state.events
+              .filter((event) => event.type !== 'model/selection' || !event.data.sessionId || event.data.sessionId === sessionId)
+              .map((event) => ({ ...event }))
+          },
           cursor: state.seq,
           retain() { return this },
           [Symbol.dispose]() {},
@@ -283,6 +376,10 @@ export async function startServer(ctx, options = {}) {
     pollIntervalMs: options.pollIntervalMs || 10,
     requestsFile,
     ledger: options.ledger,
+    workspaceRoots: options.workspaceRoots || [],
+    allowCreateSession: options.allowCreateSession === true,
+    allowCreateWorkspace: options.allowCreateWorkspace === true,
+    allowOpenPath: options.allowOpenPath === true,
   }, options.secret || SECRET)
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')

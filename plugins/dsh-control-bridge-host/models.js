@@ -220,3 +220,101 @@ export function agentIdle(agent) {
   const status = agent.status
   return status !== 'running'
 }
+
+function normalizeModel(model) {
+  if (!model) return null
+  if (typeof model === 'string') {
+    return { id: model, name: model, reasoning_efforts: null, reasoning_efforts_source: 'unknown', input_modalities: null }
+  }
+  const id = model.id || model.model || model.name
+  if (!id) return null
+  const rawEfforts = model.reasoningEfforts ?? model.reasoning_efforts ?? null
+  const efforts = Array.isArray(rawEfforts)
+    ? rawEfforts.map((entry) => (typeof entry === 'string' ? entry : (entry && (entry.id || entry.value || entry.name)) || null)).filter(Boolean)
+    : null
+  return {
+    id: String(id),
+    name: String(model.name || model.label || id),
+    reasoning_efforts: efforts,
+    reasoning_efforts_source: efforts ? 'official' : 'unknown',
+    input_modalities: Array.isArray(model.inputModalities) ? model.inputModalities : null,
+  }
+}
+
+/**
+ * List the registered provider/model routes and the reasoning efforts each one
+ * advertises. Official builds that do not enumerate efforts are reported as
+ * `reasoning_efforts: null` with source `unknown`; nothing is hard-coded.
+ */
+export async function modelCatalog(ctx) {
+  const llm = ctx && ctx.llm
+  if (!llm || typeof llm.listProviders !== 'function') {
+    return { ok: false, reason: 'llm_unavailable', providers: [], effort_source: 'unavailable' }
+  }
+  let providers
+  try {
+    providers = await llm.listProviders()
+  } catch (error) {
+    return { ok: false, reason: 'provider_list_failed', detail: String(error && error.message || error), providers: [], effort_source: 'unavailable' }
+  }
+  const rows = []
+  for (const provider of Array.isArray(providers) ? providers : []) {
+    const providerId = provider && (provider.id || provider.provider)
+    if (!providerId) continue
+    let models = []
+    try {
+      models = typeof llm.listModels === 'function' ? await llm.listModels(providerId) : []
+    } catch (error) {
+      rows.push({ provider: String(providerId), name: provider.name || null, models: [], error: 'model_list_failed', detail: String(error && error.message || error) })
+      continue
+    }
+    const normalised = []
+    for (const raw of Array.isArray(models) ? models : []) {
+      const model = normalizeModel(raw)
+      if (!model) continue
+      // The official adapter only exposes reasoning capabilities through
+      // resolveModelInfo(); listModels() has no reasoning field.
+      if (!model.reasoning_efforts && typeof llm.resolveModelInfo === 'function') {
+        try {
+          const info = await llm.resolveModelInfo(providerId, model.id)
+          const efforts = info && info.reasoning && Array.isArray(info.reasoning.efforts)
+            ? info.reasoning.efforts.map((effort) => (typeof effort === 'string' ? effort : (effort && (effort.id || effort.value)) || null)).filter(Boolean)
+            : null
+          if (efforts) {
+            model.reasoning_efforts = efforts
+            model.reasoning_efforts_source = 'official'
+            if (info.reasoning.defaultEffort) model.default_reasoning_effort = String(info.reasoning.defaultEffort)
+          }
+        } catch { /* capability lookup is advisory; the route stays unknown */ }
+      }
+      if (raw && raw.description) model.description = String(raw.description)
+      normalised.push(model)
+    }
+    rows.push({
+      provider: String(providerId),
+      name: (provider && (provider.name || provider.label)) || null,
+      models: normalised,
+    })
+  }
+  return {
+    ok: true,
+    source: 'official_llm',
+    effort_source: rows.some((row) => row.models.some((model) => model.reasoning_efforts)) ? 'official' : 'unknown',
+    providers: rows,
+  }
+}
+
+/**
+ * Look up one route in the catalog. `efforts` is null when the deployment does
+ * not enumerate them, which means a caller must not reject an effort value.
+ */
+export async function effortSupport(ctx, selection) {
+  if (!selection) return { known: false, efforts: null, reason: 'no_selection' }
+  const catalog = await modelCatalog(ctx)
+  if (!catalog.ok) return { known: false, efforts: null, reason: catalog.reason }
+  const provider = catalog.providers.find((row) => row.provider === selection.provider)
+  if (!provider) return { known: false, efforts: null, reason: 'provider_not_registered' }
+  const model = provider.models.find((row) => row.id === selection.model)
+  if (!model) return { known: false, efforts: null, reason: 'model_not_advertised' }
+  return { known: Array.isArray(model.reasoning_efforts), efforts: model.reasoning_efforts }
+}

@@ -15,7 +15,10 @@ Inside a Desktop Host that has already mounted the official services, the plugin
 - `sessionController.prompt(request, AbortSignal)` with `mode: "queue"`, whose official result is only `{ accepted: true }`
 - `sessionController.cancel({ sessionId })` only after the log proves the open turn carries this request's `rpcId`
 - `agents.get(sessionId).model.current()/select()` for the session-scoped model choice
-- `llm.listProviders()`, `llm.listModels()`, `llm.resolveCallConfig()` to refuse an unavailable route before sending
+- `llm.listProviders()`, `llm.listModels()`, `llm.resolveCallConfig()`, and `llm.resolveModelInfo()` for the route and its official reasoning efforts
+- `sessionController.create({ workspaceId } | { cwd })`, `workspaceRegistry.create(path, title)`, `sessionController.canOpenWorkspacePath()/openWorkspacePath(request, signal)` for the opt-in create/open endpoints (0.2.0)
+
+The full 0.2.0 endpoint and state contract is [docs/host-api.md](../../docs/host-api.md); the evidence level of each part is in [docs/release-0.2.0.md](../../docs/release-0.2.0.md).
 
 ## Models: four different things, never conflated
 
@@ -44,6 +47,35 @@ When the session recorded nothing, the model is `null` with `model_source: "unkn
 
 `sessionController` is part of the Desktop Host because Desktop runs the Web Host. The headless profile does not mount it. If the service is missing, `apply` returns without listening and without throwing, so a headless profile is not crashed and is not described as Desktop.
 
+## Long tasks: durable journal, SSE, discovery (0.2.0)
+
+`POST /v1/resume` still accepts a synchronous wait (default 120 s), but `wait: false` / `wait_ms: 0` returns `202` with the accepted record immediately. The Desktop task is independent of that HTTP connection; the result is read later from the durable `requests.json`:
+
+- `GET /v1/requests/:id/wait?timeout_ms=` — long poll to the terminal body (max 30 min);
+- `GET /v1/requests/:id/events?after_seq=N` — incremental events, heartbeat when nothing changed;
+- `GET /v1/requests/:id/stream` — SSE with `id:` = monotonic seq, a heartbeat comment every 15 s, `Last-Event-ID` resume, and `event: end` on terminal.
+
+Every transition is journaled (`recorded`, `accepted`, `running`, `terminal`, `unknown`, `wait_stopped`, `revoked`) with a bounded 200-entry history. After a Host restart, the endpoint re-reads the official log with the stored `rpcId`: provable terminal states are folded back, unprovable ones stay `unknown` and are never resent. This observation channel is the honest completion mechanism; no inbound webhook is treated as a completion signal and nothing is pushed off the machine.
+
+`GET /v1/discover` is the operator-anointed global view: all registered workspaces and sessions, `top`/`subagent`/`worker` classification, `running`/`waiting_input`/`error`/`terminal`/`unknown` (from the official list row and projections; otherwise `unknown`), pagination, dedupe, and `cwd_source`. It reads metadata only. History still requires a per-session grant, and prompt/cancel still require write access.
+
+## Create and open, opt-in and path-guarded (0.2.0)
+
+Three endpoints are disabled unless the plugin config names both the capability and the allowed roots:
+
+```yaml
+    workspaceRoots: [C:/work]
+    allowCreateSession: true
+    allowCreateWorkspace: true
+    allowOpenPath: true
+```
+
+- `POST /v1/workspaces {path, title?, create_directory?}` → official `workspaceRegistry.create`; an existing path is idempotent, a missing path needs `create_directory: true` (one leaf under an existing parent).
+- `POST /v1/sessions {workspace_id | (path + create_workspace:true), access?, title?, model?, agent_preset?}` → official `sessionController.create`, then a merge-only grant (default `read`; `write` explicit). A new session's model is `deferred` unless a live idle Agent exists; the deployment default is never changed.
+- `POST /v1/open {path, action?, application?}` → official `openWorkspacePath`; it opens on the Host desktop and creates nothing.
+
+Paths are realpath-checked inside `workspaceRoots`: the root itself, sibling prefixes, `..`, and symlink escapes are refused. No delete endpoint is exposed.
+
 The official `SessionSummary` has no `profile` field. This plugin is only mounted in the desktop profile, so `profile: "desktop"` is an installation assumption; rows carry `profile_source: "plugin_profile_assumption"` when the row itself did not say.
 
 ## Authorization
@@ -66,7 +98,7 @@ One store (`grants.js`) is the single authority for memory and disk:
 4. poll the log (500 ms growing to 2 s, deadline 120 s) for the turn whose `user/message` carries this request's `source.rpcId`;
 5. return `completed: true` with the assistant text of **that** turn, or `completed: false` with `final.reason.kind` of `timeout` / `unattributed_turn` / `model_mismatch` (plus the HTTP-level error captured from `turn/end`, e.g. `NO_ADAPTER`).
 
-`text` never comes from the `prompt()` return value, because the official value carries no text. `POST /v1/wait/stop` only stops this bridge's wait; the accepted prompt stays in the Desktop queue. `POST /v1/cancel` is the official owned-turn cancel (Host 0.1.6): it calls `sessionController.cancel({ sessionId })` only when the log proves the open turn carries this request's `rpcId`, refuses a session without a live Agent (`409 agent_not_attached`, nothing called), and never rewrites an already finished turn. A cancellation receipt is not a terminal state; the official `turn/end` is.
+`text` never comes from the `prompt()` return value, because the official value carries no text. `POST /v1/wait/stop` only stops this bridge's wait; the accepted prompt stays in the Desktop queue. `POST /v1/cancel` is the official owned-turn cancel: it calls `sessionController.cancel({ sessionId })` only when the log proves the open turn carries this request's `rpcId`, refuses a session without a live Agent (`409 agent_not_attached`, nothing called), re-reads the log immediately before the call and refuses with `409 ownership_changed` if the turn moved, and never rewrites an already finished turn. A cancellation receipt is not a terminal state; the official `turn/end` is.
 
 ## Pairing re-arm and live authorization
 
@@ -91,11 +123,11 @@ Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-c
 Quit Desktop from the tray first. The bridge does not quit it. The tray's **Quit DeepSeek Harness** asks the Host about unfinished work before exiting; there is no supported external quit command, so the tray is the only path.
 
 ```text
-dsh plugin --profile desktop add dsh-control-bridge-host-0.1.6.tgz
+dsh plugin --profile desktop add dsh-control-bridge-host-0.2.0.tgz
 ```
 
 `Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable, and it keeps an existing host secret instead of rotating it. An empty allowlist with no armed bootstrap does not open the port. After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy. To pair another session later, `Rearm-DesktopHostBootstrap.ps1` arms a fresh window; Desktop does not need to be quit or restarted.
 
-Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. The machine-verified package is still 0.1.5. Host 0.1.6 adds the request ledger, query, owned-turn cancel, and the re-armable pairing window described in `docs/request-lifecycle.md`. Those paths are fixture-tested only.
+Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. The machine-verified package is still 0.1.5. Host 0.2.0 adds the durable request journal, long-poll/SSE delivery, global discovery, per-session effort control, and opt-in create/open on top of 0.1.6's request ledger and re-armable pairing window. Those 0.2.0 paths are fixture-tested only; no live Desktop install or live acceptance has been done.
 
 The listener is `127.0.0.1` only. It has no outbound call.

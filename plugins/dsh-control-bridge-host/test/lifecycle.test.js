@@ -332,3 +332,33 @@ test('a prompt spliced before its turn start is not cancellable as an owned turn
   ]
   assert.equal(classifyOwnedTurn(started, 'req-q').owned, true)
 })
+
+test('cancel re-checks ownership immediately before the official call and refuses when it moved', async () => {
+  const ctx = officialCtx({ holdTurn: true })
+  const started = await startServer(ctx, { initial: WRITE })
+  const accepted = await call(started.port, 'POST', '/v1/resume', body({ request_id: 'req-race', wait: false }))
+  assert.equal(accepted.status, 202)
+
+  const original = ctx.sessionQuery.readSession
+  let reads = 0
+  ctx.sessionQuery.readSession = async (sessionId) => {
+    reads += 1
+    const snapshot = await original(sessionId)
+    // Resume happened before this hook was installed. Cancel reads once for the
+    // decision and once immediately before the call; a new turn appears on the
+    // second read.
+    if (reads >= 2) {
+      snapshot.events.push({ seq: ++ctx.state.seq, type: 'turn/start', time: Date.now(), data: { turn: 8 } })
+    }
+    return snapshot
+  }
+  const cancelled = await call(started.port, 'POST', '/v1/cancel', { request_id: 'req-race', session_id: 'session-demo' })
+  assert.equal(cancelled.status, 409)
+  assert.equal(cancelled.body.cancel_accepted, false)
+  assert.equal(cancelled.body.desktop_cancel_called, false)
+  assert.equal(cancelled.body.reason, 'ownership_changed')
+  assert.equal(ctx.state.cancelled, 0)
+  assert.equal(ctx.state.cancelCalls, undefined)
+  await close(started.server)
+})
+

@@ -1,9 +1,11 @@
 import http from 'node:http'
 import { bootstrapSourceFromSecret, createStaticBootstrapSource, hashSecret, matchesSecretHash } from './bootstrap.js'
-import { assembleCatalog, findTurnForRequest, readObservation, readSnapshot, safeError, turnAnswer } from './host_read.js'
+import { journalPatch, eventsSince, journalStart } from './journal.js'
+import { hasRoots, resolveWithinRoots } from './paths.js'
+import { assembleCatalog, assembleDiscovery, findTurnForRequest, readObservation, readSnapshot, safeError, turnAnswer } from './host_read.js'
 import {
-  agentIdle, agentSelection, checkSelection, executionModelForTurn, liveAgent,
-  modelStateFromEvents, modelStateFromProjection, sameRoute, sameSelection, selectOnAgent, selectionOf,
+  agentIdle, agentSelection, checkSelection, executionModelForTurn, effortSupport, liveAgent,
+  modelCatalog, modelStateFromEvents, modelStateFromProjection, sameRoute, sameSelection, selectOnAgent, selectionOf,
 } from './models.js'
 import {
   authorizeSession, authorizeWorkspace, checkAuth, decideResume, loopbackPeer, pageHistory,
@@ -16,6 +18,11 @@ const DEFAULT_POLL_INTERVAL_MS = 500
 const DEFAULT_POLL_MAX_INTERVAL_MS = 2_000
 const MAX_TEXT_CHARS = 100_000
 const MAX_PAIRING_BODY_BYTES = 16 * 1024
+const MAX_EVENT_WAIT_MS = 60_000
+const MAX_REQUEST_WAIT_MS = 30 * 60_000
+const MAX_STREAM_MS = 30 * 60_000
+const JOURNAL_TICK_MS = 500
+const JOURNAL_HEARTBEAT_MS = 15_000
 
 /**
  * Authorize one loopback request against the live pairing window.
@@ -128,6 +135,14 @@ export function createHostServer(ctx, config, secret) {
   const pollIntervalMs = Math.max(50, Number(config.pollIntervalMs) || DEFAULT_POLL_INTERVAL_MS)
   const pollMaxIntervalMs = Math.max(pollIntervalMs, Number(config.pollMaxIntervalMs) || DEFAULT_POLL_MAX_INTERVAL_MS)
   const globalDefault = typeof config.globalDefault === 'function' ? config.globalDefault : undefined
+  // Write-capable directory/session creation is opt-in twice: a capability flag
+  // and an explicit root list. With neither configured, all three endpoints
+  // refuse and explain; nothing is guessed from the process cwd.
+  const workspaceRoots = Array.isArray(config.workspaceRoots) ? config.workspaceRoots : []
+  const createSessionEnabled = config.allowCreateSession === true
+  const createWorkspaceEnabled = config.allowCreateWorkspace === true
+  const openPathEnabled = config.allowOpenPath === true
+  const rootsUnavailable = () => !hasRoots(workspaceRoots)
 
   function state() {
     if (!grants) throw new Error('grant store is not configured')
@@ -155,6 +170,155 @@ export function createHostServer(ctx, config, secret) {
   /** An in-flight resume belongs to one session: the same id on another is not shared. */
   function waitKey(sessionId, requestId) {
     return `${sessionId}\u0000${requestId}`
+  }
+
+  /** Authorize one stored request by its own record. */
+  async function authorizeRequestById(requestId, need = 'read') {
+    const record = ledger.get(requestId)
+    if (!record) return { ok: false, status: 404, reason: 'unknown_request' }
+    const grantsNow = state()
+    const found = await findSessionRow(record.session_id)
+    if (found.status === 'read_failed') return { ok: false, status: 502, reason: 'session_list_read_failed' }
+    if (found.status !== 'ok') return { ok: false, status: 404, reason: 'missing_session' }
+    const view = adapterSession(found.row)
+    const auth = authorizeSession(grantsNow, view, { workspaceId: record.workspace_id || view.workspaceId, need })
+    if (!auth.ok) return { ok: false, status: 403, reason: auth.reason }
+    return { ok: true, record, view, auth }
+  }
+
+  /**
+   * Reconcile one stored request from the official log, read-only.
+   *
+   * This is what lets a coordinator learn about a finished long task after the
+   * original synchronous wait ended, and after the Host itself restarted: the
+   * durable request holds the rpcId, the official log holds the turn. A turn
+   * that is not bound, is ambiguous, or is not finished leaves the record
+   * unchanged; nothing is ever resent here.
+   */
+  async function advanceRequest(requestId) {
+    const record = ledger.get(requestId)
+    if (!record) return null
+    if (record.phase === 'terminal') return record
+    if (record.phase === 'unknown') return record
+    if (record.prompt_attempted !== true) return record
+    let snap
+    try {
+      snap = await readSnapshot(ctx.sessionQuery, record.session_id)
+    } catch {
+      return record
+    }
+    const turn = findTurnForRequest(snap.events, { requestId, afterSeq: Number(record.last_seq) || 0 })
+    if (!turn || turn.attribution === 'ambiguous') return record
+    if (turn.end) {
+      const built = describeTurn(record.session_id, requestId, record, snap, turn)
+      try {
+        return await ledger.update(requestId, {
+          ...journalPatch(record, 'terminal', { terminal: built.terminal, completed: built.completed, source: 'log_reconcile' }),
+          phase: 'terminal',
+          terminal_scope: 'official',
+          crash_window: false,
+          manual_reconcile: false,
+          accepted: true,
+          started_task: true,
+          response: built,
+          http_status: 200,
+          last_seq: lastSeqOf(snap),
+        })
+      } catch {
+        return record
+      }
+    }
+    try {
+      return await ledger.update(requestId, {
+        ...journalPatch(record, 'running', { turn: turn.number }),
+        phase: 'accepted',
+        accepted: true,
+        started_task: true,
+        // Keep the cursor at the turn start, before this request's rpcId
+        // marker: advancing it past the marker would hide the turn from the
+        // next reconcile pass.
+        last_seq: turn.start && Number.isFinite(turn.start.seq) ? turn.start.seq : record.last_seq,
+      })
+    } catch {
+      return record
+    }
+  }
+
+  /** Compact frame shared by the events endpoint and SSE. */
+  function requestFrame(record, extra = {}) {
+    return {
+      request_id: record.request_id,
+      session_id: record.session_id,
+      phase: record.phase,
+      accepted: record.accepted === true ? true : (record.accepted === false ? false : null),
+      started_task: record.started_task === true,
+      completed: record.phase === 'terminal' ? Boolean(record.response && record.response.completed) : false,
+      terminal: record.phase === 'terminal' && record.response ? record.response.terminal : null,
+      seq: Number(record.event_seq) || 0,
+      ...extra,
+    }
+  }
+
+  /** Normalize the two official workspace shapes (entity or `{ workspace }`). */
+  function workspaceView(value) {
+    const workspace = value && value.workspace ? value.workspace : value
+    if (!workspace || typeof workspace !== 'object') return null
+    const id = String(workspace.id || '')
+    if (!id) return null
+    return {
+      id,
+      path: String(workspace.path || ''),
+      title: redactText(workspace.title || ''),
+      sessionIds: Array.isArray(workspace.sessionIds) ? workspace.sessionIds.map(String) : [],
+    }
+  }
+
+  /** Map the official ApiError code to an HTTP status; unknown codes are a 502. */
+  function sendOfficialError(res, error, method) {
+    const detail = safeError(error, method)
+    const code = (error && error.code) || 'call_failed'
+    let status = 502
+    if (code === 'gateway/bad-request') status = 400
+    else if (code === 'workspace/not-found' || code === 'session/not-found') status = 404
+    else if (code === 'workspace/session-active' || code === 'session/conflict' || code === 'agent-preset/conflict') status = 409
+    else if (code === 'gateway/cancelled') status = 409
+    return send(res, status, { ok: false, reason: code, started_task: false, detail })
+  }
+
+  function bodyOfRequest(record) {    if (record.phase === 'terminal' && record.response) return { status: record.http_status || 200, body: record.response }
+    if (record.phase === 'unknown') {
+      return {
+        status: 409,
+        body: {
+          accepted: record.accepted === true ? true : null,
+          completed: false,
+          reason: 'manual_reconcile',
+          phase: 'unknown',
+          session_id: record.session_id,
+          request_id: record.request_id,
+          started_task: record.prompt_attempted === true,
+          exactly_once: false,
+          resend: false,
+          detail: 'the bridge cannot prove whether the official prompt was admitted; it will not send the prompt again',
+        },
+      }
+    }
+    return {
+      status: 200,
+      body: {
+        accepted: record.accepted === true ? true : null,
+        completed: false,
+        phase: record.phase,
+        terminal: null,
+        session_id: record.session_id,
+        request_id: record.request_id,
+        started_task: record.started_task === true,
+        exactly_once: false,
+        requested_model: record.requested_model || null,
+        confirmed_selection: record.confirmed_selection || null,
+        note: 'the bridge wait and the Desktop task are separate; this read does not send or cancel anything',
+      },
+    }
   }
 
   async function recoverStored(sessionId, requestId, record) {
@@ -243,16 +407,50 @@ export function createHostServer(ctx, config, secret) {
     }
   }
 
+  /**
+   * Compare the execution header with the confirmed selection. Route and
+   * reasoning effort are separate answers: an effort missing from the header is
+   * `unknown`, never silently equal. `model_match` is true only when both are
+   * known and equal, false when either known part differs, and null when the
+   * comparison cannot be made.
+   */
+  function selectionMatch(execution, confirmed) {
+    if (!execution || !confirmed) {
+      return { route_match: null, effort_match: null, effort_verified: false, model_match: null, mismatch: null }
+    }
+    const routeMatch = sameRoute(execution, confirmed)
+    const executionEffort = execution.reasoningEffort
+    const confirmedEffort = confirmed.reasoningEffort
+    let effortMatch
+    let effortVerified = true
+    if (executionEffort === undefined) {
+      if (confirmedEffort === undefined) effortMatch = true
+      else { effortMatch = null; effortVerified = false }
+    } else {
+      effortMatch = executionEffort === confirmedEffort
+    }
+    const modelMatch = routeMatch === false
+      ? false
+      : (effortMatch === false ? false : (effortMatch === true ? true : null))
+    return {
+      route_match: routeMatch,
+      effort_match: effortMatch,
+      effort_verified: effortVerified,
+      model_match: modelMatch,
+      mismatch: modelMatch === false ? (routeMatch === false ? 'route' : 'reasoning_effort') : null,
+    }
+  }
+
   function describeTurn(sessionId, requestId, record, snap, turn) {
     const answer = turnAnswer(snap.events, turn)
     const execution = executionModelForTurn(snap.events, turn)
     const confirmedSelection = record.confirmed_selection
-    const modelMatch = execution ? sameRoute(execution, confirmedSelection) : null
+    const match = selectionMatch(execution, confirmedSelection)
     let terminal = terminalKind(answer.reason)
     let finalReason = answer.reason || { kind: terminal }
-    if (modelMatch === false) {
+    if (match.model_match === false) {
       terminal = 'model_mismatch'
-      finalReason = { kind: 'model_mismatch', requested: confirmedSelection, execution }
+      finalReason = { kind: 'model_mismatch', mismatch: match.mismatch, requested: confirmedSelection, execution }
     }
     return {
       accepted: true,
@@ -266,7 +464,12 @@ export function createHostServer(ctx, config, secret) {
       confirmed_selection: confirmedSelection,
       execution_model: execution,
       execution_model_source: execution ? 'request_header' : 'unknown',
-      model_match: modelMatch,
+      route_match: match.route_match,
+      effort_match: match.effort_match,
+      effort_verified: match.effort_verified,
+      effort_unverified: record.effort_unverified === true,
+      model_match: match.model_match,
+      model_mismatch: match.mismatch,
       text: redactText(answer.texts.join('\n\n')),
       final: { reason: finalReason },
       terminal,
@@ -470,6 +673,248 @@ export function createHostServer(ctx, config, secret) {
         return send(res, 200, loaded.membership)
       }
 
+      if (req.method === 'GET' && url.pathname === '/v1/discover') {
+        const discovery = await assembleDiscovery(ctx, {
+          workspace_id: url.searchParams.get('workspace_id') || '',
+          kind: url.searchParams.get('kind') || '',
+          status: url.searchParams.get('status') || '',
+          offset: url.searchParams.get('offset') || '',
+          limit: url.searchParams.get('limit') || '',
+        })
+        note(config, discovery.warnings)
+        return send(res, discovery.ok ? 200 : 502, discovery)
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/workspaces') {
+        if (!createWorkspaceEnabled) {
+          return send(res, 403, {
+            ok: false,
+            reason: 'create_workspace_disabled',
+            detail: 'set allowCreateWorkspace: true and workspaceRoots in the plugin config to enable it',
+          })
+        }
+        if (!ctx.workspaceRegistry || typeof ctx.workspaceRegistry.create !== 'function') {
+          return send(res, 501, { ok: false, reason: 'workspace_create_unavailable', detail: 'the official workspaceRegistry.create is not mounted' })
+        }
+        if (rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
+        const body = await readJson(req)
+        const resolved = resolveWithinRoots(workspaceRoots, body.path, { createDirectory: body.create_directory === true })
+        if (!resolved.ok) {
+          return send(res, 400, { ok: false, reason: resolved.reason, detail: resolved.detail || null, path: null })
+        }
+        let existing = null
+        try {
+          if (typeof ctx.workspaceRegistry.resolveByPath === 'function') {
+            existing = await ctx.workspaceRegistry.resolveByPath(resolved.path)
+          }
+        } catch { /* resolveByPath is optional */ }
+        try {
+          const value = await ctx.workspaceRegistry.create(resolved.path, typeof body.title === 'string' ? body.title : undefined)
+          const workspace = workspaceView(value)
+          return send(res, 200, {
+            ok: true,
+            workspace_id: workspace ? workspace.id : '',
+            workspace,
+            path: resolved.path,
+            created: !existing,
+            created_directory: resolved.created,
+            note: 'workspace registration only; no session was created and no file was written inside it',
+          })
+        } catch (error) {
+          return sendOfficialError(res, error, 'workspaceRegistry.create')
+        }
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/sessions') {
+        if (!createSessionEnabled) {
+          return send(res, 403, {
+            ok: false,
+            reason: 'create_session_disabled',
+            detail: 'set allowCreateSession: true and workspaceRoots in the plugin config to enable it',
+          })
+        }
+        if (!ctx.sessionController || typeof ctx.sessionController.create !== 'function') {
+          return send(res, 501, { ok: false, reason: 'session_create_unavailable', detail: 'the official sessionController.create is not mounted' })
+        }
+        if (rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
+        const body = await readJson(req)
+        let workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id : ''
+        let workspace = null
+        if (workspaceId) {
+          const registry = ctx.workspaceRegistry
+          let found = null
+          try {
+            if (registry && typeof registry.get === 'function') found = registry.get(workspaceId)
+            if (!found && registry && typeof registry.list === 'function') {
+              found = (registry.list() || []).find((item) => String(item.id) === workspaceId) || null
+            }
+          } catch { found = null }
+          if (!found) return send(res, 404, { ok: false, reason: 'workspace_not_found', workspace_id: workspaceId })
+          workspace = workspaceView(found)
+          const resolved = resolveWithinRoots(workspaceRoots, String(found.path || ''), { createDirectory: false })
+          if (!resolved.ok) {
+            return send(res, 403, {
+              ok: false,
+              reason: resolved.reason,
+              detail: 'the workspace directory is outside the configured workspaceRoots',
+            })
+          }
+        } else {
+          if (body.create_workspace !== true) {
+            return send(res, 400, {
+              ok: false,
+              reason: 'workspace_required',
+              detail: 'pass workspace_id, or path plus create_workspace:true; an unbound cwd Session is not supported here',
+            })
+          }
+          if (!createWorkspaceEnabled) {
+            return send(res, 403, { ok: false, reason: 'create_workspace_disabled' })
+          }
+          if (!ctx.workspaceRegistry || typeof ctx.workspaceRegistry.create !== 'function') {
+            return send(res, 501, { ok: false, reason: 'workspace_create_unavailable' })
+          }
+          const resolved = resolveWithinRoots(workspaceRoots, body.path, { createDirectory: body.create_directory === true })
+          if (!resolved.ok) {
+            return send(res, 400, { ok: false, reason: resolved.reason, detail: resolved.detail || null })
+          }
+          try {
+            workspace = workspaceView(await ctx.workspaceRegistry.create(resolved.path, typeof body.title === 'string' ? body.title : undefined))
+          } catch (error) {
+            return sendOfficialError(res, error, 'workspaceRegistry.create')
+          }
+          workspaceId = workspace ? workspace.id : ''
+        }
+        if (!workspaceId || !workspace) {
+          return send(res, 502, { ok: false, reason: 'workspace_unresolved' })
+        }
+        const createRequest = { workspaceId }
+        if (typeof body.agent_preset === 'string' && body.agent_preset) createRequest.agentPreset = body.agent_preset
+        if (typeof body.session_id === 'string' && body.session_id) createRequest.sessionId = body.session_id
+        let created
+        try {
+          created = await ctx.sessionController.create(createRequest)
+        } catch (error) {
+          return sendOfficialError(res, error, 'sessionController.create')
+        }
+        const sessionId = String((created && created.sessionId) || createRequest.sessionId || '')
+        if (!sessionId) return send(res, 502, { ok: false, reason: 'create_returned_no_session_id' })
+        const access = body.access === 'write' ? 'write' : 'read'
+        const sessionGrant = {
+          sessionId,
+          workspaceId,
+          access,
+          cwd: workspace.path || '',
+          profile: typeof body.profile === 'string' && body.profile ? body.profile : 'desktop',
+          title: typeof body.title === 'string' ? body.title : '',
+        }
+        let after
+        try {
+          after = await grants.grant({
+            workspace: { id: workspace.id, cwd: workspace.path || '', title: workspace.title || '' },
+            session: sessionGrant,
+          })
+        } catch (error) {
+          const detail = safeError(error, 'grants.save')
+          note(config, [detail])
+          return send(res, 500, {
+            ok: false,
+            reason: 'grant_persist_failed',
+            session_id: sessionId,
+            workspace_id: workspaceId,
+            saved: false,
+            detail,
+            note: 'the Session exists but is not granted; fix the allowlist and grant it explicitly',
+          })
+        }
+        // A new Session has no recorded model selection. The bridge never
+        // substitutes the deployment default; an explicit model is selected
+        // only when the live Agent already exists and is idle.
+        let modelInfo = {
+          selection: null,
+          source: 'deferred',
+          note: 'a new Session has no recorded selection; pass model on the first resume or set it with POST /v1/model',
+        }
+        if (body.model && typeof body.model === 'object') {
+          const selection = selectionOf({
+            provider: body.model.provider,
+            model: body.model.model,
+            reasoningEffort: body.model.reasoning_effort ?? body.model.reasoningEffort,
+          })
+          if (!selection) return send(res, 400, { ok: false, reason: 'invalid_requested_model', session_id: sessionId })
+          const support = await effortSupport(ctx, selection)
+          if (support.known && selection.reasoningEffort && !support.efforts.includes(selection.reasoningEffort)) {
+            return send(res, 409, {
+              ok: false,
+              reason: 'unsupported_reasoning_effort',
+              session_id: sessionId,
+              supported_reasoning_efforts: support.efforts,
+            })
+          }
+          const agent = liveAgent(ctx, sessionId)
+          if (agent && agentIdle(agent)) {
+            const selected = selectOnAgent(agent, selection)
+            modelInfo = selected.ok
+              ? { selection: selected.confirmed, source: 'session_selected_by_bridge', effort_unverified: Boolean(selection.reasoningEffort && !support.known) }
+              : { selection: null, source: 'deferred', reason: selected.reason }
+          } else {
+            modelInfo = { selection: null, source: 'deferred', reason: agent ? 'busy' : 'needs_ui' }
+          }
+        }
+        return send(res, 200, {
+          ok: true,
+          session_id: sessionId,
+          workspace_id: workspaceId,
+          path: workspace.path || '',
+          access,
+          grant: {
+            session_id: sessionId,
+            workspace_id: workspaceId,
+            access,
+            cwd: workspace.path || '',
+          },
+          model: modelInfo,
+          revision: after.revision,
+          started_task: false,
+          note: 'the Session is created and granted; no prompt was sent and the deployment default model was not changed',
+        })
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/open') {
+        if (!openPathEnabled) {
+          return send(res, 403, {
+            ok: false,
+            reason: 'open_path_disabled',
+            detail: 'set allowOpenPath: true and workspaceRoots in the plugin config to enable it',
+          })
+        }
+        if (!ctx.sessionController || typeof ctx.sessionController.openWorkspacePath !== 'function') {
+          return send(res, 501, { ok: false, reason: 'open_path_unavailable', detail: 'the official openWorkspacePath is not mounted' })
+        }
+        if (rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
+        if (typeof ctx.sessionController.canOpenWorkspacePath === 'function') {
+          let possible = false
+          try { possible = ctx.sessionController.canOpenWorkspacePath() === true } catch { possible = false }
+          if (!possible) {
+            return send(res, 501, { ok: false, reason: 'open_path_unavailable', detail: 'this Host cannot open paths from the bridge process' })
+          }
+        }
+        const body = await readJson(req)
+        const resolved = resolveWithinRoots(workspaceRoots, body.path, { createDirectory: false })
+        if (!resolved.ok) return send(res, 400, { ok: false, reason: resolved.reason, detail: resolved.detail || null })
+        const request = { path: resolved.path }
+        if (body.action === 'reveal') request.action = 'reveal'
+        if (typeof body.application === 'string' && body.application) request.application = body.application
+        const controller = new AbortController()
+        try {
+          const value = await ctx.sessionController.openWorkspacePath(request, controller.signal)
+          return send(res, 200, {
+            ok: true,
+            opened: Boolean(value && value.opened),
+            path: resolved.path,
+            action: request.action || 'open',
+            note: 'this opens the path on the Host desktop; it does not create or modify anything',
+          })
+        } catch (error) {
+          return sendOfficialError(res, error, 'sessionController.openWorkspacePath')
+        }
+      }
       if (req.method === 'GET' && url.pathname === '/v1/granted') {
         const grantsNow = state()
         const loaded = await loadCatalog()
@@ -561,6 +1006,10 @@ export function createHostServer(ctx, config, secret) {
         }
         return send(res, 200, pageHistory(grantsNow, view, snapshot, url.searchParams.get('offset'), url.searchParams.get('limit')))
       }
+      if (req.method === 'GET' && url.pathname === '/v1/model-catalog') {
+        const catalog = await modelCatalog(ctx)
+        return send(res, catalog.ok ? 200 : 502, catalog)
+      }
       if (req.method === 'GET' && url.pathname === '/v1/models') {
         const grantsNow = state()
         const sessionId = url.searchParams.get('session_id') || ''
@@ -612,6 +1061,21 @@ export function createHostServer(ctx, config, secret) {
         })
         if (!sessionId) return send(res, 400, { ok: false, reason: 'missing_session_id' })
         if (!selection) return send(res, 400, { ok: false, reason: 'invalid_selection', detail: 'provider and model are required' })
+        // An explicit null clears the effort; it is not the same as omitting it.
+        const effortAsked = Object.prototype.hasOwnProperty.call(body, 'reasoning_effort')
+          ? body.reasoning_effort
+          : body.reasoningEffort
+        const effortCleared = effortAsked === null
+        const support = await effortSupport(ctx, selection)
+        if (support.known && selection.reasoningEffort && !support.efforts.includes(selection.reasoningEffort)) {
+          return send(res, 409, {
+            ok: false,
+            reason: 'unsupported_reasoning_effort',
+            requested: selection,
+            supported_reasoning_efforts: support.efforts,
+            detail: 'the registered route does not advertise this reasoning effort',
+          })
+        }
         const grantsNow = state()
         const found = await findSessionRow(sessionId)
         if (found.status === 'read_failed') return send(res, 502, { ok: false, reason: 'session_list_read_failed' })
@@ -649,6 +1113,9 @@ export function createHostServer(ctx, config, secret) {
           session_id: sessionId,
           requested: selection,
           confirmed: selected.confirmed,
+          effort_cleared: effortCleared,
+          effort_unverified: Boolean(selection.reasoningEffort && !support.known),
+          supported_reasoning_efforts: support.efforts,
           model_source: 'session_pending',
           global_default: defaultSelection(),
           global_default_unchanged: JSON.stringify(defaultBefore) === JSON.stringify(defaultSelection()),
@@ -772,6 +1239,22 @@ export function createHostServer(ctx, config, secret) {
           })
         }
         const agentAtStart = liveAgent(ctx, sessionId)
+        // The effort a caller asked for must be checked against what the
+        // registered route advertises, when the deployment enumerates it. An
+        // unenumerable list is reported as unverified, not silently accepted as
+        // a guarantee.
+        const effortInfo = await effortSupport(ctx, requested)
+        if (effortInfo.known && requested.reasoningEffort && !effortInfo.efforts.includes(requested.reasoningEffort)) {
+          return send(res, 409, {
+            accepted: false,
+            completed: false,
+            reason: 'unsupported_reasoning_effort',
+            requested_model: requested,
+            supported_reasoning_efforts: effortInfo.efforts,
+            started_task: false,
+          })
+        }
+        const effortUnverified = Boolean(requested.reasoningEffort && !effortInfo.known)
         if (explicitModel && !sameSelection(agentSelection(agentAtStart), requested)) {
           const availability = await checkSelection(ctx, requested)
           if (!availability.available) {
@@ -870,11 +1353,35 @@ export function createHostServer(ctx, config, secret) {
         let settleWait
         const pendingResult = new Promise((resolve) => { settleWait = resolve })
         waiters.set(waitKey(sessionId, requestId), pendingResult)
+        try {
+          await ledger.update(requestId, journalPatch(ledger.get(requestId), 'recorded', {
+            session_id: sessionId,
+            explicit_model: explicitModel,
+          }))
+          await ledger.update(requestId, { effort_unverified: effortUnverified })
+        } catch { /* a failed journal append must not undo a durable claim */ }
         const publish = async (status, payload, patch) => {
           let nextStatus = status
           let nextBody = payload
           try {
             await ledger.update(requestId, patch)
+            const kind = patch.phase === 'terminal'
+              ? 'terminal'
+              : (patch.phase === 'unknown'
+                ? 'unknown'
+                : (payload && payload.reason === 'revoked_during_wait'
+                  ? 'revoked'
+                  : (patch.terminal_scope === 'bridge_wait'
+                    ? 'bridge_timeout'
+                    : (patch.phase === 'accepted' ? 'accepted' : 'status'))))
+            try {
+              await ledger.update(requestId, journalPatch(ledger.get(requestId), kind, {
+                phase: patch.phase || null,
+                terminal: (payload && payload.terminal) || null,
+                completed: Boolean(payload && payload.completed === true),
+                reason: (payload && payload.reason) || null,
+              }))
+            } catch { /* the terminal body is already durable; the journal is secondary */ }
           } catch {
             nextStatus = 500
             nextBody = {
@@ -989,7 +1496,41 @@ export function createHostServer(ctx, config, secret) {
           }
           acceptedOnce = true
           await ledger.update(requestId, { phase: 'accepted', accepted: true, started_task: true, crash_window: true })
-          const deadline = startedAt + resumeTimeoutMs
+          try {
+            await ledger.update(requestId, journalPatch(ledger.get(requestId), 'accepted', {
+              phase: 'accepted',
+              requested_model: requested,
+              confirmed_selection: confirmed,
+              explicit_model: explicitModel,
+            }))
+          } catch { /* journal is secondary to the durable record */ }
+          // The synchronous wait is a convenience only. `wait: false` (or
+          // wait_ms: 0) returns the accepted record immediately; a coordinator
+          // then uses /v1/requests/:id/events, /stream or /wait for the real
+          // Desktop task lifetime, which can outlive this HTTP connection.
+          const requestedWaitMs = body.wait === false
+            ? 0
+            : Number(body.wait_ms ?? body.waitMs ?? resumeTimeoutMs)
+          const waitMs = Number.isFinite(requestedWaitMs)
+            ? Math.min(MAX_REQUEST_WAIT_MS, Math.max(0, Math.floor(requestedWaitMs)))
+            : resumeTimeoutMs
+          if (waitMs === 0) {
+            return publish(202, {
+              accepted: true,
+              completed: false,
+              phase: 'accepted',
+              wait: 'none',
+              session_id: sessionId,
+              request_id: requestId,
+              model_selection: explicitModel ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+              requested_model: requested,
+              confirmed_selection: confirmed,
+              started_task: true,
+              exactly_once: false,
+              note: 'the prompt was accepted; the Desktop turn continues independently of this response',
+            }, { phase: 'accepted', accepted: true, started_task: true, crash_window: false })
+          }
+          const deadline = startedAt + waitMs
           let turn = null
           let lastSnapshot = before
           let polls = 0
@@ -1077,7 +1618,7 @@ export function createHostServer(ctx, config, secret) {
               model_timeout: false,
               turn: turn && turn.number !== null ? turn.number : null,
               last_seq: lastSeqOf(lastSnapshot),
-              timeout_ms: resumeTimeoutMs,
+              timeout_ms: waitMs,
               polls,
               read_ms_total: readMsTotal,
               elapsed_ms: Date.now() - startedAt,
@@ -1094,12 +1635,12 @@ export function createHostServer(ctx, config, secret) {
           // `completed` reason is reported as completed, so an error, an abort,
           // or a token limit cannot be mistaken for a finished task.
           const execution = executionModelForTurn(lastSnapshot.events, turn)
-          const modelMatch = execution ? sameRoute(execution, confirmed) : null
+          const match = selectionMatch(execution, confirmed)
           let terminal = terminalKind(answer.reason)
           let finalReason = answer.reason || { kind: terminal }
-          if (modelMatch === false) {
+          if (match.model_match === false) {
             terminal = 'model_mismatch'
-            finalReason = { kind: 'model_mismatch', requested: confirmed, execution }
+            finalReason = { kind: 'model_mismatch', mismatch: match.mismatch, requested: confirmed, execution }
           }
           const result = {
             accepted: true,
@@ -1111,7 +1652,13 @@ export function createHostServer(ctx, config, secret) {
             confirmed_selection: confirmed,
             execution_model: execution,
             execution_model_source: execution ? 'request_header' : 'unknown',
-            model_match: modelMatch,
+            route_match: match.route_match,
+            effort_match: match.effort_match,
+            effort_verified: match.effort_verified,
+            model_match: match.model_match,
+            model_mismatch: match.mismatch,
+            effort_unverified: effortUnverified,
+            supported_reasoning_efforts: effortInfo.efforts,
             global_default: defaultSelection(),
             model: execution ? execution.model : null,
             provider: execution ? execution.provider : null,
@@ -1231,6 +1778,134 @@ export function createHostServer(ctx, config, secret) {
           remaining: after.sessionAllowlist.length,
         })
       }
+      const requestStream = /^\/v1\/requests\/([^/]+)\/(events|wait|stream)$/.exec(url.pathname)
+      if (req.method === 'GET' && requestStream) {
+        let requestId
+        try {
+          requestId = decodeURIComponent(requestStream[1])
+        } catch {
+          return send(res, 400, { ok: false, reason: 'malformed_request_id' })
+        }
+        const op = requestStream[2]
+        const authorized = await authorizeRequestById(requestId, 'read')
+        if (!authorized.ok) {
+          return send(res, authorized.status, { ok: false, reason: authorized.reason, request_id: requestId })
+        }
+        if (op === 'events') {
+          const afterSeq = Math.max(0, Number(url.searchParams.get('after_seq')) || 0)
+          const timeoutMs = Math.min(MAX_EVENT_WAIT_MS, Math.max(0, Number(url.searchParams.get('timeout_ms')) || 30_000))
+          const startedWait = Date.now()
+          for (;;) {
+            const record = await advanceRequest(requestId)
+            if (!record) return send(res, 404, { ok: false, reason: 'unknown_request', request_id: requestId })
+            const events = eventsSince(record, afterSeq)
+            const terminal = record.phase === 'terminal' || record.phase === 'unknown'
+            const waited = Date.now() - startedWait
+            if (events.length > 0 || terminal || waited >= timeoutMs) {
+              return send(res, 200, {
+                ok: true,
+                ...requestFrame(record, { events, terminal_phase: terminal }),
+                heartbeat: events.length === 0 && !terminal,
+                waited_ms: waited,
+                journal_start: journalStart(record),
+              })
+            }
+            await sleep(Math.min(JOURNAL_TICK_MS, Math.max(10, timeoutMs - waited)))
+          }
+        }
+        if (op === 'wait') {
+          const timeoutMs = Math.min(MAX_REQUEST_WAIT_MS, Math.max(0, Number(url.searchParams.get('timeout_ms')) || 60_000))
+          const startedWait = Date.now()
+          for (;;) {
+            const record = await advanceRequest(requestId)
+            if (!record) return send(res, 404, { ok: false, reason: 'unknown_request', request_id: requestId })
+            const waited = Date.now() - startedWait
+            if (record.phase === 'terminal' || record.phase === 'unknown') {
+              const built = bodyOfRequest(record)
+              return send(res, record.phase === 'terminal' ? built.status : 409, {
+                ...built.body,
+                query: true,
+                waited_ms: waited,
+                acceptance: built.body.completed === true ? 'completed' : 'not_completed',
+              })
+            }
+            if (waited >= timeoutMs) {
+              const built = bodyOfRequest(record)
+              return send(res, 200, {
+                ...built.body,
+                query: true,
+                wait: 'timeout',
+                reason: 'wait_timeout',
+                waited_ms: waited,
+                timeout_ms: timeoutMs,
+                note: 'the Desktop task continues; read again or subscribe to the event stream',
+              })
+            }
+            await sleep(Math.min(JOURNAL_TICK_MS, Math.max(10, timeoutMs - waited)))
+          }
+        }
+        // Server-Sent Events: heartbeat, monotonic seq, resume with Last-Event-ID
+        // or after_seq. This is an observation channel only; it never prompts,
+        // cancels, or resends.
+        const afterSeq = Math.max(
+          0,
+          Number(req.headers['last-event-id']) || Number(url.searchParams.get('after_seq')) || 0,
+        )
+        res.writeHead(200, {
+          'content-type': 'text/event-stream; charset=utf-8',
+          'cache-control': 'no-store',
+          connection: 'keep-alive',
+          'x-accel-buffering': 'no',
+        })
+        res.write('retry: 1000\n\n')
+        let closed = false
+        const write = (chunk) => {
+          if (closed) return false
+          try {
+            res.write(chunk)
+            return true
+          } catch {
+            closed = true
+            return false
+          }
+        }
+        res.on('close', () => { closed = true })
+        let lastSeq = afterSeq
+        const streamStart = Date.now()
+        let lastBeat = Date.now()
+        try {
+          for (;;) {
+            if (closed) break
+            const record = await advanceRequest(requestId)
+            if (!record) {
+              write(`event: error\ndata: ${JSON.stringify({ ok: false, reason: 'unknown_request', request_id: requestId })}\n\n`)
+              break
+            }
+            for (const event of eventsSince(record, lastSeq)) {
+              write(`id: ${event.seq}\nevent: request\ndata: ${JSON.stringify(event)}\n\n`)
+              lastSeq = Number(event.seq)
+            }
+            if (record.phase === 'terminal' || record.phase === 'unknown') {
+              write(`event: end\ndata: ${JSON.stringify(requestFrame(record))}\n\n`)
+              break
+            }
+            if (Date.now() - lastBeat >= JOURNAL_HEARTBEAT_MS) {
+              write(`: heartbeat ${new Date().toISOString()}\n\n`)
+              lastBeat = Date.now()
+            }
+            if (Date.now() - streamStart >= MAX_STREAM_MS) {
+              write(`event: end\ndata: ${JSON.stringify({ ...requestFrame(record), reason: 'stream_timeout' })}\n\n`)
+              break
+            }
+            await sleep(JOURNAL_TICK_MS)
+          }
+        } catch {
+          write(`event: error\ndata: ${JSON.stringify({ ok: false, reason: 'stream_failed' })}\n\n`)
+        } finally {
+          try { res.end() } catch { /* client already gone */ }
+        }
+        return
+      }
       if (req.method === 'GET' && url.pathname === '/v1/requests') {
         const requestId = url.searchParams.get('request_id') || ''
         const sessionId = url.searchParams.get('session_id') || ''
@@ -1264,6 +1939,15 @@ export function createHostServer(ctx, config, secret) {
           })
         }
         controller.abort()
+        const stopping = ledger.get(body.request_id)
+        if (stopping) {
+          try {
+            await ledger.update(body.request_id, journalPatch(stopping, 'wait_stopped', {
+              scope: 'bridge_wait',
+              desktop_turn_kept: true,
+            }))
+          } catch { /* journal only */ }
+        }
         return send(res, 200, {
           confirmed: true,
           scope: 'bridge_wait',
