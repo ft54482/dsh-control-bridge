@@ -361,4 +361,3 @@ test('cancel re-checks ownership immediately before the official call and refuse
   assert.equal(ctx.state.cancelCalls, undefined)
   await close(started.server)
 })
-

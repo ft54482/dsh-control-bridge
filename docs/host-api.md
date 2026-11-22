@@ -64,7 +64,7 @@
 - outbox 落盘（`outbox.json`，原子写 + fsync）；重启后继续未完成事件；指数退避（1s/5s/30s/2m/10m），达到 `maxAttempts` 标记失败；接收方必须按 `event_id` 幂等重放。
 - SSRF：只允许 `https://`、禁止 userinfo/fragment、`allowedHosts` 不匹配拒绝、DNS 解析到回环/私网/链路本地/保留地址拒绝。URL 在投递前重新校验。
 - 状态区分：`completed`、`failed`、`cancelled`、`needs_input`、`unknown`；`bridge_timeout` 仅表示桥等待结束，`completed:false`；`accepted` 不产生完成通知。
-- 真实接收端 URL/密钥目前**不存在**，本版本没有端到端接通；`GET /v1/requests` 与有时限轮询仍是兜底。
+- 真机验收使用 SSE 和有时限轮询。签名接收端尚未配置，真实 webhook 投递仍待验证。
 
 ## 写
 

@@ -61,9 +61,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBootstrap.ps1 -Minutes 20
 ```
 
-它只写这两个窗口文件，前后校验 `host.secret` 与 `allowlist.json` 未变。`Prepare-DesktopHost.ps1` 再次运行时也保留已有 host secret。这些仍然是夹具回归；0.1.6 还没有在真机 Desktop 上安装验收。
+它只写这两个窗口文件，前后校验 `host.secret` 与 `allowlist.json` 未变。`Prepare-DesktopHost.ps1` 再次运行时也保留已有 host secret。0.2.0 的真机热配对与重放结果见 [真机验收](verified-scope.md)。
 
-官方源码和 0.2.1 以后的问题记录都没有 `dsh desktop quit`。关窗口只会进托盘。托盘菜单 **Quit DeepSeek Harness** 会先问 Host 有没有未完成任务，确认后才退出。没有正规外部退出命令，所以这一次托盘退出不能省，也不能改成 taskkill。允许重启不等于可以丢掉还没写完的任务。
+升级前检查 Desktop 是否还有在途任务，再用应用菜单的 **退出** 或托盘的 **Quit DeepSeek Harness** 正常关闭。安装脚本等 Desktop 完全退出后才会更新插件。
 
 `Prepare-DesktopHost.ps1` 把口令写在解压目录的 `desktop-host-local`，不写系统环境变量。空名单且没有 20 分钟发现窗口时插件不监听。打开 Desktop 后，`Pair-DesktopHost.ps1` 按标题列出会话；`Pair-DesktopHost.ps1 -Index 1` 只写入这一条只读授权并作废发现口令。发现不读正文、不启动任务、不改模型。子会话只分类，不挂到根上。列表读取失败会标明失败，不会显示成“没有历史”。
 
@@ -75,7 +75,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 
 安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 
-兼容目标是带 0.2.2 session controller 的 Desktop（操作者看到的 CLI 是 0.2.2-rc.5）。插件 0.1.5 在一台 Windows Desktop 上完成过一次已授权既有会话的 resume。0.1.6 的请求查询和官方取消只在夹具里验证过，步骤见 [request-lifecycle.md](request-lifecycle.md)。那次记录和仍未验证的项目写在 [verified-scope.md](verified-scope.md)。Web 上能加载不等于 Desktop 已验收。同名可执行文件加上 `--profile superagent --no-open` 不是 Desktop；`desktop_install` 只在外壳、desktop profile 或读不到命令行时阻断安装，并且不结束进程。
+兼容目标是带 0.2.2 session controller 的 Desktop。使用 Desktop 随附的 CLI 可以避免与 PATH 上其他版本混用。Windows Desktop 0.2.2-rc.5 上的历史测试和 0.2.0 真机结果见 [验收记录](verified-scope.md)。`desktop_install` 在遇到外壳、desktop profile 或归属不明的进程时阻断安装，独立的 SuperAgent profile 可以继续运行。
 
 ## 本环境没有做的 Windows 实测
 
