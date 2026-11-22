@@ -1,11 +1,11 @@
 import http from 'node:http'
 import { bootstrapSourceFromSecret, createStaticBootstrapSource, hashSecret, matchesSecretHash } from './bootstrap.js'
-import { journalPatch, eventsSince, journalStart } from './journal.js'
+import { eventsSince, journalStart } from './journal.js'
 import { hasRoots, resolveWithinRoots } from './paths.js'
 import { assembleCatalog, assembleDiscovery, findTurnForRequest, readObservation, readSnapshot, safeError, turnAnswer } from './host_read.js'
 import {
   agentIdle, agentSelection, checkSelection, executionModelForTurn, effortSupport, liveAgent,
-  modelCatalog, modelStateFromEvents, modelStateFromProjection, sameRoute, sameSelection, selectOnAgent, selectionOf,
+  modelCatalog, modelStateFromEvents, sameRoute, sameSelection, selectOnAgent, selectionOf,
 } from './models.js'
 import {
   authorizeSession, authorizeWorkspace, checkAuth, decideResume, loopbackPeer, pageHistory,
@@ -212,8 +212,11 @@ export function createHostServer(ctx, config, secret) {
     if (turn.end) {
       const built = describeTurn(record.session_id, requestId, record, snap, turn)
       try {
-        return await ledger.update(requestId, {
-          ...journalPatch(record, 'terminal', { terminal: built.terminal, completed: built.completed, source: 'log_reconcile' }),
+        return await ledger.append(requestId, 'terminal', {
+          terminal: built.terminal,
+          completed: built.completed,
+          source: 'log_reconcile',
+        }, {
           phase: 'terminal',
           terminal_scope: 'official',
           crash_window: false,
@@ -228,16 +231,15 @@ export function createHostServer(ctx, config, secret) {
         return record
       }
     }
+    // The cursor must stay before this request's rpcId marker. Advancing it to
+    // the turn boundary hides the marker from the next reconcile pass when the
+    // prompt's user/message was written before its own turn/start.
+    if (record.phase === 'accepted') return record
     try {
-      return await ledger.update(requestId, {
-        ...journalPatch(record, 'running', { turn: turn.number }),
+      return await ledger.append(requestId, 'running', { turn: turn.number }, {
         phase: 'accepted',
         accepted: true,
         started_task: true,
-        // Keep the cursor at the turn start, before this request's rpcId
-        // marker: advancing it past the marker would hide the turn from the
-        // next reconcile pass.
-        last_seq: turn.start && Number.isFinite(turn.start.seq) ? turn.start.seq : record.last_seq,
       })
     } catch {
       return record
@@ -278,9 +280,12 @@ export function createHostServer(ctx, config, secret) {
     const detail = safeError(error, method)
     const code = (error && error.code) || 'call_failed'
     let status = 502
-    if (code === 'gateway/bad-request') status = 400
+    if (code === 'gateway/bad-request' || code === 'gateway/arguments-invalid') status = 400
+    else if (code === 'workspace/invalid-path' || code === 'workspace/move-invalid') status = 400
+    else if (/session\/invalid|session\/bad/.test(code)) status = 400
     else if (code === 'workspace/not-found' || code === 'session/not-found') status = 404
     else if (code === 'workspace/session-active' || code === 'session/conflict' || code === 'agent-preset/conflict') status = 409
+    else if (code === 'workspace/name-conflict') status = 409
     else if (code === 'gateway/cancelled') status = 409
     return send(res, status, { ok: false, reason: code, started_task: false, detail })
   }
@@ -347,7 +352,11 @@ export function createHostServer(ctx, config, secret) {
     if (owned.turn && owned.turn.attribution === 'request_id' && owned.ended) {
       const built = describeTurn(sessionId, requestId, record, snap, owned.turn)
       try {
-        await ledger.update(requestId, {
+        await ledger.append(requestId, 'terminal', {
+          terminal: built.terminal,
+          completed: built.completed,
+          source: 'stored_reconcile',
+        }, {
           phase: 'terminal',
           crash_window: false,
           manual_reconcile: false,
@@ -355,19 +364,28 @@ export function createHostServer(ctx, config, secret) {
           started_task: true,
           terminal_scope: 'official',
           response: built,
+          http_status: 200,
         })
       } catch {
         return { status: 500, body: { ...built, completed: false, reason: 'request_persist_failed', exactly_once: false } }
       }
       return { status: 200, body: built }
     }
-    if (record.phase === 'accepted' && owned.owned) {
+    // A bridge-wait timeout is a stored answer even though the Desktop turn is
+    // still running: replay it instead of reporting a fresh accepted state.
+    if (record.terminal_scope === 'bridge_wait' && record.response) {
+      return { status: 200, body: record.response }
+    }
+    // An admitted prompt whose turn has not started yet is normal queueing, not
+    // a crash window: reading it must not write `unknown` and strand the
+    // record. Only a prompt that was never acknowledged is unreconciled.
+    if (record.phase === 'accepted') {
       return {
         status: 200,
         body: {
           accepted: true,
           completed: false,
-          phase: 'running',
+          phase: owned.owned ? 'running' : 'accepted',
           terminal: null,
           session_id: sessionId,
           request_id: requestId,
@@ -382,8 +400,25 @@ export function createHostServer(ctx, config, secret) {
     if (record.terminal_scope === 'bridge_wait' && record.response) {
       return { status: 200, body: record.response }
     }
+    if (record.phase === 'accepted' || record.prompt_attempted !== true) {      return {
+        status: 200,
+        body: {
+          accepted: record.accepted === true ? true : null,
+          completed: false,
+          phase: record.phase,
+          terminal: null,
+          session_id: sessionId,
+          request_id: requestId,
+          started_task: record.started_task === true,
+          exactly_once: false,
+          note: 'no durable proof of a turn yet; nothing was sent again',
+        },
+      }
+    }
     try {
-      await ledger.update(requestId, { phase: 'unknown', manual_reconcile: true, crash_window: true })
+      await ledger.append(requestId, 'unknown', { reason: 'manual_reconcile' }, {
+        phase: 'unknown', manual_reconcile: true, crash_window: true,
+      })
     } catch {
       return {
         status: 500,
@@ -423,9 +458,16 @@ export function createHostServer(ctx, config, secret) {
     const confirmedEffort = confirmed.reasoningEffort
     let effortMatch
     let effortVerified = true
-    if (executionEffort === undefined) {
-      if (confirmedEffort === undefined) effortMatch = true
-      else { effortMatch = null; effortVerified = false }
+    if (executionEffort === undefined && confirmedEffort === undefined) {
+      // Both sides let the adapter choose: equal by absence, but the concrete
+      // effort is not named, so it is not "verified" as a specific value.
+      effortMatch = true
+    } else if (executionEffort === undefined || confirmedEffort === undefined) {
+      // One side names an effort and the other follows the adapter default.
+      // That is not evidence of a mismatch: the adapter may have resolved the
+      // default to exactly that value. Do not rewrite a completed turn.
+      effortMatch = null
+      effortVerified = false
     } else {
       effortMatch = executionEffort === confirmedEffort
     }
@@ -785,6 +827,34 @@ export function createHostServer(ctx, config, secret) {
         if (!workspaceId || !workspace) {
           return send(res, 502, { ok: false, reason: 'workspace_unresolved' })
         }
+        // Validate the requested model before create(): a rejected effort must
+        // not leave behind a created Session and a persisted write grant.
+        let plannedSelection = null
+        let plannedEffortUnverified = false
+        if (body.model && typeof body.model === 'object') {
+          plannedSelection = selectionOf({
+            provider: body.model.provider,
+            model: body.model.model,
+            reasoningEffort: body.model.reasoning_effort ?? body.model.reasoningEffort,
+          })
+          if (!plannedSelection) return send(res, 400, { ok: false, reason: 'invalid_requested_model' })
+          if (plannedSelection.reasoningEffort === 'auto') {
+            return send(res, 400, {
+              ok: false,
+              reason: 'auto_not_an_effort',
+              detail: 'omit reasoning_effort to follow the adapter default; "auto" is not an official value',
+            })
+          }
+          const support = await effortSupport(ctx, plannedSelection)
+          if (support.known && plannedSelection.reasoningEffort && !support.efforts.includes(plannedSelection.reasoningEffort)) {
+            return send(res, 409, {
+              ok: false,
+              reason: 'unsupported_reasoning_effort',
+              supported_reasoning_efforts: support.efforts,
+            })
+          }
+          plannedEffortUnverified = Boolean(plannedSelection.reasoningEffort && !support.known)
+        }
         const createRequest = { workspaceId }
         if (typeof body.agent_preset === 'string' && body.agent_preset) createRequest.agentPreset = body.agent_preset
         if (typeof body.session_id === 'string' && body.session_id) createRequest.sessionId = body.session_id
@@ -832,27 +902,12 @@ export function createHostServer(ctx, config, secret) {
           source: 'deferred',
           note: 'a new Session has no recorded selection; pass model on the first resume or set it with POST /v1/model',
         }
-        if (body.model && typeof body.model === 'object') {
-          const selection = selectionOf({
-            provider: body.model.provider,
-            model: body.model.model,
-            reasoningEffort: body.model.reasoning_effort ?? body.model.reasoningEffort,
-          })
-          if (!selection) return send(res, 400, { ok: false, reason: 'invalid_requested_model', session_id: sessionId })
-          const support = await effortSupport(ctx, selection)
-          if (support.known && selection.reasoningEffort && !support.efforts.includes(selection.reasoningEffort)) {
-            return send(res, 409, {
-              ok: false,
-              reason: 'unsupported_reasoning_effort',
-              session_id: sessionId,
-              supported_reasoning_efforts: support.efforts,
-            })
-          }
+        if (plannedSelection) {
           const agent = liveAgent(ctx, sessionId)
           if (agent && agentIdle(agent)) {
-            const selected = selectOnAgent(agent, selection)
+            const selected = selectOnAgent(agent, plannedSelection)
             modelInfo = selected.ok
-              ? { selection: selected.confirmed, source: 'session_selected_by_bridge', effort_unverified: Boolean(selection.reasoningEffort && !support.known) }
+              ? { selection: selected.confirmed, source: 'session_selected_by_bridge', effort_unverified: plannedEffortUnverified }
               : { selection: null, source: 'deferred', reason: selected.reason }
           } else {
             modelInfo = { selection: null, source: 'deferred', reason: agent ? 'busy' : 'needs_ui' }
@@ -1065,6 +1120,13 @@ export function createHostServer(ctx, config, secret) {
         const effortAsked = Object.prototype.hasOwnProperty.call(body, 'reasoning_effort')
           ? body.reasoning_effort
           : body.reasoningEffort
+        if (effortAsked === 'auto') {
+          return send(res, 400, {
+            ok: false,
+            reason: 'auto_not_an_effort',
+            detail: 'omit reasoning_effort to follow the adapter default, or pass null to clear the recorded effort; "auto" is not an official value',
+          })
+        }
         const effortCleared = effortAsked === null
         const support = await effortSupport(ctx, selection)
         if (support.known && selection.reasoningEffort && !support.efforts.includes(selection.reasoningEffort)) {
@@ -1242,7 +1304,16 @@ export function createHostServer(ctx, config, secret) {
         // The effort a caller asked for must be checked against what the
         // registered route advertises, when the deployment enumerates it. An
         // unenumerable list is reported as unverified, not silently accepted as
-        // a guarantee.
+        // a guarantee. "auto" is not an official value.
+        if (requested.reasoningEffort === 'auto') {
+          return send(res, 400, {
+            accepted: false,
+            completed: false,
+            reason: 'auto_not_an_effort',
+            detail: 'omit reasoning_effort to follow the adapter default; "auto" is not an official value',
+            started_task: false,
+          })
+        }
         const effortInfo = await effortSupport(ctx, requested)
         if (effortInfo.known && requested.reasoningEffort && !effortInfo.efforts.includes(requested.reasoningEffort)) {
           return send(res, 409, {
@@ -1354,17 +1425,15 @@ export function createHostServer(ctx, config, secret) {
         const pendingResult = new Promise((resolve) => { settleWait = resolve })
         waiters.set(waitKey(sessionId, requestId), pendingResult)
         try {
-          await ledger.update(requestId, journalPatch(ledger.get(requestId), 'recorded', {
+          await ledger.append(requestId, 'recorded', {
             session_id: sessionId,
             explicit_model: explicitModel,
-          }))
-          await ledger.update(requestId, { effort_unverified: effortUnverified })
+          }, { effort_unverified: effortUnverified })
         } catch { /* a failed journal append must not undo a durable claim */ }
         const publish = async (status, payload, patch) => {
           let nextStatus = status
           let nextBody = payload
           try {
-            await ledger.update(requestId, patch)
             const kind = patch.phase === 'terminal'
               ? 'terminal'
               : (patch.phase === 'unknown'
@@ -1374,14 +1443,12 @@ export function createHostServer(ctx, config, secret) {
                   : (patch.terminal_scope === 'bridge_wait'
                     ? 'bridge_timeout'
                     : (patch.phase === 'accepted' ? 'accepted' : 'status'))))
-            try {
-              await ledger.update(requestId, journalPatch(ledger.get(requestId), kind, {
-                phase: patch.phase || null,
-                terminal: (payload && payload.terminal) || null,
-                completed: Boolean(payload && payload.completed === true),
-                reason: (payload && payload.reason) || null,
-              }))
-            } catch { /* the terminal body is already durable; the journal is secondary */ }
+            await ledger.append(requestId, kind, {
+              phase: patch.phase || null,
+              terminal: (payload && payload.terminal) || null,
+              completed: Boolean(payload && payload.completed === true),
+              reason: (payload && payload.reason) || null,
+            }, patch)
           } catch {
             nextStatus = 500
             nextBody = {
@@ -1399,6 +1466,11 @@ export function createHostServer(ctx, config, secret) {
         const controller = new AbortController()
         live.set(requestId, controller)
         inflight.set(sessionId, requestId)
+        // A client that disconnects must not keep this request polling for up to
+        // 30 minutes and block the session's next bridge request.
+        req.on('close', () => {
+          if (!res.writableEnded) controller.abort()
+        })
         const startedAt = Date.now()
         let acceptedOnce = false
         try {
@@ -1495,14 +1567,13 @@ export function createHostServer(ctx, config, secret) {
             })
           }
           acceptedOnce = true
-          await ledger.update(requestId, { phase: 'accepted', accepted: true, started_task: true, crash_window: true })
           try {
-            await ledger.update(requestId, journalPatch(ledger.get(requestId), 'accepted', {
+            await ledger.append(requestId, 'accepted', {
               phase: 'accepted',
               requested_model: requested,
               confirmed_selection: confirmed,
               explicit_model: explicitModel,
-            }))
+            }, { phase: 'accepted', accepted: true, started_task: true, crash_window: true })
           } catch { /* journal is secondary to the durable record */ }
           // The synchronous wait is a convenience only. `wait: false` (or
           // wait_ms: 0) returns the accepted record immediately; a coordinator
@@ -1922,11 +1993,13 @@ export function createHostServer(ctx, config, secret) {
         const view = adapterSession(found.row)
         const auth = authorizeSession(grantsNow, view, { workspaceId: record.workspace_id || view.workspaceId, need: 'read' })
         if (!auth.ok) return send(res, 403, { ok: false, reason: auth.reason, started_task: false })
-        const reused = await recoverStored(sessionId, requestId, ledger.get(requestId))
-        return send(res, reused.status === 409 ? 200 : reused.status, {
-          ...reused.body,
+        const current = await advanceRequest(requestId)
+        if (!current) return send(res, 404, { ok: false, reason: 'unknown_request', started_task: false })
+        const built = bodyOfRequest(current)
+        return send(res, built.status === 409 ? 200 : built.status, {
+          ...built.body,
           query: true,
-          acceptance: reused.body.completed === true ? 'completed' : 'not_completed',
+          acceptance: built.body.completed === true ? 'completed' : 'not_completed',
         })
       }
       if (req.method === 'POST' && url.pathname === '/v1/wait/stop') {
@@ -1942,10 +2015,10 @@ export function createHostServer(ctx, config, secret) {
         const stopping = ledger.get(body.request_id)
         if (stopping) {
           try {
-            await ledger.update(body.request_id, journalPatch(stopping, 'wait_stopped', {
+            await ledger.append(body.request_id, 'wait_stopped', {
               scope: 'bridge_wait',
               desktop_turn_kept: true,
-            }))
+            })
           } catch { /* journal only */ }
         }
         return send(res, 200, {
@@ -2122,6 +2195,12 @@ export function createHostServer(ctx, config, secret) {
       }
       return send(res, 404, { ok: false, reason: 'not_found' })
     } catch (error) {
+      if (error && error.code === 'body_too_large') {
+        return send(res, 413, { ok: false, reason: 'body_too_large' })
+      }
+      if (error && error.code === 'invalid_json') {
+        return send(res, 400, { ok: false, reason: 'invalid_json' })
+      }
       const detail = safeError(error, 'request')
       note(config, [detail])
       return send(res, 500, { ok: false, reason: 'request_failed', ...detail })
@@ -2156,9 +2235,11 @@ function readJsonLimited(req, limit) {
       chunks.push(chunk)
     })
     req.on('end', () => {
+      const text = Buffer.concat(chunks).toString('utf8')
       try {
-        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))
+        resolve(JSON.parse(text || '{}'))
       } catch (error) {
+        error.code = 'invalid_json'
         reject(error)
       }
     })

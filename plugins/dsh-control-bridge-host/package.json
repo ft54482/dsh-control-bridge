@@ -12,6 +12,7 @@
     "grants.js",
     "requests.js",
     "journal.js",
+    "paths.js",
     "host_read.js",
     "models.js",
     "bootstrap.js",

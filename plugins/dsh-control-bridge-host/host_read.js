@@ -333,13 +333,24 @@ export function findTurnForRequest(events, { requestId, afterSeq = 0 } = {}) {
     ))
     if (marker) {
       attribution = 'request_id'
+      let before = null
+      let after = null
       for (const turn of turns) {
-        if (turn.seq < marker.seq) target = turn
-        else break
+        if (turn.seq < marker.seq) before = turn
+        else if (turn.seq > marker.seq && !after) after = turn
       }
-      if (!target) {
-        const nextTurn = turns.find((turn) => turn.seq > marker.seq)
-        target = nextTurn || null
+      // A queued prompt is written before its own turn/start. If the previous
+      // turn already ended before the marker, that turn is not ours: wait for
+      // the first turn that starts after the marker instead of returning the
+      // previous answer.
+      const beforeEnded = before
+        ? list.some((event) => event.type === 'turn/end' && event.seq > before.seq && event.seq < marker.seq)
+        : false
+      if (before && !beforeEnded) target = before
+      else if (after) target = after
+      else if (beforeEnded) {
+        // Our turn has not started yet. Do not fall back to an unrelated turn.
+        return { start: null, end: null, attribution, number: null }
       }
     }
   }
@@ -567,7 +578,7 @@ export async function assembleDiscovery(ctx, query = {}) {
         ? 'subagent'
         : (normalized.origin === 'worker'
           ? 'worker'
-          : (normalized.top ? 'top' : 'subagent'))
+          : (normalized.parent ? 'subagent' : 'top'))
       const derived = discoveryStatus(row, normalized)
       const cwd = normalized.cwd || (workspace && workspace.path) || ''
       items.push({

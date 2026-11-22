@@ -13,6 +13,7 @@
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
+import { journalPatch } from './journal.js'
 import { findTurnForRequest } from './host_read.js'
 
 export class RequestPersistError extends Error {
@@ -152,6 +153,25 @@ export function createRequestLedger({ file } = {}) {
         const current = state.requests[requestId]
         if (!current) throw new RequestPersistError('request record is missing', 'unknown_request')
         const record = { ...current, ...patch }
+        const next = { version: 1, requests: { ...state.requests, [requestId]: record } }
+        try {
+          commit(next)
+        } catch (error) {
+          throw new RequestPersistError(error.message || 'request record was not saved')
+        }
+        return record
+      })
+    },
+    /**
+     * Append one journal event and apply a state patch in the same serialized
+     * write. The seq is computed from the latest record inside the serialized
+     * section, so two concurrent observers cannot persist the same seq.
+     */
+    append(requestId, kind, extra = {}, patch = {}) {
+      return serialized(() => {
+        const current = state.requests[requestId]
+        if (!current) throw new RequestPersistError('request record is missing', 'unknown_request')
+        const record = { ...current, ...patch, ...journalPatch(current, kind, extra) }
         const next = { version: 1, requests: { ...state.requests, [requestId]: record } }
         try {
           commit(next)

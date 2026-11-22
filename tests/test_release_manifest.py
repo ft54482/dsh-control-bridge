@@ -1,10 +1,23 @@
 """Sidecar hashes are rewritten from the bytes and checked again."""
 
+import json
 from pathlib import Path
 
 import pytest
 
 from dsh_control_bridge.release_manifest import verify_manifest, write_manifest
+
+
+def test_plugin_runtime_modules_are_all_declared_for_packaging():
+    root = Path(__file__).resolve().parents[1]
+    plugin = root / "plugins" / "dsh-control-bridge-host"
+    manifest = json.loads((plugin / "package.json").read_text(encoding="utf-8"))
+    declared = set(manifest["files"])
+    # Every top-level runtime module must ship; a new import without a manifest
+    # entry would otherwise produce a package that fails only on install.
+    runtime = {path.name for path in plugin.glob("*.js")}
+    assert runtime <= declared, sorted(runtime - declared)
+    assert "paths.js" in declared
 
 
 def test_manifest_matches_bytes_and_rejects_a_stale_sidecar(tmp_path: Path):

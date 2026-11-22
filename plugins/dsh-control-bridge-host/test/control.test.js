@@ -261,3 +261,140 @@ test('discovery lists every registered workspace and session without reading his
   assert.equal(denied.body.reason, 'host_secret_required')
   await close(started.server)
 })
+
+test('a prompt written before its own turn/start is still attributed to the new turn, not the previous answer', async () => {
+  const ctx = officialCtx()
+  // Official ordering: prompt() records user/message at admission; turn/start
+  // comes later. The fixture's earlier turn is already finished.
+  ctx.sessionController.prompt = async (body) => {
+    ctx.state.prompts += 1
+    ctx.state.events.push({
+      seq: ++ctx.state.seq,
+      type: 'user/message',
+      time: Date.now(),
+      data: { content: body.content || [], source: { kind: 'user', rpcId: body.requestId } },
+    })
+    ctx.state.events.push({ seq: ++ctx.state.seq, type: 'turn/start', time: Date.now(), data: { turn: 50 } })
+    ctx.state.events.push({
+      seq: ++ctx.state.seq,
+      type: 'assistant/message',
+      time: Date.now(),
+      data: { message: { role: 'assistant', content: [{ type: 'text', text: 'new answer' }] } },
+    })
+    ctx.state.events.push({ seq: ++ctx.state.seq, type: 'turn/end', time: Date.now(), data: { turn: 50, reason: { kind: 'completed' } } })
+    return { accepted: true }
+  }
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const accepted = await call(started.port, 'POST', '/v1/resume', resumeBody('req-queued', { wait: false }))
+  assert.equal(accepted.status, 202)
+  const waited = await call(started.port, 'GET', '/v1/requests/req-queued/wait?timeout_ms=3000')
+  assert.equal(waited.status, 200)
+  assert.equal(waited.body.completed, true)
+  assert.equal(waited.body.turn, 50)
+  assert.match(waited.body.text, /new answer/)
+  assert.doesNotMatch(waited.body.text, /earlier answer/)
+
+  const events = await call(started.port, 'GET', '/v1/requests/req-queued/events?after_seq=0&timeout_ms=1000')
+  assert.equal(events.body.terminal_phase, true)
+  assert.equal(events.body.terminal, 'completed')
+  await close(started.server)
+})
+
+test('a read while a queued prompt has no turn yet does not strand the request in unknown', async () => {
+  const ctx = officialCtx()
+  ctx.sessionController.prompt = async (body) => {
+    ctx.state.prompts += 1
+    ctx.state.promptRequestIds.push(body.requestId)
+    ctx.state.events.push({
+      seq: ++ctx.state.seq,
+      type: 'user/message',
+      time: Date.now(),
+      data: { content: body.content || [], source: { kind: 'user', rpcId: body.requestId } },
+    })
+    return { accepted: true }
+  }
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const accepted = await call(started.port, 'POST', '/v1/resume', resumeBody('req-queued-read', { wait: false }))
+  assert.equal(accepted.status, 202)
+  const read = await call(started.port, 'GET', `/v1/requests?request_id=req-queued-read&session_id=${SESSION}`)
+  assert.equal(read.status, 200)
+  assert.equal(read.body.accepted, true)
+  assert.notEqual(read.body.phase, 'unknown')
+
+  ctx.state.events.push({ seq: ++ctx.state.seq, type: 'turn/start', time: Date.now(), data: { turn: 51 } })
+  ctx.state.events.push({ seq: ++ctx.state.seq, type: 'turn/end', time: Date.now(), data: { turn: 51, reason: { kind: 'completed' } } })
+  const finished = await call(started.port, 'GET', '/v1/requests/req-queued-read/wait?timeout_ms=3000')
+  assert.equal(finished.body.completed, true)
+  await close(started.server)
+})
+
+test('an execution header that names an effort while the confirmed choice follows the default is not a mismatch', async () => {
+  const ctx = officialCtx()
+  ctx.state.requestHeaderConfig = { provider: 'example-provider', model: 'example-model', reasoningEffort: 'high' }
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const result = await call(started.port, 'POST', '/v1/resume', resumeBody('req-default-effort'))
+  assert.equal(result.status, 200)
+  assert.equal(result.body.completed, true)
+  assert.equal(result.body.route_match, true)
+  assert.equal(result.body.effort_match, null)
+  assert.equal(result.body.effort_verified, false)
+  assert.equal(result.body.model_match, null)
+  await close(started.server)
+})
+
+test('/events heartbeats when a turn is open and nothing changed', async () => {
+  const ctx = officialCtx({ holdTurn: true })
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  await call(started.port, 'POST', '/v1/resume', resumeBody('req-heartbeat', { wait: false }))
+  const first = await call(started.port, 'GET', '/v1/requests/req-heartbeat/events?after_seq=0&timeout_ms=2000')
+  assert.equal(first.body.terminal_phase, false)
+  const second = await call(started.port, 'GET', `/v1/requests/req-heartbeat/events?after_seq=${first.body.seq}&timeout_ms=250`)
+  assert.equal(second.status, 200)
+  assert.equal(second.body.heartbeat, true)
+  assert.equal(second.body.events.length, 0)
+  await close(started.server)
+})
+
+test('"auto" is rejected as a reasoning effort instead of being persisted', async () => {
+  const ctx = officialCtx()
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const rejected = await call(started.port, 'POST', '/v1/model', {
+    session_id: SESSION, provider: 'example-provider', model: 'example-model', reasoning_effort: 'auto',
+  })
+  assert.equal(rejected.status, 400)
+  assert.equal(rejected.body.reason, 'auto_not_an_effort')
+  assert.deepEqual(ctx.state.selectCalls, [])
+  await close(started.server)
+})
+
+test('malformed JSON is a 400, not a 500', async () => {  const started = await startServer(officialCtx(), { initial: WRITE_DEMO })
+  const response = await fetch(`http://127.0.0.1:${started.port}/v1/model`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${SECRET}`, 'content-type': 'application/json' },
+    body: '{not json',
+  })
+  assert.equal(response.status, 400)
+  assert.equal((await response.json()).reason, 'invalid_json')
+  await close(started.server)
+})
+
+test('a child with a non-subagent origin but a parent is not hoisted to top', async () => {
+  const ctx = officialCtx()
+  ctx.state.sessions.push({
+    sessionId: 'session-worker-child',
+    updatedAt: 1_700_000_000_009,
+    running: false,
+    blank: false,
+    agentAvailable: false,
+    cwd: 'C:/work/demo',
+    origin: 'worker',
+    parentSessionId: 'session-demo',
+  })
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const found = await call(started.port, 'GET', '/v1/discover?limit=50')
+  const row = found.body.items.find((item) => item.session_id === 'session-worker-child')
+  assert.ok(row)
+  assert.notEqual(row.kind, 'top')
+  assert.equal(row.kind, 'worker')
+  await close(started.server)
+})

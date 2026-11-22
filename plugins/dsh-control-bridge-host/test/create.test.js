@@ -127,12 +127,31 @@ test('a session is created through the official API, granted, and never uses the
   assert.equal(models.status, 200)
   assert.equal(models.body.session.pending.reasoningEffort, 'high')
 
+  // The created session is dispatchable through the same authorized resume path.
+  const resumed = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: created.body.workspace_id,
+    session_id: created.body.session_id,
+    profile: 'desktop',
+    request_id: 'req-created',
+    text: 'hello from the bridge',
+  })
+  assert.equal(resumed.status, 200)
+  assert.equal(resumed.body.completed, true)
+  assert.equal(resumed.body.session_id, created.body.session_id)
+  assert.equal(resumed.body.confirmed_selection.reasoningEffort, 'high')
+
   const unsupported = await call(started.port, 'POST', '/v1/sessions', {
     workspace_id: created.body.workspace_id, access: 'read',
     model: { provider: 'example-provider', model: 'example-model', reasoning_effort: 'medium' },
   })
   assert.equal(unsupported.status, 409)
   assert.equal(unsupported.body.reason, 'unsupported_reasoning_effort')
+  // A rejected model must not leave a created Session or a persisted grant.
+  assert.equal(ctx.state.createCalls.length, 1)
+  const stored = JSON.parse(fs.readFileSync(started.file, 'utf8'))
+  // The seed grant (session-demo) plus the one created session; the rejected
+  // attempt added neither.
+  assert.equal(stored.sessionAllowlist.length, 2)
   await close(started.server)
 })
 

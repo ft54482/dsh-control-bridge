@@ -100,11 +100,13 @@ def verify_tgz(target: Path) -> list[str]:
     problems: list[str] = []
     checked = 0
     normalized = 0
+    present: set[str] = set()
     with tarfile.open(target, "r:gz") as archive:
         for member in archive.getmembers():
             if not member.isfile():
                 continue
             relative = member.name.split("/", 1)[1] if "/" in member.name else member.name
+            present.add(relative)
             source = PLUGIN / relative
             if not source.is_file():
                 problems.append(f"tgz has an unexpected entry: {member.name}")
@@ -127,6 +129,17 @@ def verify_tgz(target: Path) -> list[str]:
             if not same:
                 problems.append(f"tgz entry differs from source: {relative}")
             checked += 1
+    # The reverse direction: every runtime file the manifest declares must be in
+    # the tarball. Without this, a missing import (e.g. a new module not listed
+    # in `files`) ships a package that only fails on install.
+    try:
+        declared = json.loads((PLUGIN / "package.json").read_text(encoding="utf-8")).get("files", [])
+    except (OSError, ValueError):
+        declared = []
+        problems.append("package.json could not be read to check the runtime file list")
+    for relative in declared:
+        if relative not in present:
+            problems.append(f"tgz is missing a declared runtime file: {relative}")
     summary = f"{checked - normalized} byte-identical, {normalized} JSON-equal (package.json)"
     return [summary, *problems]
 
