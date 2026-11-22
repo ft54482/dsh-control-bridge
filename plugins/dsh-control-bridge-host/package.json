@@ -1,10 +1,25 @@
 {
   "name": "dsh-control-bridge-host",
-  "version": "0.1.5",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "type": "module",
   "description": "Loopback plugin that resumes allowlisted Desktop sessions through the host session services.",
+  "files": [
+    "index.js",
+    "server.js",
+    "policy.js",
+    "grants.js",
+    "requests.js",
+    "journal.js",
+    "paths.js",
+    "outbox.js",
+    "host_read.js",
+    "models.js",
+    "bootstrap.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
   "exports": {
     ".": "./index.js",
     "./policy": "./policy.js",

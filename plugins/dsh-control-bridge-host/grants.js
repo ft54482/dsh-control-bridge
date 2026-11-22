@@ -54,13 +54,19 @@ function normalizeSession(item) {
 }
 
 export function emptyState() {
-  return { version: 1, workspaceAllowlist: [], sessionAllowlist: [] }
+  return { version: 1, workspaceAllowlist: [], sessionAllowlist: [], spentBootstrapHash: '' }
 }
 
 export function normalizeState(raw) {
   const state = emptyState()
   if (!raw || typeof raw !== 'object') return { state, dropped: 0 }
   if (Number.isFinite(raw.version)) state.version = Number(raw.version)
+  // Durable record that this pairing window was already spent. It is written in
+  // the same atomic file as the grant, so a window cannot grant twice even if
+  // the best-effort bootstrap-file write fails after the grant is durable.
+  if (typeof raw.spentBootstrapHash === 'string' && /^[0-9a-f]{64}$/.test(raw.spentBootstrapHash)) {
+    state.spentBootstrapHash = raw.spentBootstrapHash
+  }
   let dropped = 0
   if (Array.isArray(raw.workspaceAllowlist)) {
     for (const item of raw.workspaceAllowlist) {
@@ -90,14 +96,19 @@ function clone(state) {
     version: state.version,
     workspaceAllowlist: state.workspaceAllowlist.map((item) => ({ ...item })),
     sessionAllowlist: state.sessionAllowlist.map((item) => ({ ...item })),
+    spentBootstrapHash: state.spentBootstrapHash || '',
   }
 }
 
+/**
+ * Content stamp, not mtime: an external rewrite with the same byte count inside
+ * the same millisecond must still be seen, because "grant changes take effect
+ * without a restart" is a stated property. The file is tiny.
+ */
 function stampOf(file) {
   if (!file) return null
   try {
-    const stat = fs.statSync(file)
-    return `${stat.mtimeMs}:${stat.size}`
+    return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
   } catch {
     return null
   }
@@ -285,12 +296,14 @@ export function createGrantStore({ file, initial, now = () => Date.now() } = {})
     snapshot,
     refresh,
     /** Merge (never replace) workspaces and sessions, then persist. */
-    grant({ workspace, workspaceAllowlist, session, sessionAllowlist } = {}) {
+    grant({ workspace, workspaceAllowlist, session, sessionAllowlist, spentBootstrapHash } = {}) {
       return withState((next) => {
         if (workspace) next.workspaceAllowlist = upsertWorkspace(next.workspaceAllowlist, workspace)
         for (const item of workspaceAllowlist || []) next.workspaceAllowlist = upsertWorkspace(next.workspaceAllowlist, item)
         if (session) next.sessionAllowlist = upsertSession(next.sessionAllowlist, session)
         for (const item of sessionAllowlist || []) next.sessionAllowlist = upsertSession(next.sessionAllowlist, item)
+        // The spent-window marker travels in the same atomic write as the grant.
+        if (typeof spentBootstrapHash === 'string' && spentBootstrapHash) next.spentBootstrapHash = spentBootstrapHash
         next.version = 1
         return next
       })

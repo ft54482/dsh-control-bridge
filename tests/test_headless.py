@@ -35,8 +35,8 @@ class RecordingRunner:
         return False
 
 
-def _config(tmp_path: Path, **extra: str) -> object:
-    body = """
+def _config(tmp_path: Path) -> object:
+    body = f"""
 [bridge]
 signature_window_seconds = 300
 allow_unsigned = false
@@ -57,11 +57,11 @@ credential_envs = ["DEEPSEEK_API_KEY"]
 [[instances.workspaces]]
 name = "broadcast-cs"
 description = "one"
-cwd = "/work/broadcast-cs"
+cwd = "{(tmp_path / 'broadcast-cs').as_posix()}"
 [[instances.workspaces]]
 name = "auto-video"
 description = "two"
-cwd = "/work/auto-video"
+cwd = "{(tmp_path / 'auto-video').as_posix()}"
 """
     path = tmp_path / "bridge.toml"
     path.write_text(body, encoding="utf-8")
@@ -133,7 +133,7 @@ def test_argv_puts_the_task_on_stdin_and_keeps_a_safe_session_id(tmp_path, monke
     assert call["argv"] == ["/opt/dsh/dsh", "--profile", "headless", "--json", "-"]
     assert "run the checks & calc" not in " ".join(call["argv"])
     assert call["stdin"] == b"run the checks & calc\n"
-    assert call["cwd"] == "/work/broadcast-cs"
+    assert Path(call["cwd"]) == tmp_path / "broadcast-cs"
     assert call["env"]["DEEPSEEK_API_KEY"] == "sk-testsecretvalue"
     assert call["env"]["DSH_HOME"] != "/home/desktop-secrets"
     assert "desktop-secrets" not in call["env"]["DSH_HOME"]
@@ -148,7 +148,7 @@ def test_argv_puts_the_task_on_stdin_and_keeps_a_safe_session_id(tmp_path, monke
         "session-abc",
         "-",
     ]
-    assert runner.calls[1]["cwd"] == "/work/broadcast-cs"
+    assert Path(runner.calls[1]["cwd"]) == tmp_path / "broadcast-cs"
 
 
 def test_unknown_session_and_cwd_mismatch_do_not_spawn(tmp_path, monkeypatch):
@@ -157,7 +157,7 @@ def test_unknown_session_and_cwd_mismatch_do_not_spawn(tmp_path, monkeypatch):
     with pytest.raises(AdapterError, match="unknown session"):
         adapter.dispatch(_request(session_id="session-missing"))
     adapter.dispatch(_request())
-    adapter._sessions["session-abc"]["cwd"] = "/work/auto-video"
+    adapter._sessions["session-abc"]["cwd"] = str(tmp_path / "auto-video")
     with pytest.raises(AdapterError, match="cwd"):
         adapter.dispatch(_request(task_id="task_other", session_id="session-abc"))
     assert len(runner.calls) == 1

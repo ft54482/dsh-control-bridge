@@ -47,13 +47,18 @@ export function decideListen({ services, hostSecret, allowlistCount, bootstrap, 
   if (bind && bind !== '127.0.0.1') return { listening: false, reason: 'bind must be 127.0.0.1' }
   const steady = Boolean(hostSecret && hostSecret.length >= 32 && allowlistCount > 0)
   const clock = now || Date.now()
-  const armed = Boolean(
-    bootstrap
-    && bootstrap.secret
-    && bootstrap.secret.length >= 32
-    && Number(bootstrap.expiresAt) > clock
-    && !bootstrap.consumed,
-  )
+  // A caller that already classified the window (the plugin's bootstrap source
+  // enforces the short-lived cap) is authoritative; the older shape is
+  // recomputed here for direct policy tests.
+  const armed = typeof (bootstrap && bootstrap.armed) === 'boolean'
+    ? Boolean(bootstrap.armed)
+    : Boolean(
+      bootstrap
+      && bootstrap.secret
+      && bootstrap.secret.length >= 32
+      && Number(bootstrap.expiresAt) > clock
+      && !bootstrap.consumed,
+    )
   if (!steady && !armed) {
     return { listening: false, reason: 'no steady allowlist and no armed bootstrap' }
   }

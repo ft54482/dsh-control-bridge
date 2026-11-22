@@ -59,7 +59,7 @@ def test_timeout_kills_a_real_process_and_does_not_accept_a_final(tmp_path: Path
     with pytest.raises(AdapterError, match="no accepted final"):
         runner.run(
             task_id="task_timeout",
-            argv=["python3", str(script)],
+            argv=[sys.executable, str(script)],
             cwd=str(tmp_path),
             env={"PATH": os.environ.get("PATH", "")},
             stdin=b"ignored\n",
@@ -94,7 +94,7 @@ def test_cancel_reaps_the_process_tree(tmp_path: Path):
         try:
             runner.run(
                 task_id="task_tree",
-                argv=["python3", str(script)],
+                argv=[sys.executable, str(script)],
                 cwd=str(tmp_path),
                 env={"PATH": os.environ.get("PATH", "")},
                 stdin=b"",
@@ -129,8 +129,8 @@ def test_fake_cmd_self_check_is_not_executed_here():
     report = windows_fake_self_check()
     if os.name == "nt":
         assert report["ran"] is True
-        assert report["ok"] is True
         text = format_report(report)
+        assert report["ok"] is True, text
         assert "not a business success" in text
     else:
         assert report["ran"] is False
@@ -322,6 +322,7 @@ def test_creation_token_identifies_only_the_spawned_process():
     assert later is None or later != first
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group branch; Windows uses taskkill and is covered by the timeout test")
 def test_terminate_tree_does_not_signal_system_pids(monkeypatch: pytest.MonkeyPatch):
     calls: list[object] = []
     monkeypatch.setattr(os, "killpg", lambda *args: calls.append(args))
@@ -329,6 +330,17 @@ def test_terminate_tree_does_not_signal_system_pids(monkeypatch: pytest.MonkeyPa
     for pid in (0, 1, 4, -8):
         terminate_tree(pid)
     assert calls == []
+
+
+def test_popen_kwargs_hide_the_child_console_on_windows():
+    from dsh_control_bridge.windows_cmd import popen_kwargs
+
+    kwargs = popen_kwargs()
+    if os.name == "nt":
+        assert kwargs["creationflags"] & subprocess.CREATE_NO_WINDOW
+        assert kwargs["creationflags"] & subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        assert kwargs["start_new_session"] is True
 
 
 def test_windows_scripts_do_not_pip_or_write_localappdata():

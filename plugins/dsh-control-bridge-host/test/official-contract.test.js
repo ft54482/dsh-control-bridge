@@ -13,12 +13,15 @@ import path from 'node:path'
 import test from 'node:test'
 import { createGrantStore, loadAllowlistFile } from '../grants.js'
 import { readSnapshot } from '../host_read.js'
+import { modelStateFromEvents } from '../models.js'
 import { apply } from '../index.js'
 import { BOOTSTRAP, SECRET, WORKSPACE, call, close, officialCtx, readGrantFile, startServer } from './fixtures.js'
 
-function bootstrapSecret() {
-  return { host: SECRET, bootstrap: BOOTSTRAP, expiresAt: Date.now() + 60_000, consumed: false }
+function bootstrapSecret(secret = BOOTSTRAP) {
+  return { host: SECRET, bootstrap: secret, expiresAt: Date.now() + 60_000, consumed: false }
 }
+
+const SECOND_BOOTSTRAP = 'bootstrap-secret-fedcba9876543210fedcba98'
 
 async function bootServer(ctx, extra = {}) {
   return startServer(ctx, { secret: bootstrapSecret(), ...extra })
@@ -244,10 +247,11 @@ test('repeated pairing merges instead of replacing earlier grants', async () => 
   assert.equal(firstSelect.body.ok, true)
   await close(first.server)
 
-  // Re-pairing needs a fresh bootstrap (the previous one is consumed by design),
-  // and it must merge into the existing file rather than replace it.
-  const second = await bootServer(ctx, { store: first.store, file: first.file })
-  const secondSelect = await call(second.port, 'POST', '/v1/bootstrap/select', { session_id: 'session-plain', access: 'read' }, BOOTSTRAP)
+  // Re-pairing needs a fresh bootstrap (the previous one is consumed by design,
+  // and the durable grant file records it as spent), and it must merge into the
+  // existing file rather than replace it.
+  const second = await bootServer(ctx, { store: first.store, file: first.file, secret: bootstrapSecret(SECOND_BOOTSTRAP) })
+  const secondSelect = await call(second.port, 'POST', '/v1/bootstrap/select', { session_id: 'session-plain', access: 'read' }, SECOND_BOOTSTRAP)
   assert.equal(secondSelect.body.ok, true)
   assert.equal(secondSelect.body.allowlist.sessionAllowlist.length, 2)
   assert.equal(secondSelect.body.allowlist.workspaceAllowlist.length, 1)
@@ -278,15 +282,15 @@ test('an expired bootstrap is refused without touching the allowlist', async () 
   await close(started.server)
 })
 
-test('two concurrent pairings both land and keep the file valid', async () => {
+test('two concurrent pairings with different windows both land and keep the file valid', async () => {
   const ctx = officialCtx()
   const shared = await startServer(ctx)
   await close(shared.server)
   const one = await bootServer(ctx, { store: shared.store, file: shared.file })
-  const two = await bootServer(ctx, { store: shared.store, file: shared.file })
+  const two = await bootServer(ctx, { store: shared.store, file: shared.file, secret: bootstrapSecret(SECOND_BOOTSTRAP) })
   const [left, right] = await Promise.all([
     call(one.port, 'POST', '/v1/bootstrap/select', { session_id: 'session-demo', access: 'read' }, BOOTSTRAP),
-    call(two.port, 'POST', '/v1/bootstrap/select', { session_id: 'session-plain', access: 'read' }, BOOTSTRAP),
+    call(two.port, 'POST', '/v1/bootstrap/select', { session_id: 'session-plain', access: 'read' }, SECOND_BOOTSTRAP),
   ])
   assert.equal(left.body.ok, true)
   assert.equal(right.body.ok, true)
@@ -346,14 +350,16 @@ test('a turn that never finishes reports a timeout and is not retried', async ()
   assert.equal(result.status, 200)
   assert.equal(result.body.accepted, true)
   assert.equal(result.body.completed, false)
-  assert.equal(result.body.final.reason.kind, 'timeout')
+  assert.equal(result.body.final.reason.kind, 'bridge_timeout')
+  assert.equal(result.body.model_timeout, false)
+  assert.equal(result.body.terminal_scope, 'bridge_wait')
   assert.equal(result.body.timeout_ms, 1_000)
   assert.equal(ctx.state.prompts, 1)
   // a repeated request id replays the terminal answer instead of prompting again
   const replay = await call(started.port, 'POST', '/v1/resume', {
     workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-timeout', text: 'go',
   })
-  assert.equal(replay.body.final.reason.kind, 'timeout')
+  assert.equal(replay.body.final.reason.kind, 'bridge_timeout')
   assert.equal(ctx.state.prompts, 1)
   await close(started.server)
 })
@@ -455,7 +461,8 @@ test('a second request on the same session is refused while one is waiting', asy
   assert.equal(second.status, 409)
   assert.equal(second.body.reason, 'bridge_request_in_flight')
   const firstResult = await first
-  assert.equal(firstResult.body.final.reason.kind, 'timeout')
+  assert.equal(firstResult.body.final.reason.kind, 'bridge_timeout')
+  assert.equal(firstResult.body.model_timeout, false)
   assert.equal(ctx.state.prompts, 1)
   await close(started.server)
 })
@@ -576,6 +583,34 @@ function headerEvent(seq, provider, model) {
 function selectionEvent(seq, provider, model) {
   return { seq, type: 'model/selection', time: 1_700_000_000_000 + seq, data: { provider, model } }
 }
+
+test('a pending selection is retired only by a request that records the same choice', () => {
+  const header = (seq, config) => ({ seq, type: 'request/header', data: { header: { config } } })
+  const select = (seq, selection) => ({ seq, type: 'model/selection', data: selection })
+  const events = [
+    header(1, { provider: 'example-provider', model: 'example-model' }),
+    select(2, { provider: 'other-provider', model: 'other-model' }),
+    // A later request on a different route does not consume the pending choice:
+    // the official projection retires pending only on a matching header.
+    header(3, { provider: 'example-provider', model: 'example-model' }),
+  ]
+  const state = modelStateFromEvents(events)
+  assert.equal(state.lastUsed.model, 'example-model')
+  assert.equal(state.pending.model, 'other-model')
+  assert.equal(state.next.model, 'other-model')
+
+  // Reasoning effort is part of the recorded choice, even though it is not part
+  // of the route: a header without it does not retire an effortful pending one.
+  events.push(select(4, { provider: 'example-provider', model: 'example-model', reasoningEffort: 'high' }))
+  events.push(header(5, { provider: 'example-provider', model: 'example-model' }))
+  assert.equal(modelStateFromEvents(events).pending.reasoningEffort, 'high')
+
+  // The matching header retires it.
+  events.push(header(6, { provider: 'example-provider', model: 'example-model', reasoningEffort: 'high' }))
+  const retired = modelStateFromEvents(events)
+  assert.equal(retired.pending, null)
+  assert.equal(retired.next.model, 'example-model')
+})
 
 test('a recorded alternate session is not shown or sent as the deployment default', async () => {
   const ctx = officialCtx()
@@ -744,6 +779,117 @@ test('a turn without a request header reports execution as unknown', async () =>
   assert.equal(resume.body.execution_model, null)
   assert.equal(resume.body.execution_model_source, 'unknown')
   assert.equal(resume.body.model_match, null)
+  await close(started.server)
+})
+
+test('an explicit reasoning effort on the same route is applied, not silently dropped', async () => {
+  const ctx = officialCtx()
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE,
+    session_id: 'session-demo',
+    profile: 'desktop',
+    request_id: 'req-effort',
+    text: 'go',
+    model: { provider: 'example-provider', model: 'example-model', reasoning_effort: 'high' },
+  })
+  assert.equal(resume.status, 200)
+  assert.equal(resume.body.completed, true)
+  // The route already matched, but the effort is part of the recorded choice,
+  // so the bridge must still select it and confirm it.
+  assert.equal(ctx.state.selectCalls.length, 1)
+  assert.equal(ctx.state.selectCalls[0].reasoningEffort, 'high')
+  assert.equal(resume.body.confirmed_selection.reasoningEffort, 'high')
+  assert.equal(resume.body.execution_model.reasoningEffort, 'high')
+  assert.equal(resume.body.model_match, true)
+
+  // Same id and text but a different effort is not the same request.
+  const conflict = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE,
+    session_id: 'session-demo',
+    profile: 'desktop',
+    request_id: 'req-effort',
+    text: 'go',
+    model: { provider: 'example-provider', model: 'example-model', reasoning_effort: 'low' },
+  })
+  assert.equal(conflict.status, 409)
+  assert.equal(conflict.body.reason, 'idempotency_conflict')
+  assert.equal(ctx.state.prompts, 1)
+  await close(started.server)
+})
+
+test('a rejected duplicate request does not mutate the session model', async () => {
+  const ctx = officialCtx()
+  ctx.state.providerModels['example-provider'] = ['example-model', 'alternate-model']
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const first = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE,
+    session_id: 'session-demo',
+    profile: 'desktop',
+    request_id: 'req-mutate',
+    text: 'first',
+    model: { provider: 'example-provider', model: 'alternate-model' },
+  })
+  assert.equal(first.body.completed, true)
+  assert.equal(ctx.state.selectCalls.length, 1)
+  assert.equal(ctx.state.selection.model, 'alternate-model')
+
+  const duplicate = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE,
+    session_id: 'session-demo',
+    profile: 'desktop',
+    request_id: 'req-mutate',
+    text: 'different text',
+    model: { provider: 'example-provider', model: 'example-model' },
+  })
+  assert.equal(duplicate.status, 409)
+  assert.equal(duplicate.body.reason, 'idempotency_conflict')
+  // A rejected request must not have run the model gate.
+  assert.equal(ctx.state.selectCalls.length, 1)
+  assert.equal(ctx.state.selection.model, 'alternate-model')
+  assert.equal(ctx.state.prompts, 1)
+  await close(started.server)
+})
+
+test('an in-flight request id is not shared across sessions', async () => {
+  const ctx = officialCtx({ holdTurn: true })
+  const plain = ctx.state.sessions.find((item) => item.sessionId === 'session-plain')
+  plain.agentAvailable = true
+  plain.projections = {
+    kind: 'cached',
+    asOfSeq: 1,
+    values: {
+      title: 'Plain chat',
+      modelSelection: {
+        lastUsed: { provider: 'example-provider', model: 'example-model' },
+        next: { provider: 'example-provider', model: 'example-model' },
+      },
+    },
+  }
+  ctx.state.liveSessions.add('session-plain')
+  const initial = {
+    version: 1,
+    workspaceAllowlist: [{ id: WORKSPACE, cwd: 'C:/work/demo', title: 'demo' }],
+    sessionAllowlist: [
+      { sessionId: 'session-demo', workspaceId: WORKSPACE, access: 'write', cwd: 'C:/work/demo', profile: 'desktop' },
+      { sessionId: 'session-plain', workspaceId: WORKSPACE, access: 'write', cwd: 'C:/work/demo', profile: 'desktop' },
+    ],
+  }
+  const started = await startServer(ctx, { initial, resumeTimeoutMs: 5000 })
+  const pending = call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-shared', text: 'go',
+  })
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(ctx.state.prompts, 1)
+  const other = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-plain', profile: 'desktop', request_id: 'req-shared', text: 'go',
+  })
+  assert.equal(other.status, 409)
+  assert.equal(other.body.reason, 'idempotency_conflict')
+  assert.equal(other.body.session_id, 'session-plain')
+  assert.equal(ctx.state.prompts, 1)
+  await call(started.port, 'POST', '/v1/wait/stop', { request_id: 'req-shared' })
+  await pending
   await close(started.server)
 })
 

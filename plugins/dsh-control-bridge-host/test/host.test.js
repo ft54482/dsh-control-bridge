@@ -259,8 +259,15 @@ test('registered sessions keep a title and workspace without listing removed dir
   assert.equal(response.body.sessions[0].model, 'example-model')
   assert.equal(response.body.sessions[0].provider, 'example-provider')
   assert.equal(response.body.omitted_unregistered, 1)
-  const membership = await fetch(`http://127.0.0.1:${started.port}/v1/guard/membership`, {
+  // The pairing window reaches only the two pairing routes; membership and
+  // health stay behind the long-lived host secret.
+  const membershipDenied = await fetch(`http://127.0.0.1:${started.port}/v1/guard/membership`, {
     headers: { authorization: 'Bearer bootstrap-secret-0123456789abcdef' },
+  })
+  assert.equal(membershipDenied.status, 403)
+  assert.equal((await membershipDenied.json()).reason, 'host_secret_required')
+  const membership = await fetch(`http://127.0.0.1:${started.port}/v1/guard/membership`, {
+    headers: { authorization: `Bearer ${SECRET}` },
   }).then(async (item) => item.json())
   assert.deepEqual(membership.workspaces[0].top_level, ['session-top'])
   assert.deepEqual(membership.workspaces[0].unreadable, [])
@@ -309,14 +316,15 @@ test('cancel aborts only the bridge request and says the desktop turn is kept', 
     workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-cancel', text: 'go',
   })
   await new Promise((resolve) => setTimeout(resolve, 100))
-  const cancelled = await call(started.port, 'POST', '/v1/cancel', { request_id: 'req-cancel' })
+  const cancelled = await call(started.port, 'POST', '/v1/wait/stop', { request_id: 'req-cancel' })
   const result = await pending
   assert.equal(cancelled.body.confirmed, true)
+  assert.equal(cancelled.body.scope, 'bridge_wait')
+  assert.equal(cancelled.body.desktop_cancel_called, false)
   assert.equal(cancelled.body.killed_desktop, false)
   assert.equal(cancelled.body.desktop_turn_kept, true)
-  assert.match(cancelled.body.note, /stops this wait only/)
-  assert.equal(result.body.reason, 'cancelled')
-  assert.equal(result.body.desktop_turn_kept, null)
+  assert.equal(result.body.reason, 'manual_reconcile')
+  assert.equal(result.body.desktop_cancel_called, false)
   assert.equal(ctx.state.cancelled, 0)
   await close(started.server)
 })

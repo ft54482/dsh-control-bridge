@@ -55,7 +55,15 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 0.1.4 起，`prompt()` 的返回值按官方语义只当"受理"（`{accepted:true}`），回答从会话事件里按 `source.rpcId` 找到本请求所在回合后回收；`/v1/resume` 的超时上限 120 秒，超时返回 `completed:false` 且不重发。授权改成内存/磁盘同源：配对立即生效、撤销立即生效、保存失败不改内存。
 
-官方源码和 0.2.1 以后的问题记录都没有 `dsh desktop quit`。关窗口只会进托盘。托盘菜单 **Quit DeepSeek Harness** 会先问 Host 有没有未完成任务，确认后才退出。没有正规外部退出命令，所以这一次托盘退出不能省，也不能改成 taskkill。允许重启不等于可以丢掉还没写完的任务。
+0.1.6 增加了请求台账与 owned-turn 取消，并把配对窗口改成可重复布防的文件：`bootstrap.json` / `bootstrap.secret` 每次请求重新读取。重新布防不需要托盘退出，也不需要重启 Desktop；已经装好的 Host 下一次请求就会看到新窗口。窗口单次使用、短期、过期或 JSON 损坏时失败关闭，且不轮换长期 `host.secret`。操作命令：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBootstrap.ps1 -Minutes 20
+```
+
+它只写这两个窗口文件，前后校验 `host.secret` 与 `allowlist.json` 未变。`Prepare-DesktopHost.ps1` 再次运行时也保留已有 host secret。0.2.0 的真机热配对与重放结果见 [真机验收](verified-scope.md)。
+
+升级前检查 Desktop 是否还有在途任务，再用应用菜单的 **退出** 或托盘的 **Quit DeepSeek Harness** 正常关闭。安装脚本等 Desktop 完全退出后才会更新插件。
 
 `Prepare-DesktopHost.ps1` 把口令写在解压目录的 `desktop-host-local`，不写系统环境变量。空名单且没有 20 分钟发现窗口时插件不监听。打开 Desktop 后，`Pair-DesktopHost.ps1` 按标题列出会话；`Pair-DesktopHost.ps1 -Index 1` 只写入这一条只读授权并作废发现口令。发现不读正文、不启动任务、不改模型。子会话只分类，不挂到根上。列表读取失败会标明失败，不会显示成“没有历史”。
 
@@ -67,7 +75,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 
-兼容目标是带 0.2.2 session controller 的 Desktop（操作者看到的 CLI 是 0.2.2-rc.5）。插件 0.1.5 在一台 Windows Desktop 上完成过一次已授权既有会话的 resume。那次记录和仍未验证的项目写在 [verified-scope.md](verified-scope.md)。Web 上能加载不等于 Desktop 已验收。同名可执行文件加上 `--profile superagent --no-open` 不是 Desktop；`desktop_install` 只在外壳、desktop profile 或读不到命令行时阻断安装，并且不结束进程。
+兼容目标是带 0.2.2 session controller 的 Desktop。使用 Desktop 随附的 CLI 可以避免与 PATH 上其他版本混用。Windows Desktop 0.2.2-rc.5 上的历史测试和 0.2.0 真机结果见 [验收记录](verified-scope.md)。`desktop_install` 在遇到外壳、desktop profile 或归属不明的进程时阻断安装，独立的 SuperAgent profile 可以继续运行。
 
 ## 本环境没有做的 Windows 实测
 
@@ -78,3 +86,31 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 - 真实 `dsh --profile headless --session-id` 接续一条人工授权的演示会话。
 - 一次超时 120 秒、不自动重试的最小真实模型调用。这次没有发。
 - Desktop、Web、SuperAgent 仍然没有受支持的接管。
+
+## 0.2.0 的安装、升级和回滚
+
+先记录 `GET /v1/guard/membership` 的指纹，再从托盘选择 **Quit DeepSeek Harness**。使用 Desktop 安装目录里 `resources\runtime\cli\bin\dsh.cmd`，让执行安装的 CLI 和 Desktop 运行时版本一致。
+
+```powershell
+$desktopCli = 'C:\path\to\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
+$backup = 'C:\path\to\private\desktop-host-upgrade'
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Manage-DesktopHost.ps1 `
+  -DshExe $desktopCli `
+  -Action Upgrade -Package .\dsh-control-bridge-host-0.2.0.tgz -Sha256 <manifest 中的 sha256> `
+  -BackupDir $backup
+```
+
+- `Install` 用于尚未安装桥的 Desktop profile，已有版本用 `Upgrade`。Desktop 或无法确认归属的 Harness 进程仍在运行时以退出码 3 拒绝。已确认的独立 `--profile superagent --no-open` 可以继续运行。
+- 脚本校验候选包 SHA-256 和包清单，在新的或空的私有目录保留候选包，从当前已安装插件的发布文件归档可回滚版本。操作后核对已安装版本和 Desktop patch 指纹。授权、密钥及工作区状态保留在原位。
+- 保留备份目录，profile 的本地包依赖会引用其中的 tgz。实装与回滚使用 Desktop 随附 CLI 在隔离 profile 中验证。升级现有 Desktop 后仍需使用健康检查和工作区指纹完成真机验收。
+
+需要回滚时，再从托盘退出 Desktop，并指定该次操作的私有备份目录。升级的回滚会校验并安装归档版本，首次安装的回滚会移除桥插件。
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Manage-DesktopHost.ps1 `
+  -DshExe $desktopCli -Action Rollback -BackupDir $backup
+```
+
+重新打开 Desktop 后检查 `GET /v1/health`，然后逐项比对工作区、会话与子会话映射。升级到 0.2.0 后再检查 `GET /v1/discover`。
+
+0.2.0 的创建和打开端点默认关闭。启用时为 `workspaceRoots` 指定允许的根目录，并启用所需的 `allowCreateSession`、`allowCreateWorkspace` 或 `allowOpenPath`。缺少对应配置时端点返回 403 和具体原因。

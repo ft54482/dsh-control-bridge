@@ -13,9 +13,15 @@ from pathlib import Path
 
 
 def _secret(path: Path) -> str:
-    value = path.read_text(encoding="utf-8").strip()
+    try:
+        value = path.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise SystemExit(f"bootstrap secret is not readable: {error.strerror or error}") from error
     if len(value) < 32:
-        raise SystemExit("bootstrap secret is too short")
+        raise SystemExit(
+            "no armed pairing window: run Rearm-DesktopHostBootstrap.ps1 first; "
+            "the running Host picks it up without a restart"
+        )
     return value
 
 
@@ -97,7 +103,13 @@ def main(argv: list[str] | None = None) -> int:
     if not result.get("ok"):
         print(result.get("reason") or "没有写入授权")
         return 1
-    entry = result["allowlist"]["sessionAllowlist"][0]
+    entry = result.get("granted")
+    if not entry:
+        rows = ((result.get("allowlist") or {}).get("sessionAllowlist") or [])
+        entry = next((item for item in rows if item.get("sessionId") == chosen["session_id"]), None)
+    if not entry:
+        print("授权已写入，但返回里没有对应的授权项。")
+        return 1
     print(f"已写入一条授权: {entry.get('title') or '未命名会话'}  权限: {entry.get('access')}  目录: {entry.get('cwd')}")
     print("没有启动任务，也没有修改模型。发现用的短期口令已经作废。")
     return 0

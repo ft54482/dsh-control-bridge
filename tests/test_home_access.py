@@ -31,8 +31,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _shared_toml(
-    home: str,
-    cwd: str,
+    home: Path,
+    cwd: Path,
     *,
     spawn: bool = False,
     access: str = "read",
@@ -55,28 +55,28 @@ adapter = "headless_cli"
 base_url = "http://127.0.0.1:9"
 auth_env = "DSH_LOCAL_HEADLESS_TOKEN"
 event_secret_env = "DSH_LOCAL_HEADLESS_EVENT_SECRET"
-executable = "{ROOT / "scripts" / "windows" / "fake-dsh.cmd"}"
+executable = "{(ROOT / 'scripts' / 'windows' / 'fake-dsh.cmd').as_posix()}"
 spawn = {"true" if spawn else "false"}
 timeout_seconds = 120
 credential_envs = ["DEEPSEEK_API_KEY"]
 home_mode = "shared"
-dsh_home = "{home}"
+dsh_home = "{home.as_posix()}"
 credential_mode = "environment"
 [[instances.workspaces]]
 name = "demo"
 description = "demo"
-cwd = "{cwd}"
+cwd = "{cwd.as_posix()}"
 allow_new_session = {"true" if allow_new else "false"}
 occupancy = "{workspace_occupancy}"
 [[instances.workspaces]]
 name = "broadcast-cs"
 description = "busy business"
-cwd = "{cwd}-busy"
+cwd = "{cwd.as_posix()}-busy"
 [[instances.session_grants]]
 session_id = "session-demo"
 workspace = "demo"
 profile = "{profile}"
-cwd = "{cwd}"
+cwd = "{cwd.as_posix()}"
 access = "{access}"
 occupancy = "{occupancy}"
 """
@@ -113,7 +113,7 @@ def test_write_grant_without_idle_confirmation_is_rejected(tmp_path: Path):
     cwd = tmp_path / "demo"
     cwd.mkdir()
     with pytest.raises(ConfigError, match="operator_confirmed_idle"):
-        load_config(_write(tmp_path, _shared_toml(str(home), str(cwd), access="write", occupancy="unknown")))
+        load_config(_write(tmp_path, _shared_toml(home, cwd, access="write", occupancy="unknown")))
 
 
 def test_shared_grant_cannot_cross_workspace_profile_or_escape(tmp_path: Path):
@@ -125,11 +125,15 @@ def test_shared_grant_cannot_cross_workspace_profile_or_escape(tmp_path: Path):
         load_config(
             _write(
                 tmp_path,
-                _shared_toml(str(home), str(cwd)).replace(f'cwd = "{cwd}"\naccess', f'cwd = "{cwd}-other"\naccess', 1),
+                _shared_toml(home, cwd).replace(
+                    f'cwd = "{cwd.as_posix()}"\naccess',
+                    f'cwd = "{cwd.as_posix()}-other"\naccess',
+                    1,
+                ),
             )
         )
     with pytest.raises(ConfigError, match="desktop"):
-        load_config(_write(tmp_path, _shared_toml(str(home), str(cwd), access="write", occupancy="operator_confirmed_idle", profile="desktop")))
+        load_config(_write(tmp_path, _shared_toml(home, cwd, access="write", occupancy="operator_confirmed_idle", profile="desktop")))
     with pytest.raises(AdapterError, match="\\.\\."):
         validate_configured_path(str(tmp_path / "home" / ".." / "other"), label="dsh_home")
     outside = tmp_path / "outside"
@@ -207,7 +211,7 @@ def test_shared_dispatch_uses_only_the_granted_session(tmp_path: Path):
     config = load_config(
         _write(
             tmp_path,
-            _shared_toml(str(home), str(cwd), spawn=True, access="write", occupancy="operator_confirmed_idle"),
+            _shared_toml(home, cwd, spawn=True, access="write", occupancy="operator_confirmed_idle"),
         )
     )
     calls: list[dict] = []
@@ -262,7 +266,7 @@ def test_concurrent_resume_is_rejected(tmp_path: Path):
     config = load_config(
         _write(
             tmp_path,
-            _shared_toml(str(home), str(cwd), spawn=True, access="write", occupancy="operator_confirmed_idle"),
+            _shared_toml(home, cwd, spawn=True, access="write", occupancy="operator_confirmed_idle"),
         )
     )
     started = threading.Event()
@@ -388,7 +392,7 @@ def test_shared_resume_mandate_names_the_session(tmp_path: Path, monkeypatch: py
     cwd = tmp_path / "demo"
     cwd.mkdir()
     config = load_config(
-        _write(tmp_path, _shared_toml(str(home), str(cwd), access="write", occupancy="operator_confirmed_idle"))
+        _write(tmp_path, _shared_toml(home, cwd, access="write", occupancy="operator_confirmed_idle"))
     )
     bridge = open_bridge(config, tmp_path / "data")
     mandate = make_mandate(

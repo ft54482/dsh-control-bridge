@@ -83,10 +83,16 @@ def plan_launch(argv: list[str]) -> dict[str, object]:
 
 
 def popen_kwargs() -> dict[str, object]:
-    """Process-group flags so cancel can reap the child and its descendants."""
+    """Process-group flags so cancel can reap the child and its descendants.
+
+    On Windows also hide the child console: a CLI launched from the bridge must
+    not flash a visible window (CREATE_NO_WINDOW), while the process group stays
+    available for the documented ``taskkill /T`` cleanup.
+    """
 
     if os.name == "nt":
-        return {"shell": False, "creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+        return {"shell": False, "creationflags": flags}
     return {"shell": False, "start_new_session": True}
 
 

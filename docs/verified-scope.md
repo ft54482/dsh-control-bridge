@@ -1,6 +1,6 @@
 # 已经在一台 Windows Desktop 上看到的，和还没有看到的
 
-这不是“这座桥完全操控 DeepSeek Harness”。下面只记录一次独立本机测试的匿名结果。文档里不写真实会话 id、标题、路径、密钥或业务名称。模型用 `example-provider` / `example-model` 代替当时读到的具体标识。
+本文记录 Windows Desktop 上的匿名验收和隔离测试。会话标识、路径、业务名称及凭据保存在本机。
 
 ## 0.1.5 上已经发生的一次往返
 
@@ -14,14 +14,43 @@
 - 仍是原来的 session 和 cwd。历史条数从 83 增到 95，旧事件身份还在。
 - 5 个正式工作区的登记和 session id 列表前后逐项相同。没有已清理的测试工作区回流，也没有子会话被提成根会话。
 
+## 0.1.6 的请求生命周期与配对窗口：只有夹具证据
+
+这一节的结论不来自真机，不能并进上面那次 0.1.5 往返。
+
+- 阶段 A：请求记录（`requests.json`）、`GET /v1/requests` 断线后补读终态、owned-turn 取消、`POST /v1/wait/stop`、幂等冲突、`unknown` 不重发，由 `plugins/dsh-control-bridge-host/test/lifecycle.test.js` 的进程内回归覆盖；官方 0.2.2-rc.5 源码核对写在 [official-host-contract.md](official-host-contract.md)。
+- 阶段 B：同一台运行中的 Host，在不重启进程的情况下重新布防 `bootstrap.json` / `bootstrap.secret`、单次使用、并发配对只成功一次、过期/超长/损坏 JSON 失败关闭、授权写盘失败不作废窗口、外部改写 `allowlist.json` 立即生效，由 `test/rearm.test.js` 覆盖；`tests/test_rearm_bootstrap.py` 只验证重新布防脚本不改长期 host secret 和授权文件。主机夹具模拟了官方 controller 的 `prompt` / `cancel` / `list` 形状，但它不是那台 Desktop。
+- `health` 的 `bootstrap_armed` 等字段、`agent_not_attached` 取消拒绝、取消回执与官方 `turn/end` 分开，也只在夹具里看过。
+
+这些都不能写成 0.1.6 已经在真机上通过。真机安装、真机取消、真机重新配对仍未做；见 [request-lifecycle.md](request-lifecycle.md) 的升级和回滚步骤，以及 [release-0.1.6.md](release-0.1.6.md) 的证据分级。
+
+## 0.2.0 的夹具回归
+
+这一节同样不来自真机，不能并进 0.1.5 那次往返。
+
+- A：请求日志的 `seq`/事件流、`wait:false`、`/events`、`/wait`、SSE 心跳与 `Last-Event-ID` 断点续读、重启后按 rpcId 补写终态、`unknown` 不重发，由 `test/control.test.js` 覆盖；实现见 `journal.js` 与 `server.js` 的 `advanceRequest`。
+- B：`/v1/model-catalog` 在官方可枚举时给出 `reasoning.efforts`（走 `llm.resolveModelInfo`），不可枚举时 `null` + `unknown`；`null` 清除旧 effort、省略跟随 adapter 默认、`auto` 明确拒绝；`route_match`/`effort_match`/`effort_verified`/`model_match` 分开，由 `test/control.test.js` 覆盖。
+- C：`/v1/discover` 读取全部已注册工作区/会话元数据，分类/状态/分页/cwd 来源/去重由 `test/control.test.js` 覆盖；状态只从官方 list 行与投影推导，没有证据就是 `unknown`，不读历史。
+- D：`/v1/workspaces`、`/v1/sessions`、`/v1/open` 的官方 create/open 调用、双开关、根目录内 realpath 校验、路径穿越/前缀/符号链接拒绝、默认 read 授权、重启后授权仍在，由 `test/create.test.js` 和 `test/paths.test.js` 覆盖。
+
+## 0.2.0 真机验收
+
+在 Windows Desktop 0.2.2-rc.5 上，用随附 CLI 从 0.1.6 升级至 Host 0.2.0。升级前后持久工作区文件逐字节一致，已有授权保持一致。目录投影多出五个可见工作区，一个原先分组的会话在同一 cwd 以未分组会话出现。全局发现找到了该会话，持久工作区文件原本未登记该会话 ID。
+
+- 全局发现、授权历史、指定根下创建目录和注册工作区、新建获 read 授权的会话，以及官方打开目录均通过。根外的创建被拒绝，目标路径没有生成。
+- 0.1.6 留下的官方完成记录可由 0.2.0 查询，长轮询和 SSE 能读到结束。一次用户授权的新请求返回 HTTP 202，交卷内容符合预期。`terminal_scope=official` 和 `completed=true`，路由及 `medium` effort 均由实际执行记录验证。SSE 用首帧序号重连，续传帧的序号全部大于断点。
+- 在同一验收会话读回 `low`、`medium` 和清除后的 effort。`auto` 返回 HTTP 400。验收会话最终恢复 read，部署默认和现有工程会话的配置保持一致。对已完成的请求调用取消，返回 `already_terminal` 并保留官方原结果。
+- 在同一 Host 进程内热重布防短期配对窗口，验收会话完成配对并保留 read，窗口重放返回 403。长期 bearer 未变化。
+- Codex 技能用官方 SuperAgent 管理面成功读到已结束历史 Ticket 的 Assignment ID、开始记录及 worker session `ref`。
+
 ## 还不能写成已经验证
 
-- `POST /v1/model` 在冷会话上的 `needs_ui`
+- 超过默认等待窗口的新长任务，以及执行期间重启后的完整恢复
+- 冷会话改模型、`needs_ui` 之后的创建/派工
 - 操作者同时在界面里改模型
-- 取消或超时之后的完整生命周期
+- 对运行中自有回合执行取消，以及超时后的完整生命周期
 - 跨工作区、多实例的实际工程闭环
-- headless 真实 `dsh.cmd` 计费调用
-- SuperAgent 派工绑定
+- 新 SuperAgent Assignment 与出站通知，见 [0.2.0 交付记录](release-0.2.0.md)。
 
 仓库里的 Node 和 Python 测试是模拟。模拟通过不等于上面这台 Desktop 已经复测了新提交。
 
@@ -29,4 +58,4 @@
 
 仓库里没有名为 `install-0.1.4` 或 `install-0.1.5` 的脚本。若本机另有一份未入库脚本把任何 `DeepSeek Harness.exe` 都当成 Desktop，那份脚本不在此树里，这次不能假装已经改掉它。
 
-仓库内的判断在 `dsh_control_bridge.desktop_install`。`DeepSeek Harness.exe --profile superagent --no-open` 不阻断安装。没有 `--profile` 的外壳、`--profile desktop` 的 Host，以及读不到命令行的同名进程，仍然阻断。脚本不结束任何进程。退出仍只能用托盘 **Quit DeepSeek Harness**。
+仓库内的判断在 `dsh_control_bridge.desktop_install` 和 `Manage-DesktopHost.ps1`。明确属于其他 profile 的 SuperAgent 进程可继续运行。默认外壳、Desktop Host 和归属不明的进程会阻断安装。用 Desktop 正常退出菜单关闭应用，再运行升级脚本。
