@@ -116,6 +116,56 @@ test('write grant resumes the same session and collects the turn result', async 
   await close(started.server)
 })
 
+test('a turn that ends with an error is not reported as completed', async () => {
+  const ctx = officialCtx()
+  ctx.state.endReason = { kind: 'error', error: { message: 'provider exploded' } }
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const result = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-error', text: 'say hi',
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.accepted, true)
+  // The turn ended, but the task did not succeed.
+  assert.equal(result.body.completed, false)
+  assert.equal(result.body.terminal, 'error')
+  assert.equal(result.body.final.reason.kind, 'error')
+  await close(started.server)
+})
+
+test('a turn with no end reason is reported as unknown, not completed', async () => {
+  const ctx = officialCtx()
+  // turn/end without a reason object: the bridge must not invent "completed".
+  ctx.state.endReason = {}
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const result = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-noreason', text: 'say hi',
+  })
+  assert.equal(result.status, 200)
+  assert.equal(result.body.completed, false)
+  assert.equal(result.body.terminal, 'unknown')
+  await close(started.server)
+})
+
+test('a grant revoked while waiting keeps accepted true so nothing is resent', async () => {
+  const ctx = officialCtx()
+  ctx.state.autoComplete = false
+  const started = await startServer(ctx, { initial: WRITE_DEMO, pollIntervalMs: 50 })
+  const pending = call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-revoke-wait', text: 'go',
+  })
+  await new Promise((resolve) => setTimeout(resolve, 150))
+  const revoked = await call(started.port, 'POST', '/v1/revoke', { session_id: 'session-demo' })
+  assert.equal(revoked.body.ok, true)
+  const result = await pending
+  assert.equal(result.status, 409)
+  assert.equal(result.body.reason, 'revoked_during_wait')
+  // The prompt was accepted before the revoke; "accepted: false" would invite a resend.
+  assert.equal(result.body.accepted, true)
+  assert.equal(result.body.completed, false)
+  assert.equal(ctx.state.prompts, 1)
+  await close(started.server)
+})
+
 test('revocation takes effect on the next request', async () => {
   const ctx = officialCtx()
   const started = await startServer(ctx, { initial: WRITE_DEMO })

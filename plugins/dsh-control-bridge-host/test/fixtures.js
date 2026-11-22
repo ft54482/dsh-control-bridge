@@ -150,7 +150,7 @@ export function officialCtx(overrides = {}) {
             time: Date.now(),
             data: { message: { role: 'assistant', content: [{ type: 'text', text: `answer to ${text} sk-livevalue012345` }] } },
           })
-          state.events.push({ seq: ++state.seq, type: 'turn/end', time: Date.now(), data: { turn: 99, reason: { kind: 'completed' } } })
+          state.events.push({ seq: ++state.seq, type: 'turn/end', time: Date.now(), data: { turn: 99, reason: state.endReason || { kind: 'completed' } } })
         }
         // The official value carries no text, no session id, and no final.
         return { accepted: true }

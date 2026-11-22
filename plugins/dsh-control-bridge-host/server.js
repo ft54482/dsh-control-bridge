@@ -324,6 +324,7 @@ export function createHostServer(ctx, config, secret) {
         live.set(requestId, controller)
         inflight.set(sessionId, requestId)
         const startedAt = Date.now()
+        let acceptedOnce = false
         try {
           let before
           try {
@@ -366,6 +367,7 @@ export function createHostServer(ctx, config, secret) {
               detail: 'the host did not acknowledge the prompt',
             })
           }
+          acceptedOnce = true
           const deadline = startedAt + resumeTimeoutMs
           let turn = null
           let lastSnapshot = before
@@ -377,7 +379,10 @@ export function createHostServer(ctx, config, secret) {
             const still = authorizeSession(current, view, { workspaceId: view.workspaceId, need: 'write' })
             if (!still.ok) {
               return send(res, 409, {
-                accepted: false,
+                // The prompt was accepted before the grant changed; saying
+                // "not accepted" would invite a duplicate send.
+                accepted: true,
+                completed: false,
                 reason: 'revoked_during_wait',
                 session_id: sessionId,
                 started_task: true,
@@ -444,9 +449,13 @@ export function createHostServer(ctx, config, secret) {
             return send(res, 200, timedOut)
           }
           const answer = turnAnswer(lastSnapshot.events, turn)
+          // A turn that ended is not the same as a turn that succeeded: only a
+          // `completed` reason is reported as completed, so an error, an abort,
+          // or a token limit cannot be mistaken for a finished task.
+          const terminal = terminalKind(answer.reason)
           const result = {
             accepted: true,
-            completed: true,
+            completed: terminal === 'completed',
             session_id: sessionId,
             request_id: requestId,
             model_selection: 'session_recorded_not_overridden',
@@ -454,8 +463,8 @@ export function createHostServer(ctx, config, secret) {
             provider: view.provider,
             model_source: view.model_source,
             text: redactText(answer.texts.join('\n\n')),
-            final: { reason: answer.reason || { kind: 'completed' } },
-            terminal: terminalKind(answer.reason),
+            final: { reason: answer.reason || { kind: terminal } },
+            terminal,
             turn: turn.number,
             events_count: answer.texts.length,
             attribution: turn.attribution,
@@ -469,18 +478,23 @@ export function createHostServer(ctx, config, secret) {
         } catch (error) {
           if (error && error.name === 'AbortError') {
             return send(res, 409, {
-              accepted: false,
+              // Whether the prompt had been accepted decides what the caller
+              // may do next: never invite a resend once it was accepted.
+              accepted: acceptedOnce,
+              completed: false,
               reason: 'cancelled',
               session_id: sessionId,
               scope: 'bridge_request',
-              desktop_turn_kept: true,
-              detail: 'the prompt was already accepted by the host; this only stops waiting',
-              started_task: true,
+              desktop_turn_kept: acceptedOnce ? true : null,
+              detail: acceptedOnce
+                ? 'the prompt was already accepted by the host; this only stops waiting'
+                : 'the wait was aborted before an acknowledgement arrived; acceptance is unknown',
+              started_task: acceptedOnce,
             })
           }
           const detail = safeError(error, 'resume')
           note(config, [detail])
-          return send(res, 500, { accepted: false, reason: detail.code || 'request_failed', session_id: sessionId, started_task: true, detail })
+          return send(res, 500, { accepted: acceptedOnce, completed: false, reason: detail.code || 'request_failed', session_id: sessionId, started_task: acceptedOnce, detail })
         } finally {
           live.delete(requestId)
           inflight.delete(sessionId)
