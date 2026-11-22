@@ -228,7 +228,7 @@ test('registered sessions keep a title and workspace without listing removed dir
   const ctx = officialCtx()
   ctx.workspaceRegistry.list = () => [{
     id: 'ws-broadcast',
-    title: 'example-workspace',
+    title: 'Broadcast Support',
     path: 'D:/work/broadcast',
     sessionIds: ['session-top'],
   }]
@@ -241,7 +241,7 @@ test('registered sessions keep a title and workspace without listing removed dir
           cwd: 'D:/work/broadcast',
           running: false,
           agentAvailable: false,
-          projections: { kind: 'cached', asOfSeq: 4, values: { title: '客服复盘', modelSelection: { lastUsed: { provider: 'example-provider', model: 'example-model' }, next: { provider: 'example-provider', model: 'example-model' } } } },
+          projections: { kind: 'cached', asOfSeq: 4, values: { title: 'Support review', modelSelection: { lastUsed: { provider: 'example-provider', model: 'example-model' }, next: { provider: 'example-provider', model: 'example-model' } } } },
         },
         { sessionId: 'session-removed', cwd: 'D:/old', running: false, agentAvailable: false },
       ],
@@ -254,7 +254,7 @@ test('registered sessions keep a title and workspace without listing removed dir
     headers: { authorization: 'Bearer bootstrap-secret-0123456789abcdef' },
   }).then(async (item) => ({ body: await item.json() }))
   assert.deepEqual(response.body.sessions.map((item) => item.session_id), ['session-top'])
-  assert.equal(response.body.sessions[0].title, '客服复盘')
+  assert.equal(response.body.sessions[0].title, 'Support review')
   assert.equal(response.body.sessions[0].workspace_id, 'ws-broadcast')
   assert.equal(response.body.sessions[0].model, 'example-model')
   assert.equal(response.body.sessions[0].provider, 'example-provider')
