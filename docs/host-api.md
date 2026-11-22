@@ -37,7 +37,36 @@
 | GET | `/v1/requests/:id/events?after_seq=&timeout_ms=` | **0.2.0**：按 seq 增量取事件；无新事件时返回 heartbeat |
 | GET | `/v1/requests/:id/stream` | **0.2.0**：SSE；`id:` = seq，心跳注释每 15s，终态发 `event: end` |
 
-### 写
+## 出站完成通知（0.2.0，默认关闭）
+
+桥只做本机 loopback 观察还不够让协调方被唤醒，因此增加**上行 webhook**：官方终态（或 `needs_input`）→ 持久 outbox → 鉴权 HTTPS POST。它与官方 inbound webhook（外部请求进入 Harness 后新建 Session、fire-and-forget）是两条不同的链路，不能互相冒充。
+
+配置（插件行；URL 与密钥只放本机安全配置）：
+
+```yaml
+    webhook:
+      enabled: true
+      url: https://receiver.example/dsh/complete   # 仅 HTTPS
+      secret: <shared HMAC secret>                 # 不打印、不进仓库/日志/发布包
+      allowedHosts: [receiver.example]             # 可选但建议
+      eventTypes: [completed, failed, cancelled, needs_input, unknown]
+      maxAttempts: 6
+      timeoutMs: 5000
+```
+
+缺配置时默认关闭；`GET /v1/health` 的 `outbox_enabled`、`GET /v1/outbox` 只暴露状态元数据（不含 URL、密钥、载荷正文）。`eventTypes` 白名单至少应包含交卷、错误、等待输入、退出；`bridge_timeout` 只能显式加入，且 `completed:false`。
+
+投递语义与字段：
+
+- 每个事件绑定 `request_id`、`rpc_id`（本桥 prompt 的 rpcId）与 `turn`；`event_id` 由 `request_id + type + session + turn` 哈希得到，重试/重启不换号。
+- 载荷只有最小状态：`event_id`、`type`、`request_id`、`rpc_id`、`turn`、`terminal`、`completed`、`outcome_scope`、`sequence`、`occurred_at`；**不含**消息文本、历史、标题、cwd、工作区名、会话 id 或凭据。接收方不得把其中的文字当指令执行。
+- 请求头：`x-dsh-event-id`、`x-dsh-event-type`、`x-dsh-timestamp`、`x-dsh-signature: sha256=HMAC-SHA256(secret, timestamp + "." + body)`。
+- outbox 落盘（`outbox.json`，原子写 + fsync）；重启后继续未完成事件；指数退避（1s/5s/30s/2m/10m），达到 `maxAttempts` 标记失败；接收方必须按 `event_id` 幂等重放。
+- SSRF：只允许 `https://`、禁止 userinfo/fragment、`allowedHosts` 不匹配拒绝、DNS 解析到回环/私网/链路本地/保留地址拒绝。URL 在投递前重新校验。
+- 状态区分：`completed`、`failed`、`cancelled`、`needs_input`、`unknown`；`bridge_timeout` 仅表示桥等待结束，`completed:false`；`accepted` 不产生完成通知。
+- 真实接收端 URL/密钥目前**不存在**，本版本没有端到端接通；`GET /v1/requests` 与有时限轮询仍是兜底。
+
+## 写
 
 | 方法 | 路径 | 条件 |
 | --- | --- | --- |

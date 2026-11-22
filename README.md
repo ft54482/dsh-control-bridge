@@ -290,6 +290,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 | Host 0.1.6 的配对窗口重新布防与授权热更新 | 只在同进程夹具中验证：单次使用、过期/损坏失败关闭、不改长期 host secret、Desktop 不必重启。还没有真机验收；证据分级见 [docs/release-0.1.6.md](docs/release-0.1.6.md) |
 | Host 0.2.0 的长任务回传（SSE/长轮询/断点续读/重启对账） | 只在夹具中验证，见 [docs/host-api.md](docs/host-api.md) 与 [docs/release-0.2.0.md](docs/release-0.2.0.md)。没有真机长任务回传记录 |
 | Host 0.2.0 的模型/effort 控制、全局发现、创建工作区/会话/打开目录 | 只在夹具和官方源码核对中验证；创建/打开需要显式配置能力开关和根目录。没有真机验收 |
+| Host 0.2.0 的出站完成 webhook（持久 outbox + HMAC HTTPS） | 只有 mock 接收端的夹具结果；本机没有接收 URL/密钥，**没有端到端接通**，默认关闭。配置字段与语义见 [docs/host-api.md](docs/host-api.md) |
 | 冷会话改模型、取消/超时的完整生命周期、跨工作区闭环 | 真机未验证；0.2.0 只把可隔离验证的部分做进夹具 |
 | SuperAgent 派工 | **官方入口不可用**：SuperAgent 的 Ticket 只能由已安装 Source 的真实事件产生，管理 API 没有创建入口，唯一 Source 是指向业务仓库的 GitHub。证据与安全替代见 [docs/release-0.2.0.md](docs/release-0.2.0.md) |
 | 看板、托管网关、A2A 协议、商业 Harness CI 插件 | 不在本仓库 |

@@ -89,6 +89,21 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 
 ## 0.2.0 的安装/升级/回滚（仍是夹具证据）
 
+官方插件安装/升级/回滚脚本是 `scripts/windows/Manage-DesktopHost.ps1`：
+
+```powershell
+# 先由操作者从托盘 Quit DeepSeek Harness 一次；脚本检测到 Desktop 仍在运行会以退出码 3 拒绝。
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Manage-DesktopHost.ps1 `
+  -Action Upgrade -Package .\dsh-control-bridge-host-0.2.0.tgz -Sha256 <manifest 中的 sha256> `
+  -BackupDir .\desktop-host-backup-20261122
+```
+
+- 只接受 `-Action Install|Upgrade|Rollback`，profile 固定为 `desktop`；不读写 SuperAgent profile，不读、不复制、不改写 `host.secret` / `bootstrap.secret`，也不结束任何进程。
+- 安装前校验包 SHA-256，备份 `package.json`、`cordis.patch.yml` 与 `allowlist.json`（不备份密钥），安装后回读已安装版本；回滚可恢复到备份文件或指定旧包。
+- 这些脚本只做静态与解析测试，没有在真机执行；真机安装仍需协调方安排统一窗口。
+
+## 直接 pnpm 命令（旧说明保留，推荐用 Manage 脚本）
+
 0.2.0 的插件包是 `dsh-control-bridge-host-0.2.0.tgz`。安装或升级只改 desktop profile 的插件行，仍然需要用户从托盘 **Quit DeepSeek Harness** 一次，再由操作者执行：
 
 ```powershell
