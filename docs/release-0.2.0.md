@@ -5,7 +5,7 @@
 ## 交付物
 
 - Host 包 `dist/dsh-control-bridge-host-0.2.0.tgz`（sha256 `aa5891a7…e65798`，56,024 bytes），便携源码包 `dist/dsh-control-bridge-0.2.0-portable.zip`（sha256 `301da96d…e50392`，1,167,002 bytes）；完整值在 `dist/MANIFEST.json` 和同名 `.sha256`，由 `scripts/build_release.py` 解包逐文件核对（含“manifest 声明的运行时文件必须都在 tgz 里”的反向检查）。**这是本包最终重建产物；协调方先前记录的两个 hash 是上一次交卷的构建，以本文件为准。**
-- 提交：`e4750c3`（0.1.6 基线）→ `f33f335`（0.2.0 功能）→ `954933e`（本轮独立复核后的修复）→ 本文档所在提交。没有 amend 既有提交。
+- 提交：`e4750c3`（0.1.6 基线）→ `f33f335`（0.2.0 功能）→ `954933e`（首轮复核修复）→ `ec313b9`（首轮文档）→ `aa72229`（出站 webhook + 安装脚本）→ 本文档所在提交。没有 amend 既有提交。
 - 版本递增到 0.2.0（插件 `package.json` 与 Python `pyproject.toml`），不再出现同版本不同 hash。
 - 没有安装到现网 0.1.5，没有 push、merge 或 force-push。
 
