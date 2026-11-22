@@ -192,12 +192,21 @@ export function officialCtx(overrides = {}) {
         state.createCalls.push({ ...request, sessionId })
         return { sessionId, agentPreset: request.agentPreset }
       },
-      canOpenWorkspacePath() { return state.canOpen !== false },
-      async openWorkspacePath(request, signal) {
+      canOpenWorkspacePath() { return state.canOpen !== false },      async openWorkspacePath(request, signal) {
         if (!signal) throw new TypeError('openWorkspacePath requires a signal')
         state.openCalls = state.openCalls || []
         state.openCalls.push({ ...request })
         return { opened: true }
+      },
+      async state(request, signal) {
+        if (!signal) throw new TypeError('state requires a signal')
+        return {
+          cursor: state.seq,
+          active: true,
+          running: Boolean(state.running),
+          queue: null,
+          pendingInput: Array.isArray(state.pendingInput) ? [...state.pendingInput] : [],
+        }
       },
       async prompt(body, signal) {
         if (!body || typeof body.sessionId !== 'string') throw new TypeError('prompt needs a sessionId')
@@ -380,6 +389,9 @@ export async function startServer(ctx, options = {}) {
     allowCreateSession: options.allowCreateSession === true,
     allowCreateWorkspace: options.allowCreateWorkspace === true,
     allowOpenPath: options.allowOpenPath === true,
+    outbox: options.outbox,
+    outboxFile: options.outboxFile || '',
+    webhook: options.webhook,
   }, options.secret || SECRET)
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')

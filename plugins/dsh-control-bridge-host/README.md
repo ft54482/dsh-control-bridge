@@ -76,6 +76,27 @@ Three endpoints are disabled unless the plugin config names both the capability 
 
 Paths are realpath-checked inside `workspaceRoots`: the root itself, sibling prefixes, `..`, and symlink escapes are refused. No delete endpoint is exposed.
 
+## Outbound completion webhook (0.2.0, off by default)
+
+Observation over loopback does not wake a coordinator, so 0.2.0 adds a durable **uplink**: an official terminal outcome (or `needs_input`) is written to a persistent outbox and POSTed to one authenticated HTTPS receiver. It is not the official inbound webhook that creates Sessions, and it is not enabled unless configured:
+
+```yaml
+    webhook:
+      enabled: true
+      url: https://receiver.example/dsh/complete
+      secret: <shared HMAC secret>
+      allowedHosts: [receiver.example]
+      eventTypes: [completed, failed, cancelled, needs_input, unknown]
+      maxAttempts: 6
+```
+
+- `event_id` is stable (`request_id + type + session + turn`), retries/restarts keep it, and the receiver must dedupe on it.
+- Payload is minimal status only: `request_id`, `rpc_id`, `turn`, `terminal`, `completed`, `outcome_scope`, `sequence`, `occurred_at`. No message text, history, title, cwd, workspace name, session id or credential.
+- Headers: `x-dsh-event-id`, `x-dsh-event-type`, `x-dsh-timestamp`, `x-dsh-signature: sha256=HMAC-SHA256(secret, timestamp + "." + body)`.
+- HTTPS only; userinfo/fragment rejected; optional host allowlist; DNS resolution must be public (SSRF guard). Outbox is atomic and fsynced, with bounded exponential retry.
+- `completed`, `failed`, `cancelled`, `needs_input`, `unknown` are distinct; `bridge_timeout` is opt-in and always `completed:false`; `accepted` never produces a completion event.
+- No receiver URL or secret exists on this machine, so **no end-to-end delivery has been proven**. `GET /v1/outbox` exposes status metadata only; the loopback query remains the fallback.
+
 The official `SessionSummary` has no `profile` field. This plugin is only mounted in the desktop profile, so `profile: "desktop"` is an installation assumption; rows carry `profile_source: "plugin_profile_assumption"` when the row itself did not say.
 
 ## Authorization

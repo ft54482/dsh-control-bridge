@@ -13,6 +13,7 @@
     "requests.js",
     "journal.js",
     "paths.js",
+    "outbox.js",
     "host_read.js",
     "models.js",
     "bootstrap.js",

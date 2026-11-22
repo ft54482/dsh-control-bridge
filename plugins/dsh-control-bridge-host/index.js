@@ -43,6 +43,7 @@ export function apply(ctx, config = {}) {
   // One authority for memory and disk; pairing, access changes, and revocation
   // all go through it, and a failed save never changes the in-memory grants.
   const requestsFile = config.requestsFile || (config.allowlistFile ? path.join(path.dirname(config.allowlistFile), 'requests.json') : '')
+  const outboxFile = config.outboxFile || (config.allowlistFile ? path.join(path.dirname(config.allowlistFile), 'outbox.json') : '')
   const requestsLoaded = loadRequestFile(requestsFile)
   if (requestsLoaded.status === 'invalid') {
     return {
@@ -85,6 +86,8 @@ export function apply(ctx, config = {}) {
     ...config,
     grants,
     requestsFile,
+    outboxFile,
+    webhook: config.webhook,
     globalDefault,
     busyPolicy: config.busyPolicy || 'refuse',
   }, {
@@ -96,7 +99,7 @@ export function apply(ctx, config = {}) {
     listening: true,
     bind: '127.0.0.1',
     port: config.port || 8765,
-    outbound: false,
+    outbound: Boolean(config.webhook && config.webhook.enabled === true),
     bootstrap: decision.bootstrap,
     grants: count,
     allowlist_file: Boolean(config.allowlistFile),

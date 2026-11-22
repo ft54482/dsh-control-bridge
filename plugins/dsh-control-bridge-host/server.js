@@ -1,6 +1,7 @@
 import http from 'node:http'
 import { bootstrapSourceFromSecret, createStaticBootstrapSource, hashSecret, matchesSecretHash } from './bootstrap.js'
 import { eventsSince, journalStart } from './journal.js'
+import { createOutbox } from './outbox.js'
 import { hasRoots, resolveWithinRoots } from './paths.js'
 import { assembleCatalog, assembleDiscovery, findTurnForRequest, readObservation, readSnapshot, safeError, turnAnswer } from './host_read.js'
 import {
@@ -128,6 +129,17 @@ export function createHostServer(ctx, config, secret) {
   const inflight = new Map()
   const waiters = new Map()
   const ledger = config.ledger || createRequestLedger({ file: config.requestsFile || '' })
+  const outbox = config.outbox || createOutbox({
+    file: config.outboxFile || '',
+    webhook: config.webhook,
+    logger: (warning) => note(config, [warning]),
+  })
+
+  /** Enqueue one durable notification; never let a receiver failure affect the turn. */
+  function notify(record) {
+    if (!record) return
+    try { outbox.enqueue(record) } catch { /* notification is best-effort */ }
+  }
   const resumeTimeoutMs = Math.min(
     DEFAULT_RESUME_TIMEOUT_MS,
     Math.max(1_000, Number(config.resumeTimeoutMs) || DEFAULT_RESUME_TIMEOUT_MS),
@@ -212,7 +224,7 @@ export function createHostServer(ctx, config, secret) {
     if (turn.end) {
       const built = describeTurn(record.session_id, requestId, record, snap, turn)
       try {
-        return await ledger.append(requestId, 'terminal', {
+        const updated = await ledger.append(requestId, 'terminal', {
           terminal: built.terminal,
           completed: built.completed,
           source: 'log_reconcile',
@@ -227,9 +239,31 @@ export function createHostServer(ctx, config, secret) {
           http_status: 200,
           last_seq: lastSeqOf(snap),
         })
+        notify(updated)
+        return updated
       } catch {
         return record
       }
+    }
+    // The official state service is the only honest "waiting for input" source.
+    // Query it only while a turn is open and this request has not been marked
+    // yet; a missing state service is not a reason to invent the status.
+    if (record.phase === 'accepted' && record.needs_input_notified !== true
+      && ctx.sessionController && typeof ctx.sessionController.state === 'function') {
+      try {
+        const pending = await ctx.sessionController.state(
+          { sessionId: record.session_id },
+          new AbortController().signal,
+        )
+        const list = pending && Array.isArray(pending.pendingInput) ? pending.pendingInput : []
+        if (list.length > 0) {
+          const updated = await ledger.append(requestId, 'needs_input', {
+            pending: list.slice(0, 3).map(String),
+          }, { needs_input_notified: true })
+          notify(updated)
+          return updated
+        }
+      } catch { /* state is advisory; never block the reconcile loop */ }
     }
     // The cursor must stay before this request's rpcId marker. Advancing it to
     // the turn boundary hides the marker from the next reconcile pass when the
@@ -366,6 +400,7 @@ export function createHostServer(ctx, config, secret) {
           response: built,
           http_status: 200,
         })
+        notify(ledger.get(requestId))
       } catch {
         return { status: 500, body: { ...built, completed: false, reason: 'request_persist_failed', exactly_once: false } }
       }
@@ -419,6 +454,7 @@ export function createHostServer(ctx, config, secret) {
       await ledger.append(requestId, 'unknown', { reason: 'manual_reconcile' }, {
         phase: 'unknown', manual_reconcile: true, crash_window: true,
       })
+      notify(ledger.get(requestId))
     } catch {
       return {
         status: 500,
@@ -693,7 +729,11 @@ export function createHostServer(ctx, config, secret) {
         return send(res, 200, {
           ok: true,
           listening: '127.0.0.1',
-          outbound: false,
+          outbound: outbox.enabled,
+          outbox_enabled: outbox.enabled,
+          outbox_event_types: outbox.eventTypes,
+          outbox_pending: outbox.snapshot().filter((event) => event.status === 'pending').length,
+          outbox_failed: outbox.snapshot().filter((event) => event.status === 'failed').length,
           desktop_verified: false,
           services: Boolean(ctx.sessionController && ctx.workspaceRegistry && ctx.sessionQuery),
           model_services: Boolean(ctx.agents && ctx.llm),
@@ -709,8 +749,22 @@ export function createHostServer(ctx, config, secret) {
           resume_timeout_ms: resumeTimeoutMs,
         })
       }
-      if (req.method === 'GET' && url.pathname === '/v1/guard/membership') {
-        const loaded = await loadCatalog()
+      if (req.method === 'GET' && url.pathname === '/v1/outbox') {
+        const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit')) || 50))
+        const all = outbox.snapshot()
+        return send(res, 200, {
+          ok: true,
+          enabled: outbox.enabled,
+          event_types: outbox.eventTypes,
+          total: all.length,
+          pending: all.filter((event) => event.status === 'pending').length,
+          failed: all.filter((event) => event.status === 'failed').length,
+          delivered: all.filter((event) => event.status === 'delivered').length,
+          items: all.slice(-limit),
+          note: 'status metadata only: payload bodies, receiver URL and signing secret are not exposed',
+        })
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/guard/membership') {        const loaded = await loadCatalog()
         note(config, loaded.warnings)
         return send(res, 200, loaded.membership)
       }
@@ -1449,6 +1503,7 @@ export function createHostServer(ctx, config, secret) {
               completed: Boolean(payload && payload.completed === true),
               reason: (payload && payload.reason) || null,
             }, patch)
+            notify(ledger.get(requestId))
           } catch {
             nextStatus = 500
             nextBody = {
@@ -2206,6 +2261,10 @@ export function createHostServer(ctx, config, secret) {
       return send(res, 500, { ok: false, reason: 'request_failed', ...detail })
     }
   })
+  server.on('close', () => {
+    outbox.close()
+  })
+  void outbox.start()
   return server
 }
 

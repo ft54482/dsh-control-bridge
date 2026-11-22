@@ -59,7 +59,7 @@ def test_timeout_kills_a_real_process_and_does_not_accept_a_final(tmp_path: Path
     with pytest.raises(AdapterError, match="no accepted final"):
         runner.run(
             task_id="task_timeout",
-            argv=["python3", str(script)],
+            argv=[sys.executable, str(script)],
             cwd=str(tmp_path),
             env={"PATH": os.environ.get("PATH", "")},
             stdin=b"ignored\n",
@@ -94,7 +94,7 @@ def test_cancel_reaps_the_process_tree(tmp_path: Path):
         try:
             runner.run(
                 task_id="task_tree",
-                argv=["python3", str(script)],
+                argv=[sys.executable, str(script)],
                 cwd=str(tmp_path),
                 env={"PATH": os.environ.get("PATH", "")},
                 stdin=b"",
@@ -322,6 +322,7 @@ def test_creation_token_identifies_only_the_spawned_process():
     assert later is None or later != first
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group branch; Windows uses taskkill and is covered by the timeout test")
 def test_terminate_tree_does_not_signal_system_pids(monkeypatch: pytest.MonkeyPatch):
     calls: list[object] = []
     monkeypatch.setattr(os, "killpg", lambda *args: calls.append(args))
