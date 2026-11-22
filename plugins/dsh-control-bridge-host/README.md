@@ -74,7 +74,9 @@ Three endpoints are disabled unless the plugin config names both the capability 
 - `POST /v1/sessions {workspace_id | (path + create_workspace:true), access?, title?, model?, agent_preset?}` → official `sessionController.create`, then a merge-only grant (default `read`; `write` explicit). A new session's model is `deferred` unless a live idle Agent exists; the deployment default is never changed.
 - `POST /v1/open {path, action?, application?}` → official `openWorkspacePath`; it opens on the Host desktop and creates nothing.
 
-Paths are realpath-checked inside `workspaceRoots`: the root itself, sibling prefixes, `..`, and symlink escapes are refused. No delete endpoint is exposed.
+For preset sessions in 0.2.2, use an already paired workspace ID. If its directory is outside the roots, list its exact ID in `presetSessionWorkspaceIds`. A new write session requires an existing write grant in that workspace. This exception applies only to creating a preset session.
+
+Filesystem paths are realpath-checked inside `workspaceRoots`: the root itself, sibling prefixes, `..`, and symlink escapes are refused. No delete endpoint is exposed.
 
 ## Outbound completion webhook (0.2.0, off by default)
 
@@ -144,11 +146,11 @@ Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-c
 Quit Desktop from the tray first. The bridge does not quit it. The tray's **Quit DeepSeek Harness** asks the Host about unfinished work before exiting; there is no supported external quit command, so the tray is the only path.
 
 ```text
-dsh plugin --profile desktop add dsh-control-bridge-host-0.2.1.tgz
+dsh plugin --profile desktop add dsh-control-bridge-host-0.2.2.tgz
 ```
 
 `Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable, and it keeps an existing host secret instead of rotating it. An empty allowlist with no armed bootstrap does not open the port. After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy. To pair another session later, `Rearm-DesktopHostBootstrap.ps1` arms a fresh window; Desktop does not need to be quit or restarted.
 
-Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. The machine-verified package is still 0.1.5. Host 0.2.0 adds the durable request journal, long-poll/SSE delivery, global discovery, per-session effort control, and opt-in create/open on top of 0.1.6's request ledger and re-armable pairing window. Those 0.2.0 paths are fixture-tested only; no live Desktop install or live acceptance has been done.
+Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. Host 0.2.2 was exercised on Windows Desktop. The Codex skill created two verified master-control sessions in the same paired workspace, dispatched a local fixture to one and observed official completion. An existing session also resumed. See the anonymized results in `docs/verified-scope.md` in the source repository.
 
-The listener is `127.0.0.1` only. It has no outbound call.
+The listener binds to `127.0.0.1`. Outbound completion webhooks are opt-in.

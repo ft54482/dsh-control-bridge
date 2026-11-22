@@ -13,4 +13,5 @@
       allowlistFile: ""
       busyPolicy: refuse
       workspaceAllowlist: []
+      presetSessionWorkspaceIds: []
       sessionAllowlist: []

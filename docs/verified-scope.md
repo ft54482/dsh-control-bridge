@@ -2,6 +2,20 @@
 
 本文记录 Windows Desktop 上的匿名验收和隔离测试。会话标识、路径、业务名称及凭据保存在本机。
 
+## 0.2.2 在已授权 Desktop 工作区的主控会话
+
+Windows 上的 Desktop profile 从 Host 0.2.0 升级到 0.2.2 后，Codex 全程通过已安装的 `deepseek-harness-bridge` 验收。工作区和会话的既有授权均已核对。
+
+| 操作 | 真机回执 |
+| --- | --- |
+| 在同一已授权工作区连续创建两个会话 | 两次均为 HTTP 200。会话 ID 不同，工作区 ID 均与目标一致。两次均从实际会话读回 `agent_preset=master-control`、`agent_preset_source=session_projection`，且 `started_task=false`。 |
+| 向第一个新会话派发本地合成测试，再按原请求查询 | HTTP 202 接受，随后读到 `phase=terminal`、`terminal_scope=official`、`completed=true`。执行方为 Harness Desktop 主控会话，Codex 独立比对了返回值与本地测试文件。 |
+| 继续升级前的已授权会话 | 新的算术测试到达官方完成状态，回答与独立计算一致。 |
+| 指定无效预设 | HTTP 404，`agent-preset/not-found`。 |
+| 指定已登记但未授权的工作区 | HTTP 403，`workspace_not_allowlisted`。 |
+
+两次拒绝后均核对了会话列表和授权，创建数与派工数均为零。此次执行和审计凭据来自 Desktop 会话与 Codex，正式 SuperAgent Assignment 和 worker session 尚无本次实测凭据。[用 skill 复现](../skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
+
 ## 0.2.1 的主控会话创建
 
 在 Windows 上，用 DeepSeek Harness Desktop 0.2.2-rc.5 随附的 CLI 启动独立的官方 Web profile。该实例使用临时工作区、仅本机监听的端口和同 ID 的合成主控预设。Codex helper 连接 Host 0.2.1，获得 `preset_create_verified: true`，并在指定工作区创建了只读的空白会话。

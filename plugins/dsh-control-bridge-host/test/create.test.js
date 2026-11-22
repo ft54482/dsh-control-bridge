@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import './first-turn-cases.js'
 import { SECRET, WORKSPACE, call, close, officialCtx, startServer } from './fixtures.js'
 
 const WRITE_DEMO = {
@@ -24,6 +25,14 @@ function tempRoot() {
 
 function writable(extra = {}) {
   return { initial: WRITE_DEMO, ...extra }
+}
+
+function pairedGrants(ws, access = 'write') {
+  ws.sessionIds.push('paired')
+  return {
+    workspaceAllowlist: [{ id: ws.id, cwd: ws.path, title: 'paired workspace' }],
+    sessionAllowlist: [{ sessionId: 'paired', workspaceId: ws.id, cwd: ws.path, access, profile: 'desktop' }],
+  }
 }
 
 test('workspace and session creation require both the capability flag and an allowed root', async () => {
@@ -155,11 +164,13 @@ test('a session is created through the official API, granted, and never uses the
   await close(started.server)
 })
 
-test('a new task gets a fresh verified preset Session in the existing workspace', async (t) => {
+test('an exact workspace exception can create two fresh preset Sessions without any directory root', async (t) => {
   const { real } = tempRoot()
   const ctx = officialCtx()
   const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'project-')))
-  const started = await startServer(ctx, writable({ workspaceRoots: [real], allowCreateSession: true }))
+  const initial = pairedGrants(ws)
+  const started = await startServer(ctx, { initial, presetSessionWorkspaceIds: [ws.id], allowCreateSession: true,
+    allowCreateWorkspace: true, allowOpenPath: true })
   t.after(() => close(started.server))
   const health = await call(started.port, 'GET', '/v1/health')
   assert.equal(health.body.preset_create_verified, true)
@@ -177,6 +188,46 @@ test('a new task gets a fresh verified preset Session in the existing workspace'
     assert.equal(receipt.body.started_task, false)
   }
   assert.equal(ctx.state.prompts, 0)
+  assert.equal(started.store.snapshot().workspaceAllowlist[0].title, 'paired workspace')
+  const raw = await call(started.port, 'POST', '/v1/sessions', { workspace_id: ws.id })
+  const open = await call(started.port, 'POST', '/v1/open', { path: ws.path })
+  const register = await call(started.port, 'POST', '/v1/workspaces', { path: ws.path })
+  for (const result of [raw, open, register]) assert.equal(result.body.reason, 'no_allowed_roots')
+})
+
+test('equivalent paired cwd spellings survive preset create, list and resume', async (t) => {
+  const { real } = tempRoot()
+  const ctx = officialCtx()
+  const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'project-')))
+  const initial = pairedGrants(ws)
+  const alias = process.platform === 'win32' ? ws.path.split(path.sep).join('/') : ws.path + '/.'
+  assert.notEqual(ws.path, alias)
+  initial.workspaceAllowlist[0].cwd = alias
+  initial.sessionAllowlist[0].cwd = alias
+  const started = await startServer(ctx, { initial, presetSessionWorkspaceIds: [ws.id], allowCreateSession: true })
+  t.after(() => close(started.server))
+  const model = { provider: 'example-provider', model: 'example-model' }
+  const created = await call(started.port, 'POST', '/v1/sessions', {
+    workspace_id: ws.id, access: 'write', agent_preset: 'master-control', model,
+  })
+  assert.equal(created.status, 200)
+  const sessionId = created.body.session_id
+  const grant = started.store.snapshot().sessionAllowlist.find((row) => row.sessionId === sessionId)
+  assert.equal(grant.agentPreset, 'master-control')
+  assert.equal(Object.hasOwn(started.store.snapshot().sessionAllowlist[0], 'agentPreset'), false)
+  const listed = await call(started.port, 'GET', '/v1/sessions?workspace_id=' + ws.id)
+  assert.ok(listed.body.sessions.some((row) => row.session_id === sessionId))
+  const resume = (requestId) => call(started.port, 'POST', '/v1/resume', {
+    workspace_id: ws.id, session_id: sessionId, request_id: requestId, text: 'synthetic fixture', model,
+  })
+  const result = await resume('alias-positive')
+  assert.equal(result.status, 200, JSON.stringify(result.body))
+  assert.equal(result.body.completed, true)
+  // Changing the actual Session directory must deny the next request.
+  ctx.state.sessions.find((row) => row.sessionId === sessionId).cwd = fs.mkdtempSync(path.join(real, 'other-'))
+  const denied = await resume('alias-negative')
+  assert.equal(denied.body.reason, 'cwd_mismatch')
+  assert.equal(ctx.state.prompts, 1)
 })
 
 test('unavailable and broken presets fail before creating or granting anything', async (t) => {
@@ -186,7 +237,7 @@ test('unavailable and broken presets fail before creating or granting anything',
     workspaceRoots: [real], allowCreateSession: true, allowCreateWorkspace: true,
   }))
   t.after(() => close(started.server))
-  const body = { path: real, create_workspace: true, agent_preset: 'missing' }
+  const body = { workspace_id: WORKSPACE, agent_preset: 'missing' }
   const send = () => call(started.port, 'POST', '/v1/sessions', body)
   assert.equal((await send()).body.reason, 'agent-preset/not-found')
   ctx.agentPresets.resolve = async () => ({ id: 'missing', broken: 'diagnostic' })
@@ -204,7 +255,7 @@ test('a mismatched create receipt or unverified projection leaves the new Sessio
   const { real } = tempRoot()
   const ctx = officialCtx()
   const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'project-')))
-  const started = await startServer(ctx, writable({ workspaceRoots: [real], allowCreateSession: true }))
+  const started = await startServer(ctx, { initial: pairedGrants(ws), workspaceRoots: [real], allowCreateSession: true })
   t.after(() => close(started.server))
   const create = ctx.sessionController.create.bind(ctx.sessionController)
   for (const [returned, projection] of [
@@ -233,7 +284,7 @@ test('preset creation rejects caller IDs and preserves the identity of a partial
   const { real } = tempRoot()
   const ctx = officialCtx()
   const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'project-')))
-  const started = await startServer(ctx, writable({ workspaceRoots: [real], allowCreateSession: true }))
+  const started = await startServer(ctx, { initial: pairedGrants(ws), workspaceRoots: [real], allowCreateSession: true })
   t.after(() => close(started.server))
   const body = { workspace_id: ws.id, agent_preset: 'master-control', access: 'write' }
   const create = () => call(started.port, 'POST', '/v1/sessions', body)
@@ -262,6 +313,95 @@ test('preset creation rejects caller IDs and preserves the identity of a partial
   assert.equal(started.store.snapshot().sessionAllowlist.length, 1)
   assert.equal(ctx.state.prompts, 0)
 })
+
+test('root membership or an exception ID alone cannot authorize a new preset Session', async (t) => {
+  const { real } = tempRoot()
+  const ctx = officialCtx()
+  const workspace = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'unpaired-')))
+  const started = await startServer(ctx, writable({ workspaceRoots: [real], presetSessionWorkspaceIds: [workspace.id],
+    allowCreateWorkspace: true, allowCreateSession: true }))
+  t.after(() => close(started.server))
+  const create = (fields) => call(started.port, 'POST', '/v1/sessions', { agent_preset: 'master-control', ...fields })
+  const denied = await create({ workspace_id: workspace.id, access: 'read' })
+  assert.equal(denied.status, 403)
+  assert.equal(denied.body.reason, 'workspace_not_allowlisted')
+  const leaf = path.join(real, 'must-not-exist')
+  const pathCreate = await create({ path: leaf, create_workspace: true, create_directory: true })
+  assert.equal(pathCreate.body.reason, 'existing_workspace_required')
+  const byIdAndPath = await create({ workspace_id: workspace.id, create_workspace: true })
+  assert.equal(byIdAndPath.body.reason, 'existing_workspace_required')
+  assert.equal((await create({ workspace_id: workspace.id, access: 'unknown' })).body.reason, 'invalid_access')
+  assert.equal(fs.existsSync(leaf), false)
+  assert.equal(ctx.state.createdWorkspaces, 1)
+  assert.equal(ctx.state.createCalls, undefined)
+  assert.equal(started.store.snapshot().sessionAllowlist.length, 1)
+})
+
+test('preset write is limited to a paired desktop write grant in the registered directory', async (t) => {
+  const { real } = tempRoot()
+  const ctx = officialCtx()
+  const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'workspace-')))
+  const initial = pairedGrants(ws, 'read')
+  const started = await startServer(ctx, { initial, workspaceRoots: [real], allowCreateSession: true })
+  t.after(() => close(started.server))
+  const create = (access) => call(started.port, 'POST', '/v1/sessions', { workspace_id: ws.id, access, agent_preset: 'master-control' })
+  assert.equal((await create('write')).body.reason, 'workspace_write_not_granted')
+  assert.equal(ctx.state.createCalls, undefined)
+  assert.equal((await create('read')).status, 200)
+  const moved = fs.mkdtempSync(path.join(real, 'moved-'))
+  const previous = ws.path
+  ws.path = moved
+  assert.equal((await create('read')).body.reason, 'cwd_mismatch')
+  ws.path = previous
+  await started.store.grant({ session: { sessionId: 'paired', workspaceId: ws.id, cwd: moved, profile: 'desktop', access: 'write' } })
+  assert.equal((await create('write')).body.reason, 'workspace_write_not_granted')
+  assert.equal(ctx.state.createCalls.length, 1)
+  assert.equal(started.store.snapshot().sessionAllowlist.length, 2)
+})
+
+test('a paired workspace outside roots must also have its own configured exception', async (t) => {
+  const { real } = tempRoot()
+  const ctx = officialCtx()
+  const ws = await ctx.workspaceRegistry.create(real)
+  const started = await startServer(ctx, { initial: pairedGrants(ws), workspaceRoots: [tempRoot().real],
+    presetSessionWorkspaceIds: [ws.id + '-other'], allowCreateSession: true })
+  t.after(() => close(started.server))
+  const result = await call(started.port, 'POST', '/v1/sessions', { workspace_id: ws.id, agent_preset: 'master-control' })
+  assert.equal(result.body.reason, 'outside_allowed_roots')
+  assert.equal(ctx.state.createCalls, undefined)
+})
+
+for (const change of ['remove workspace', 'revoke write', 'move workspace']) {
+  test('a pending create preserves a concurrent authorization change: ' + change, async (t) => {
+    const { real } = tempRoot()
+    const ctx = officialCtx()
+    const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'project-')))
+    const started = await startServer(ctx, { initial: pairedGrants(ws), workspaceRoots: [real], allowCreateSession: true })
+    t.after(() => close(started.server))
+    const projections = ctx.sessionController.projections.bind(ctx.sessionController)
+    ctx.sessionController.projections = async (...args) => {
+      if (change === 'revoke write') await started.store.revoke('paired')
+      if (change === 'move workspace') ws.path = fs.mkdtempSync(path.join(real, 'other-'))
+      if (change === 'remove workspace') {
+        fs.writeFileSync(started.file, JSON.stringify({ workspaceAllowlist: [], sessionAllowlist: [] }))
+      }
+      return projections(...args)
+    }
+    const result = await call(started.port, 'POST', '/v1/sessions', {
+      workspace_id: ws.id, agent_preset: 'master-control', access: 'write',
+    })
+    assert.equal(result.status, 403)
+    assert.equal(result.body.saved, false)
+    assert.equal(result.body.started_task, false)
+    assert.equal(result.body.manual_reconcile, true)
+    assert.ok(ws.sessionIds.includes(result.body.session_id))
+    const stored = JSON.parse(fs.readFileSync(started.file, 'utf8'))
+    assert.equal(stored.sessionAllowlist.some((row) => row.sessionId === result.body.session_id), false)
+    if (change === 'remove workspace') assert.deepEqual(stored.workspaceAllowlist, [])
+    if (change === 'revoke write') assert.deepEqual(stored.sessionAllowlist, [])
+    assert.equal(ctx.state.createCalls.length, 1)
+  })
+}
 
 test('a created session and its grant survive a Host restart', async () => {
   const { root, real } = tempRoot()

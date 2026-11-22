@@ -10,11 +10,11 @@
 
 个人安装可用于多个项目，目标为 `~/.agents/skills/deepseek-harness-bridge`。只在一个仓库使用时，可将目标改为该仓库内的 `.agents/skills/deepseek-harness-bridge`。已有自定义技能目录的用户可在 Codex 的技能列表核对实际加载位置，更新同一份安装。[OpenAI 技能目录说明](https://developers.openai.com/codex/skills/)
 
-下载 [v0.2.1 独立技能包](https://github.com/ft54482/dsh-control-bridge/releases/download/v0.2.1/deepseek-harness-bridge-0.2.1-skill.zip)，在下载目录运行。压缩包已有顶层技能文件夹，直接解压到 `skills` 目录即可。
+下载 [v0.2.2 独立技能包](https://github.com/ft54482/dsh-control-bridge/releases/download/v0.2.2/deepseek-harness-bridge-0.2.2-skill.zip)，在下载目录运行。压缩包已有顶层技能文件夹，直接解压到 `skills` 目录即可。
 
 ```powershell
 $skillRoot = Join-Path $HOME '.agents/skills'
-Expand-Archive -LiteralPath './deepseek-harness-bridge-0.2.1-skill.zip' -DestinationPath $skillRoot -Force
+Expand-Archive -LiteralPath './deepseek-harness-bridge-0.2.2-skill.zip' -DestinationPath $skillRoot -Force
 $skill = Join-Path $skillRoot 'deepseek-harness-bridge'
 $client = Join-Path $skill 'scripts/desktop.py'
 python $client --help
@@ -48,7 +48,7 @@ python $client --help
    ```
 
 2. 将便携源码 ZIP 解压到一个私有目录，进入其中包含 `scripts/windows` 的文件夹，后续安装和配对脚本在此运行。把同版本 Host TGZ 和校验清单保留在便于引用的位置。等待运行中的任务结束，从 Harness 托盘选择 **Quit DeepSeek Harness**。按下方[安装、升级和回滚](#host-install)命令安装刚核验的包，首次选择 `Install`，已有 Host 则选择 `Upgrade`。
-3. 首次安装时运行 `.\scripts\windows\Prepare-DesktopHost.ps1 -Package <包路径>`。备份 Desktop profile 的 `cordis.patch.yml`，把生成的 `desktop-host-local/cordis-snippet.yml` 应用到其中的 Host 配置项。保管该目录下的配对与凭据文件。若要允许新建会话，在同一项下配置 `allowCreateSession: true` 和 `workspaceRoots`，目标工作区必须位于其中一个已允许目录之下。[Host 配置示例](host-api.md)
+3. 首次安装时运行 `.\scripts\windows\Prepare-DesktopHost.ps1 -Package <包路径>`。备份 Desktop profile 的 `cordis.patch.yml`，把生成的 `desktop-host-local/cordis-snippet.yml` 应用到其中的 Host 配置项。保管该目录下的配对与凭据文件。若要允许新建会话，启用 `allowCreateSession: true`。使用已配对的工作区 ID。若该工作区位于 `workspaceRoots` 外，将其确切 ID 加入 `presetSessionWorkspaceIds`。创建可派工的会话还需要该工作区已有可写会话授权。[Host 配置示例](host-api.md)
 4. 重新打开 Harness Desktop，在已登记的工作区准备一条可供配对的空闲会话。运行 `.\scripts\windows\Pair-DesktopHost.ps1` 查看编号，再加 `-Index <编号>` 授予读取权限。要续接并发送任务还需该会话的 `write` 授权。配对窗口过期时运行 `.\scripts\windows\Rearm-DesktopHostBootstrap.ps1` 重新开启。
 
 ### 检查 Codex 连接
@@ -64,7 +64,7 @@ python $client granted
 
 `health` 返回 `ok: true`，且 `granted` 能找到目标会话后，在 Codex 打开 `$deepseek-harness-bridge` 即可查找旧任务。续接原会话支持 Host 0.1.6 起的授权操作。Host 0.2.0 增加全局元数据发现，历史正文仅对已授权的会话开放。
 
-独立任务默认在同一工作区新建主控会话。需要 Host 0.2.1 的验证式创建能力（`health.preset_create_verified`）和自行安装的可信 Harness Agent 预设 `master-control`。在同一 Harness profile 的侧栏打开「插件 → 添加插件」，安装并启用可信的本地预设包。也可在有插件管理工具时使用 `install_bundle` 和 `list_plugins`。预设对该 profile 的工作区共享。打开目标工作区的空白会话，在预设选择器中确认“主控模式”。此预设决定会话的角色与工具。桥只在成功读回会话实际选中的预设后才发送任务。缺少 bundle 时，可继续使用既有授权会话。SuperAgent 的派工另以 Source、Ticket 和 Assignment 作为凭据。[主控会话回读](../skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode) · [SuperAgent 用法](../skills/deepseek-harness-bridge/references/superagent.md)
+独立任务默认在同一工作区新建主控会话。使用 Host 0.2.2 完成从创建到首次派工的流程。先确认 `health.preset_create_verified` 为 true，并在同一 profile 安装可信的 Harness Agent 预设 `master-control`。在同一 Harness profile 的侧栏打开「插件 → 添加插件」，安装并启用可信的本地预设包。也可在有插件管理工具时使用 `install_bundle` 和 `list_plugins`。预设对该 profile 的工作区共享。首次安装预设后可在 Desktop 的预设选择器中查看“主控模式”。日常使用由 skill 创建会话并回读预设。桥只在成功读回会话实际选中的预设后才发送任务。缺少 bundle 时，可继续使用既有授权会话。SuperAgent 的派工另以 Source、Ticket 和 Assignment 作为凭据。[主控会话回读](../skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode) · [SuperAgent 用法](../skills/deepseek-harness-bridge/references/superagent.md)
 
 ## 便携包与假进程自检
 
@@ -143,7 +143,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 
 安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 
-兼容目标是带 0.2.2 session controller 的 Desktop。使用 Desktop 随附的 CLI 可以避免与 PATH 上其他版本混用。Windows Desktop 0.2.2-rc.5 上的历史测试和 0.2.0 真机结果见 [验收记录](verified-scope.md)。`desktop_install` 在遇到外壳、desktop profile 或归属不明的进程时阻断安装，独立的 SuperAgent profile 可以继续运行。
+兼容目标是带 0.2.2 session controller 的 Desktop。使用 Desktop 随附的 CLI 可以避免与 PATH 上其他版本混用。Windows Desktop 0.2.2-rc.5 上的历史测试和 0.2.2 主控会话真机结果见 [验收记录](verified-scope.md)。`desktop_install` 在遇到外壳、desktop profile 或归属不明的进程时阻断安装，独立的 SuperAgent profile 可以继续运行。
 
 ## 本环境没有做的 Windows 实测
 
@@ -164,7 +164,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 ```powershell
 $desktopCli = Read-Host 'Desktop 自带的 dsh.cmd 的完整路径'
 $backup = Read-Host '本次安装或升级使用的私有空目录'
-$package = Read-Host 'dsh-control-bridge-host-0.2.1.tgz 的完整路径'
+$package = Read-Host 'dsh-control-bridge-host-0.2.2.tgz 的完整路径'
 $digest = Read-Host '同版本交付清单中的 TGZ SHA-256'
 $action = Read-Host '首次安装输入 Install，升级输入 Upgrade'
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Manage-DesktopHost.ps1 `

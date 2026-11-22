@@ -38,7 +38,7 @@ The preset is a Harness profile dependency shared by that profile's workspaces. 
 
 The Codex helper adds `agent_preset: "master-control"` even if its `create-session` input contains only `workspace_id`, and verifies the resulting session. Direct callers of the Host's HTTP `POST /v1/sessions` retain its existing behavior when they omit `agent_preset`. Use the helper for the Codex workflow.
 
-1. Check `health` for `preset_create_verified: true` (Host 0.2.1+). The Host also needs `allowCreateSession` and a `workspaceRoots` entry containing the target workspace as a subdirectory. An older Host can still handle authorized continuations. To automate verified preset creation, install a Host build advertising that capability.
+1. Check `health` for `preset_create_verified: true` and identify the target with `workspaces`. Use Host 0.2.2 for an entirely skill-driven first turn in a new master-control session. Enable `allowCreateSession`. A verified session can be created in a paired workspace under the existing `workspaceRoots`; for a paired workspace outside them, add **only its exact ID** to `presetSessionWorkspaceIds`. The registered directory must match the paired directory. A new write session additionally requires an existing write grant in that workspace. Keep the roots for filesystem operations as configured. Host 0.2.1 only supports preset creation under its configured roots; older Hosts can continue existing authorized sessions.
 2. Create a UTF-8 `new-session.json` locally with the body below. Replace `WORKSPACE` with the confirmed workspace ID. Choose `write` when you intend to submit a task. Omitted access defaults to `read`.
 
    ```json

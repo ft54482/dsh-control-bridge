@@ -507,6 +507,7 @@ export async function assembleCatalog(ctx, options = {}) {
         workspace_id: item.workspace_id,
       })),
     },
+    sessionIndex: indexed.index,
     membership,
     warnings,
   }

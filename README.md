@@ -12,7 +12,7 @@
 
 **Codex 桌面端支持这个独立 skill。** 在本机打开 Codex，技能从本机读配对文件，通过 `127.0.0.1` 访问正在运行的 DeepSeek Harness Desktop。它需要 Python 3.11+、已安装并配对的 Desktop Host，以及目标会话的相应授权。[OpenAI 技能文档](https://developers.openai.com/codex/skills/)
 
-1. 下载 [Codex skill ZIP（v0.2.1）](https://github.com/ft54482/dsh-control-bridge/releases/download/v0.2.1/deepseek-harness-bridge-0.2.1-skill.zip)，将里面的 `deepseek-harness-bridge` 文件夹解压到个人 `~/.agents/skills/`。也可在 Codex 中输入 `$skill-installer 从 GitHub 仓库 ft54482/dsh-control-bridge 的 skills/deepseek-harness-bridge 目录安装技能`。手动源码安装与升级命令见[桌面端配置](docs/windows-delivery.md#codex-desktop-setup)。
+1. 下载 [Codex skill ZIP（v0.2.2）](https://github.com/ft54482/dsh-control-bridge/releases/download/v0.2.2/deepseek-harness-bridge-0.2.2-skill.zip)，将里面的 `deepseek-harness-bridge` 文件夹解压到个人 `~/.agents/skills/`。也可在 Codex 中输入 `$skill-installer 从 GitHub 仓库 ft54482/dsh-control-bridge 的 skills/deepseek-harness-bridge 目录安装技能`。手动源码安装与升级命令见[桌面端配置](docs/windows-delivery.md#codex-desktop-setup)。
 2. 安装并配对 Harness Host，把长期凭据文件的**路径**配置给技能。先在 Codex 中输入 `$deepseek-harness-bridge 检查本机连接，列出已授权工作区`。这一步可验证连接与授权，无需发送模型任务。[安装与配对](docs/windows-delivery.md#codex-desktop-setup)
 3. 按意图使用下面两种说法。主控会话要求 Harness 已安装可信的 `master-control` 自定义 Agent 预设，并且 Host 支持创建后回读预设。[会话命令与回读字段](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
 
@@ -297,6 +297,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 | CLI，以及 stdio MCP（`dsh-bridge mcp`） | 已实现 |
 | 本地自检、diagnose、preflight | 已实现 |
 | 通知出站：默认关闭；失败状态可查询 | 已实现 |
+| 同一已授权工作区的独立任务 | Host 0.2.2 在 Windows Desktop 上经 Codex skill 连建两个主控会话，从实际会话读回预设，再向其中一个派工并跟踪到官方完成。[真机验收](docs/verified-scope.md) |
 | Desktop 上一条已授权既有会话的一次 resume | 插件 0.1.5 在 Windows Desktop 0.2.2-rc.5 上有一次匿名记录，见 [docs/verified-scope.md](docs/verified-scope.md)。这不是对全部 Harness 功能的控制 |
 | Host 0.1.6 的请求记录、查询和官方 owned-turn 取消 | 版本原始证据见 [0.1.6 交付记录](docs/release-0.1.6.md)。真机升级后成功读回 0.1.6 留下的请求。 |
 | 配对窗口重新布防与授权热更新 | 0.2.0 真机通过同进程热重布防、配对和重放拒绝，见 [真机验收](docs/verified-scope.md)。 |

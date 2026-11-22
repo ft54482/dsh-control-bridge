@@ -399,6 +399,7 @@ export async function startServer(ctx, options = {}) {
     requestsFile,
     ledger: options.ledger,
     workspaceRoots: options.workspaceRoots || [],
+    presetSessionWorkspaceIds: options.presetSessionWorkspaceIds || [],
     allowCreateSession: options.allowCreateSession === true,
     allowCreateWorkspace: options.allowCreateWorkspace === true,
     allowOpenPath: options.allowOpenPath === true,
