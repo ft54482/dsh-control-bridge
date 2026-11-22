@@ -87,31 +87,30 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 - 一次超时 120 秒、不自动重试的最小真实模型调用。这次没有发。
 - Desktop、Web、SuperAgent 仍然没有受支持的接管。
 
-## 0.2.0 的安装/升级/回滚（仍是夹具证据）
+## 0.2.0 的安装、升级和回滚
 
-官方插件安装/升级/回滚脚本是 `scripts/windows/Manage-DesktopHost.ps1`：
+先记录 `GET /v1/guard/membership` 的指纹，再从托盘选择 **Quit DeepSeek Harness**。使用 Desktop 安装目录里 `resources\runtime\cli\bin\dsh.cmd`，让执行安装的 CLI 和 Desktop 运行时版本一致。
 
 ```powershell
-# 先由操作者从托盘 Quit DeepSeek Harness 一次；脚本检测到 Desktop 仍在运行会以退出码 3 拒绝。
+$desktopCli = 'C:\path\to\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
+$backup = 'C:\path\to\private\desktop-host-upgrade'
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Manage-DesktopHost.ps1 `
+  -DshExe $desktopCli `
   -Action Upgrade -Package .\dsh-control-bridge-host-0.2.0.tgz -Sha256 <manifest 中的 sha256> `
-  -BackupDir .\desktop-host-backup-20261122
+  -BackupDir $backup
 ```
 
-- 只接受 `-Action Install|Upgrade|Rollback`，profile 固定为 `desktop`；不读写 SuperAgent profile，不读、不复制、不改写 `host.secret` / `bootstrap.secret`，也不结束任何进程。
-- 安装前校验包 SHA-256，备份 `package.json`、`cordis.patch.yml` 与 `allowlist.json`（不备份密钥），安装后回读已安装版本；回滚可恢复到备份文件或指定旧包。
-- 这些脚本只做静态与解析测试，没有在真机执行；真机安装仍需协调方安排统一窗口。
+- `Install` 用于尚未安装桥的 Desktop profile，已有版本用 `Upgrade`。Desktop 或无法确认归属的 Harness 进程仍在运行时以退出码 3 拒绝。已确认的独立 `--profile superagent --no-open` 可以继续运行。
+- 脚本校验候选包 SHA-256 和包清单，在新的或空的私有目录保留候选包，从当前已安装插件的发布文件归档可回滚版本。操作后核对已安装版本和 Desktop patch 指纹。授权、密钥及工作区状态保留在原位。
+- 保留备份目录，profile 的本地包依赖会引用其中的 tgz。实装与回滚使用 Desktop 随附 CLI 在隔离 profile 中验证。升级现有 Desktop 后仍需使用健康检查和工作区指纹完成真机验收。
 
-## 直接 pnpm 命令（旧说明保留，推荐用 Manage 脚本）
-
-0.2.0 的插件包是 `dsh-control-bridge-host-0.2.0.tgz`。安装或升级只改 desktop profile 的插件行，仍然需要用户从托盘 **Quit DeepSeek Harness** 一次，再由操作者执行：
+需要回滚时，再从托盘退出 Desktop，并指定该次操作的私有备份目录。升级的回滚会校验并安装归档版本，首次安装的回滚会移除桥插件。
 
 ```powershell
-dsh plugin --profile desktop add .\dsh-control-bridge-host-0.2.0.tgz
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Manage-DesktopHost.ps1 `
+  -DshExe $desktopCli -Action Rollback -BackupDir $backup
 ```
 
-升级前先保存 `GET /v1/guard/membership` 的指纹和 `allowlist.json`；升级后逐项比对工作区/会话/子会话映射。回滚：退出 Desktop，`dsh plugin --profile desktop remove dsh-control-bridge-host`，删除可能残留的 patch 行，必要时恢复升级前的 `allowlist.json`；不要用旧 profile 备份覆盖用户后来的改动。重新打开 Desktop 后先看 `GET /v1/health` 和 `GET /v1/discover`。
+重新打开 Desktop 后检查 `GET /v1/health`，然后逐项比对工作区、会话与子会话映射。升级到 0.2.0 后再检查 `GET /v1/discover`。
 
-0.2.0 的创建/打开端点默认关闭；需要显式配置 `workspaceRoots` 与 `allowCreateSession` / `allowCreateWorkspace` / `allowOpenPath`。没有配置时它们返回 403 并说明原因，不会退回任意路径写入。Windows 上桥启动的子进程带 `CREATE_NO_WINDOW`，不弹可见控制台；用户自己打开的那个终端不会被隐藏。
-
-真机安装验收仍未做：0.2.0 没有装到现网 0.1.5，以上命令只是可审查的升级/回滚路径。
+0.2.0 的创建和打开端点默认关闭。启用时为 `workspaceRoots` 指定允许的根目录，并启用所需的 `allowCreateSession`、`allowCreateWorkspace` 或 `allowOpenPath`。缺少对应配置时端点返回 403 和具体原因。

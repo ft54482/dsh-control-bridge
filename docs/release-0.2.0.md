@@ -1,13 +1,11 @@
 # Host 0.2.0 交付与证据
 
-本文记录 0.2.0 的能力、证据级别、SuperAgent 闭环的阻塞，以及仍未真机验证的部分。证据分四层，不能互相代替：官方源码复核、隔离回归、脚本回归、真机。**这里没有真机结果。**
+本文记录 0.2.0 的实现、隔离回归与验收边界。Windows Desktop 的匿名运行记录见 [真机验收](verified-scope.md)。
 
 ## 交付物
 
-- Host 包 `dist/dsh-control-bridge-host-0.2.0.tgz`（sha256 `aa5891a7…e65798`，56,024 bytes），便携源码包 `dist/dsh-control-bridge-0.2.0-portable.zip`（sha256 `301da96d…e50392`，1,167,002 bytes）；完整值在 `dist/MANIFEST.json` 和同名 `.sha256`，由 `scripts/build_release.py` 解包逐文件核对（含“manifest 声明的运行时文件必须都在 tgz 里”的反向检查）。**这是本包最终重建产物；协调方先前记录的两个 hash 是上一次交卷的构建，以本文件为准。**
-- 提交：`e4750c3`（0.1.6 基线）→ `f33f335`（0.2.0 功能）→ `954933e`（首轮复核修复）→ `ec313b9`（首轮文档）→ `aa72229`（出站 webhook + 安装脚本）→ 本文档所在提交。没有 amend 既有提交。
-- 版本递增到 0.2.0（插件 `package.json` 与 Python `pyproject.toml`），不再出现同版本不同 hash。
-- 没有安装到现网 0.1.5，没有 push、merge 或 force-push。
+- 真机安装的 Host 包 `dsh-control-bridge-host-0.2.0.tgz`，SHA-256 `aa5891a77d14d5f0495d30c9439b971567935f0d7b0165395dcf3152f5e65798`（56,024 bytes）。`scripts/build_release.py` 逐文件核对运行时内容，并生成包含 Codex 技能和安装脚本的便携源码包。使用对应输出目录里的 `MANIFEST.json` 校验便携包。
+- Codex 技能入口为 [deepseek-harness-bridge](../skills/deepseek-harness-bridge/SKILL.md)，包含 Desktop JSON/SSE 命令和官方 SuperAgent 只读查询。
 
 ## 能力与实现位置
 
@@ -39,27 +37,25 @@
 | --- | --- | --- |
 | 官方源码复核 | 两份文档（0.1.6 契约 + 本轮 create/open/model 复核） | 只证明“官方源码如此” |
 | Node 隔离回归（8 个测试文件） | **108 passed，0 failed** | 同一进程内的协议、失败关闭、路径安全、恢复路径、并发/重启边界、出站通知 |
-| Python 脚本/桥回归 | 76 passed，4 skipped，9 failed（POSIX 路径/TOML 夹具假设） | 重新布防脚本、配对输出、隐藏控制台、打包清单、安装脚本静态检查；剩余失败全部是夹具把 POSIX 绝对路径写进 Windows 配置，与本轮代码无关 |
-| 真机 Desktop | **未运行** | 没有安装 0.2.0、没有真机长任务/创建/取消/配对 |
+| Python 脚本/桥回归 | 修正 Windows cwd 与 TOML 路径夹具后，完整套件通过 | 重新布防、打包、隐藏控制台、安装与回滚边界、技能的请求与事件协议 |
+| 真机 Desktop | 在 Windows Desktop 0.2.2-rc.5 验收 | 安装、目录/会话创建、授权配对、模型 effort 真机执行、短请求交卷与 SSE 续读。见 [真机验收](verified-scope.md) |
 
-Python 的 11 个失败仍是既有平台夹具问题（无盘符绝对路径写进 TOML、`os.killpg`、依赖 `node` 在 PATH）；CI 矩阵是 `ubuntu-latest`，与本轮主机插件代码无关。
-
-## SuperAgent 官方入口：精确阻断（本轮原始证据）
+## SuperAgent 官方入口
 
 - 官方 CLI：`node .dsh/profiles/superagent/node_modules/dsh-superagent/scripts/dsh-superagent.mjs --profile superagent status` → **exit 0**，health 全 ready，`manually_stopped:false`，`feishu:null`；CLI 只有 status/start/restart/stop，没有派工或建票子命令。
-- 官方 HTTP（同源头）：`GET /orchestrator/api/tickets` → **200** `{"items":[],"total":0,"next_offset":null}`；`GET /orchestrator/api/threads` → 200 空。`POST /orchestrator/api/tickets`、`POST /orchestrator/api/triggers`、`POST /orchestrator/api/threads`、`GET|POST /orchestrator/api/assignment` → **404** `{"error":"Unknown operation"}`。
+- 官方 HTTP `GET /orchestrator/api/tickets` 默认列开放工单。`GET /orchestrator/api/tickets?state=ended` 可查历史，详情能读取 Assignment ID、worker 会话 `ref` 和状态。`POST /orchestrator/api/tickets`、`POST /orchestrator/api/triggers`、`POST /orchestrator/api/threads`、`GET|POST /orchestrator/api/assignment` 均返回 404 `Unknown operation`。
 - 源码路由表（bundled `lib/index.js` 的 `ROUTES`）只有读取/设置/工单动作，没有创建 Trigger/Ticket/Assignment 的路由；`docs/001-domain.md` 明确 Trigger 由 Source 产生、Eval 接受后建 Ticket；`docs/006-deployment.md` 说明请求经 GitHub/Feishu 通知进入，且“人只能直接在已有 Executor Session 里写”，没有票据就没有 Executor Session。
-- 唯一已配置 Source 是 GitHub 且指向业务仓库；制造事件=对业务仓库外部写（禁止）。Feishu 未配置。因此没有 Assignment/session/run 编号可填；**本项未完成，没有用 headless 或子代理冒充**。要真正走官方流水线，起点仍是对该业务仓库的一次授权 GitHub 事件，超出本包边界。
+- 一笔新 Assignment 需要已配置且健康的 Source、通过 Policy 的发送者和可执行模型。GitHub Source 还要求独立 Agent 账号对配置的仓库具备 Write。官方流程见 [SuperAgent 部署文档](https://github.com/deepseek-ai/dsh-superagent-prototype/blob/main/docs/006-deployment.md)。
 
 ## 出站完成 webhook：代码完成，端到端未接通
 
 - 实现：`outbox.js` + `server.js` 的 `notify()`；`GET /v1/outbox`/`GET /v1/health` 只暴露状态元数据。默认关闭。
 - 覆盖：默认关闭、outbox 落盘与重启恢复、HMAC 头与稳定 `event_id`、指数退避/失败上限、幂等、脱敏（无文本/会话/cwd）、HTTPS + host allowlist + 私网 DNS 拒绝、`completed`/`failed`/`cancelled`/`needs_input`/`unknown`/`bridge_timeout` 区分。`test/webhook.test.js` 全部 mock 接收端，HTTP 200 只代表 mock 成功。
-- **本机没有接收 URL 和共享密钥，没有真实投递**。需经正规安全表单填写：是否开启；HTTPS 接收 URL；共享密钥（HMAC-SHA256，`x-dsh-timestamp` + "." + body，请求头 `x-dsh-signature`）；可选 `allowedHosts`；事件白名单（至少 completed、failed、needs_input、cancelled/unknown，`bridge_timeout` 可选）；可选 `maxAttempts`/`timeoutMs`。接收端必须按 `event_id` 幂等，并用 `request_id` 唤醒父流程；通知文本不得当指令执行。
+- 本次保留 SSE 和轮询，出站保持关闭。启用时需要配置签名接收端，按 `event_id` 去重并按 `request_id` 关联原任务。Grok Bot 的原生 routine 使用 Bearer 和 `context` 请求体，现有 HMAC sender 需要兼容接收端完成验证和转发。
 
 ## 安装/升级/回滚脚本
 
-`scripts/windows/Manage-DesktopHost.ps1` 只接受 `desktop` profile、`Install|Upgrade|Rollback`；检测 Desktop 在运行就以退出码 3 拒绝且不结束进程；校验 SHA-256、备份 manifest/patch/allowlist、安装后回读版本；回滚可恢复文件或旧包。它不读写 `host.secret`/`bootstrap.secret`，不碰 SuperAgent profile。`tests/test_host_install_scripts.py` 只做静态检查，脚本**没有真机执行**。
+`scripts/windows/Manage-DesktopHost.ps1` 面向 `desktop` profile。升级校验候选包、归档当前插件供回滚、通过官方 CLI 安装并回读版本。它让已识别的独立 SuperAgent 进程继续运行，并保留 Desktop 配置和授权状态。隔离 profile 实测安装、升级、回滚及卸载，正式 Desktop 真机完成一次 0.1.6 → 0.2.0 升级。见 [Windows 安装与回滚](windows-delivery.md)。
 
 ## 隔离目录闭环（官方 headless，不是 SuperAgent）
 
@@ -73,13 +69,10 @@ Python 的 11 个失败仍是既有平台夹具问题（无盘符绝对路径写
 
 ## 仍未验证 / 已知边界
 
-- 真机安装、真机 SSE/长任务、真机创建/打开、真机取消与配对：都没有真机结果；0.2.0 未安装到现网。
-- 出站 webhook 没有真实接收端，mock 200 不算端到端；真实投递需要操作者经安全表单提供 URL/密钥。
-- SuperAgent Assignment 未完成：官方入口没有建票/派工路径，证据见上节；没有 Assignment/session/run 编号，不能用 headless 冒充。
+- 活动请求的取消和跨 Desktop 重启的真实长任务恢复尚未验收。短任务交卷和 SSE 续读已通过。
+- 出站 webhook 尚无真实投递证据，本机按操作者选择使用轮询。
 - 新建会话的模型：官方 `create` 不选模型；bridge 只在已有 live 空闲 Agent 时设置显式模型，否则 `deferred`，首次 prompt 可能 `needs_ui`/`model_unknown`。
 - 官方没有 compare-and-cancel；取消是调用前重判归属，仍有极窄窗口。
 - 发现状态依赖官方 projection 的挂载；缺投影只能 `unknown`，不读历史猜。
 - `requests.json` 无保留期上限；每请求事件日志上限 200 条。
 - Windows 隐藏控制台只覆盖桥启动的子进程（`CREATE_NO_WINDOW`）；用户自己运行 CLI 的那个控制台不会被隐藏。
-- 观察窗口结束时若仍有未完成项，以本节和提交记录为准，不把未验证写成通过。
-- 本报告在观察窗口内写成（2026-11-22 Asia/Shanghai），没有触线取消；剩余未完成项就是上面这些真机验收。

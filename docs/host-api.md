@@ -91,7 +91,7 @@
 - `unknown`：崩溃窗口里无法证明 prompt 是否被收下；`resend:false`，**不会自动重发**，只能人工对账。
 - 桥的同步等待（默认 120s，可设 `wait_ms`）与桌面任务寿命分开；`wait:false` 立即返回 202，任务继续。
 
-**协调方怎样自动感知交卷（真实机制，不是 webhook）**：协调方持有 host secret，对 `GET /v1/requests/:id/stream` 保持一条 loopback SSE 长连接，按 `Last-Event-ID` 断点续读；收到 `event: end` 即拿到终态。没有原生唤醒时，用 `/events?after_seq=N` 或 `/wait` 做有时限的轮询补偿——这是观察，不是实时推送。`inbound webhook` 不是完成信号，本版本也不向外部推送事件。进程重启后，`advanceRequest` 用持久记录里的 rpcId 重读官方日志，能证明终态就补写 `terminal`；证明不了就留在 `unknown`，绝不重发。
+协调方可以通过 `GET /v1/requests/:id/stream` 观察请求，使用 `Last-Event-ID` 断点续读。收到 `event: end` 后查看 `phase`，再通过 `/v1/requests` 确认 `terminal_scope` 和完整结果。也可以用 `/events?after_seq=N` 或 `/wait` 做有时限的轮询。启用出站 webhook 后，还可由接收端处理完成通知。进程重启后，`advanceRequest` 用持久记录里的 rpcId 重读官方日志，能证明终态就补写 `terminal`，证明不了就留在 `unknown`。
 
 参考客户端（Python 标准库，仅示例）：
 
@@ -114,7 +114,7 @@ def finish(port, secret, request_id, last_seq=0):
         elif text.startswith("data: "):
             payload = json.loads(text[6:])
             if payload.get("phase") == "terminal":
-                return payload              # 含 completed / terminal / text / final
+                return payload              # 状态帧。完整结果通过 /v1/requests 读取。
         elif text.startswith(":"):
             continue                        # heartbeat
 ```
@@ -164,13 +164,13 @@ def finish(port, secret, request_id, last_seq=0):
 | 创建工作区 / 新建会话 / 授权 / 打开目录 | 隔离回归（官方 API） | `create.test.js`、`paths.test.js` |
 | 路径安全（穿越/前缀/根/符号链接） | 隔离回归 | `paths.test.js` |
 | 配对窗口重新布防、单次使用、失败关闭 | 隔离回归 | `rearm.test.js` |
-| 真机安装、真机取消/配对/创建、真实长任务回传 | **未验证** | 见 `verified-scope.md` |
+| 真机安装、发现、创建、打开、配对、短任务终态与 SSE 续读 | Windows Desktop 实测 | 见 [真机验收](verified-scope.md) |
 
 ## 已知边界
 
-- 没有外部推送/唤醒；协调方必须能访问 loopback（或经自己的安全隧道）。默认不监听外网。
+- 控制面只监听 loopback。出站 webhook 需单独配置 HTTPS 接收端，唤醒和展示由接收端负责。
 - 官方没有 compare-and-cancel；取消是“调用前重读并拒绝已变化”，不是事务级保证。
 - 新建会话的模型选择：`create` 不选模型；bridge 只在已有 live Agent 且空闲时设置显式模型，否则返回 `source:deferred`，首次 prompt 可能得到 `needs_ui`/`model_unknown`。不修改部署默认。
 - 全局发现的状态依赖官方 projection；未挂载相应 projection 时只能 `unknown`；不读历史来猜。
 - `requests.json` 目前没有保留期上限；事件日志每请求最多保留 200 条。
-- 以上全部是夹具结果。真机 Desktop 验收仍未做。
+- 活动回合取消、真实长任务跨等待窗口，以及外部通知交付仍待真机验证。

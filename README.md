@@ -244,6 +244,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 
 既有 home 默认不用。`home_mode = "shared"` 只打开配置里点名的工作区和 session，不能把读到历史文件当成原生 resume。Desktop 的续接走安装到 desktop profile 的 Host 插件，见 [plugins/dsh-control-bridge-host/README.md](plugins/dsh-control-bridge-host/README.md)。Host 0.2.0 在 0.1.6 的可重布防配对窗口之上，增加了持久请求日志与 SSE/长轮询、全局发现、逐会话 effort 控制，以及需要显式开启的创建/打开目录端点；完整契约见 [docs/host-api.md](docs/host-api.md)。headless 路径还在。官方 SuperAgent 的派工入口仍是关闭的，见 [docs/release-0.2.0.md](docs/release-0.2.0.md)。
 
+Codex 可以通过 `$deepseek-harness-bridge` 操作本机 Desktop。安装技能时将 `skills/deepseek-harness-bridge` 复制到 `~/.codex/skills/`，然后按技能入口配置本机 bearer 文件路径。技能包含 Python 标准库 CLI，支持 0.1.6 的授权会话操作以及 0.2.0 的发现、创建和请求事件。见 [技能入口](skills/deepseek-harness-bridge/SKILL.md)。
+
 ## 事件
 
 `POST /v1/events` 要求三个头：`X-DSH-Timestamp`、`X-DSH-Instance`、`X-DSH-Signature`。密钥来自该实例的 `event_secret_env`。一台实例的密钥不能给另一台实例签名。请求体上限 64 KiB。
@@ -288,11 +290,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 | Desktop 上一条已授权既有会话的一次 resume | 插件 0.1.5 在 Windows Desktop 0.2.2-rc.5 上有一次匿名记录，见 [docs/verified-scope.md](docs/verified-scope.md)。这不是对全部 Harness 功能的控制 |
 | Host 0.1.6 的请求记录、查询和官方 owned-turn 取消 | 只在夹具和官方源码核对中验证，见 [docs/request-lifecycle.md](docs/request-lifecycle.md)、[docs/official-host-contract.md](docs/official-host-contract.md) 与 [docs/release-0.1.6.md](docs/release-0.1.6.md)。还没有真机验收 |
 | Host 0.1.6 的配对窗口重新布防与授权热更新 | 只在同进程夹具中验证：单次使用、过期/损坏失败关闭、不改长期 host secret、Desktop 不必重启。还没有真机验收；证据分级见 [docs/release-0.1.6.md](docs/release-0.1.6.md) |
-| Host 0.2.0 的长任务回传（SSE/长轮询/断点续读/重启对账） | 只在夹具中验证，见 [docs/host-api.md](docs/host-api.md) 与 [docs/release-0.2.0.md](docs/release-0.2.0.md)。没有真机长任务回传记录 |
-| Host 0.2.0 的模型/effort 控制、全局发现、创建工作区/会话/打开目录 | 只在夹具和官方源码核对中验证；创建/打开需要显式配置能力开关和根目录。没有真机验收 |
+| Host 0.2.0 的请求回传 | 真机通过 0.1.6 请求升级后查询、短任务 SSE 和断点续读。长任务跨等待窗口仍待实测。见 [真机验收](docs/verified-scope.md) |
+| Host 0.2.0 的模型/effort 控制、全局发现、创建工作区/会话/打开目录 | Windows 真机通过。创建和打开需要显式配置能力开关及根目录。见 [真机验收](docs/verified-scope.md) |
 | Host 0.2.0 的出站完成 webhook（持久 outbox + HMAC HTTPS） | 只有 mock 接收端的夹具结果；本机没有接收 URL/密钥，**没有端到端接通**，默认关闭。配置字段与语义见 [docs/host-api.md](docs/host-api.md) |
 | 冷会话改模型、取消/超时的完整生命周期、跨工作区闭环 | 真机未验证；0.2.0 只把可隔离验证的部分做进夹具 |
-| SuperAgent 派工 | **官方入口不可用**：SuperAgent 的 Ticket 只能由已安装 Source 的真实事件产生，管理 API 没有创建入口，唯一 Source 是指向业务仓库的 GitHub。证据与安全替代见 [docs/release-0.2.0.md](docs/release-0.2.0.md) |
+| SuperAgent | 技能已用官方管理面查询历史 Ticket 和 Assignment。新派工由配置的 Source 事件进入，见 [SuperAgent 技能用法](skills/deepseek-harness-bridge/references/superagent.md) |
 | 看板、托管网关、A2A 协议、商业 Harness CI 插件 | 不在本仓库 |
 
 细节在 [docs/headless-cli.md](docs/headless-cli.md) 和 [docs/connector-contract.md](docs/connector-contract.md)。`connected_to_harness` 仍是 false：headless 进程默认不启动，SuperAgent 长任务继续拒绝。

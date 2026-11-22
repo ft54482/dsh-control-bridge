@@ -17,3 +17,4 @@ credentials.toml
 .env
 .env.*
 !.env.example
+/skills/deepseek-harness-bridge/connection.json

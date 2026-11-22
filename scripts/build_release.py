@@ -29,9 +29,9 @@ ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "dsh-control-bridge-host"
 SKIP_DIRS = {".git", ".pytest_cache", "__pycache__", "dist", "node_modules", ".mypy_cache"}
 SKIP_SUFFIXES = {".pyc", ".pyo"}
-SKIP_NAMES = {"bridge.secret", "host.secret", "bootstrap.secret", ".credentials.yaml"}
+SKIP_NAMES = {"bridge.secret", "host.secret", "bootstrap.secret", ".credentials.yaml", "connection.json"}
 PACKAGE_TOP = ["README.md", "LICENSE", "pyproject.toml", "Makefile", "CONTRIBUTING.md", "SECURITY.md"]
-PACKAGE_DIRS = ["src", "scripts", "examples", "docs", "plugins", "tests"]
+PACKAGE_DIRS = ["src", "scripts", "examples", "docs", "plugins", "skills", "tests"]
 
 
 def plugin_version() -> str:

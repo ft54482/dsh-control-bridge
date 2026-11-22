@@ -129,8 +129,8 @@ def test_fake_cmd_self_check_is_not_executed_here():
     report = windows_fake_self_check()
     if os.name == "nt":
         assert report["ran"] is True
-        assert report["ok"] is True
         text = format_report(report)
+        assert report["ok"] is True, text
         assert "not a business success" in text
     else:
         assert report["ran"] is False
