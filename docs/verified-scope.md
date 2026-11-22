@@ -24,14 +24,25 @@
 
 这些都不能写成 0.1.6 已经在真机上通过。真机安装、真机取消、真机重新配对仍未做；见 [request-lifecycle.md](request-lifecycle.md) 的升级和回滚步骤，以及 [release-0.1.6.md](release-0.1.6.md) 的证据分级。
 
+## 0.2.0 的长任务回传、发现、模型/effort、创建：只有夹具证据
+
+这一节同样不来自真机，不能并进 0.1.5 那次往返。
+
+- A：请求日志的 `seq`/事件流、`wait:false`、`/events`、`/wait`、SSE 心跳与 `Last-Event-ID` 断点续读、重启后按 rpcId 补写终态、`unknown` 不重发，由 `test/control.test.js` 覆盖；实现见 `journal.js` 与 `server.js` 的 `advanceRequest`。
+- B：`/v1/model-catalog` 在官方可枚举时给出 `reasoning.efforts`（走 `llm.resolveModelInfo`），不可枚举时 `null` + `unknown`；`null` 清除旧 effort、省略跟随 adapter 默认、`auto` 明确拒绝；`route_match`/`effort_match`/`effort_verified`/`model_match` 分开，由 `test/control.test.js` 覆盖。
+- C：`/v1/discover` 读取全部已注册工作区/会话元数据，分类/状态/分页/cwd 来源/去重由 `test/control.test.js` 覆盖；状态只从官方 list 行与投影推导，没有证据就是 `unknown`，不读历史。
+- D：`/v1/workspaces`、`/v1/sessions`、`/v1/open` 的官方 create/open 调用、双开关、根目录内 realpath 校验、路径穿越/前缀/符号链接拒绝、默认 read 授权、重启后授权仍在，由 `test/create.test.js` 和 `test/paths.test.js` 覆盖。
+- 这些都不是真机。0.2.0 没有安装到现网 Desktop，真机长任务/创建/取消/配对仍未验证；证据分级见 [release-0.2.0.md](release-0.2.0.md)。
+
 ## 还不能写成已经验证
 
-- `POST /v1/model` 在冷会话上的 `needs_ui`
+- 真机长任务回传（SSE/长轮询/断点续读）与 Desktop 真实任务寿命
+- 冷会话改模型、`needs_ui` 之后的创建/派工
 - 操作者同时在界面里改模型
 - 取消或超时之后的完整生命周期
 - 跨工作区、多实例的实际工程闭环
-- headless 真实 `dsh.cmd` 计费调用
-- SuperAgent 派工绑定
+- 真机创建工作区/会话、真机 `openWorkspacePath`
+- SuperAgent 派工绑定（官方入口不可用，证据见 [release-0.2.0.md](release-0.2.0.md)）
 
 仓库里的 Node 和 Python 测试是模拟。模拟通过不等于上面这台 Desktop 已经复测了新提交。
 

@@ -86,3 +86,17 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 - 真实 `dsh --profile headless --session-id` 接续一条人工授权的演示会话。
 - 一次超时 120 秒、不自动重试的最小真实模型调用。这次没有发。
 - Desktop、Web、SuperAgent 仍然没有受支持的接管。
+
+## 0.2.0 的安装/升级/回滚（仍是夹具证据）
+
+0.2.0 的插件包是 `dsh-control-bridge-host-0.2.0.tgz`。安装或升级只改 desktop profile 的插件行，仍然需要用户从托盘 **Quit DeepSeek Harness** 一次，再由操作者执行：
+
+```powershell
+dsh plugin --profile desktop add .\dsh-control-bridge-host-0.2.0.tgz
+```
+
+升级前先保存 `GET /v1/guard/membership` 的指纹和 `allowlist.json`；升级后逐项比对工作区/会话/子会话映射。回滚：退出 Desktop，`dsh plugin --profile desktop remove dsh-control-bridge-host`，删除可能残留的 patch 行，必要时恢复升级前的 `allowlist.json`；不要用旧 profile 备份覆盖用户后来的改动。重新打开 Desktop 后先看 `GET /v1/health` 和 `GET /v1/discover`。
+
+0.2.0 的创建/打开端点默认关闭；需要显式配置 `workspaceRoots` 与 `allowCreateSession` / `allowCreateWorkspace` / `allowOpenPath`。没有配置时它们返回 403 并说明原因，不会退回任意路径写入。Windows 上桥启动的子进程带 `CREATE_NO_WINDOW`，不弹可见控制台；用户自己打开的那个终端不会被隐藏。
+
+真机安装验收仍未做：0.2.0 没有装到现网 0.1.5，以上命令只是可审查的升级/回滚路径。

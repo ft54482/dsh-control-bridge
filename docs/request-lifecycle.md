@@ -51,9 +51,19 @@
 升级仍要先用托盘退出 Desktop。没有外部退出命令，也不要结束进程。然后：
 
 ```text
-dsh plugin --profile desktop add dsh-control-bridge-host-0.1.6.tgz
+dsh plugin --profile desktop add dsh-control-bridge-host-0.2.0.tgz
 ```
 
 回滚：再次托盘退出，`dsh plugin --profile desktop remove dsh-control-bridge-host`，需要时换回已经在本机验证过的 0.1.5 包。不要用旧的 profile 备份覆盖后来的修改。`requests.json` 可以留下；它不是会话历史。
 
 0.1.6 还没有在真机上验证。阶段 A（记录、查询、owned-turn 取消、wait/stop、unknown 不重发）由 `test/lifecycle.test.js` 的隔离回归覆盖；阶段 B（重新布防、单次使用、过期/损坏失败关闭、授权热更新）由 `test/rearm.test.js` 的同进程回归覆盖，`tests/test_rearm_bootstrap.py` 只验证重新布防脚本本身。夹具和模拟不能算真机通过；安装后的真机步骤仍未做。若要在已经授权的演示会话上试，请求要短，不调用工具，不写文件，不碰业务会话，也不要强行结束进程。先看 `GET /v1/requests` 能不能在断开后读回终态，再单独试一次属于本桥的取消，并核对官方 `turn/end`。
+
+## 0.2.0：长任务回传、发现、模型/effort、创建（仍是夹具证据）
+
+- **请求日志**：每次状态变化追加 `seq`，`requests.json` 持久化 `phase`、`prompt_attempted`、`requested_model`、`confirmed_selection`、`effort_unverified`、终态 `response` 与有界 `events`。
+- **回传**：`POST /v1/resume` 支持 `wait:false`（立即 202）和 `wait_ms`（上限 30 分钟）；`GET /v1/requests/:id/{wait,events,stream}` 提供长轮询、增量事件和 SSE（心跳、`Last-Event-ID` 断点续读）。进程重启后用持久 rpcId 重读官方日志，能证明终态就补写；证明不了留在 `unknown`，不重发。
+- **自动感知**：协调方保持 loopback SSE 长连接并在终态收到 `event: end`；没有原生唤醒时用 `/events?after_seq=` 或 `/wait` 做有时限的轮询补偿。inbound webhook 不是完成信号，也不向外部推送。
+- **发现**：`GET /v1/discover` 读全部已注册工作区/会话的元数据，分类 `top/subagent/worker/unknown`，状态只用官方 `running` 和投影（`approvalState`/`userQuestions`/`inbox`/`conversationContinuation`）推导，拿不准就是 `unknown`；不读历史，不去重提根。
+- **模型/effort**：`GET /v1/model-catalog` 在官方能枚举时给出 `reasoning.efforts`，否则 `null` + `unknown`；`POST /v1/model` 的 `null` 清除旧 effort，省略跟随 adapter 默认，`auto` 被明确拒绝；结果分 `route_match` / `effort_match` / `effort_verified` / `model_match`，执行头缺 effort 时 `model_match:null`。
+- **创建/打开**：`POST /v1/workspaces`、`POST /v1/sessions`、`POST /v1/open` 走官方 `workspaceRegistry.create` / `sessionController.create` / `openWorkspacePath`；默认全部关闭，必须同时配置 `workspaceRoots` 与对应开关。路径 realpath 校验在根内，根自身/兄弟前缀/`..`/符号链接逃逸都拒绝；新建会话默认只授 `read`，绝不改部署默认模型。
+- 这些都在 `test/control.test.js`、`test/create.test.js`、`test/paths.test.js` 里用夹具和临时目录验证；**没有真机结果**，也没有安装到现网 0.1.5。
