@@ -5,6 +5,18 @@
   "license": "MIT",
   "type": "module",
   "description": "Loopback plugin that resumes allowlisted Desktop sessions through the host session services.",
+  "files": [
+    "index.js",
+    "server.js",
+    "policy.js",
+    "grants.js",
+    "requests.js",
+    "host_read.js",
+    "models.js",
+    "bootstrap.js",
+    "cordis.patch.yml",
+    "README.md"
+  ],
   "exports": {
     ".": "./index.js",
     "./policy": "./policy.js",

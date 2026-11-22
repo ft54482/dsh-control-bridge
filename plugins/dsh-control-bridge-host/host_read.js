@@ -177,9 +177,10 @@ export async function readSessionRows(controller) {
     throw shapeError('sessionController.list is not a function', 'method_missing')
   }
   const signal = new AbortController().signal
-  // Official signature: list(request, signal). The second shape is tolerated for
-  // a controller that only takes the signal; a call without a signal is never
-  // attempted because the official implementation throws on a missing one.
+  // Official signature: list(request, signal). The official server tolerates an
+  // omitted signal for `list`, but the Remote client shape and every other
+  // method take one, so the plugin always passes it. The second shape is
+  // tolerated for a controller that only takes the signal.
   const value = await firstWorking([
     () => controller.list({}, signal),
     () => controller.list(signal),
@@ -219,8 +220,10 @@ export async function readSnapshot(sessionQuery, sessionId) {
 
 /**
  * Cheaper read for a polling consumer: `sessionQuery.observeSession()` returns
- * a live/prepared observation without persistence listing or replay validation,
- * so a poll does not re-validate the whole log. Falls back to `readSession`.
+ * a live/prepared observation without a persistence listing. For a live Session
+ * the first `events` read materializes the in-memory log without replay
+ * validation; a cold observation may still stat, read, and prepare the log.
+ * Falls back to `readSession`.
  */
 export async function readObservation(sessionQuery, sessionId) {
   if (!sessionQuery || typeof sessionQuery.observeSession !== 'function') {

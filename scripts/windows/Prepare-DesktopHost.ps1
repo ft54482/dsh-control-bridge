@@ -1,7 +1,7 @@
 # Prepares local secrets and a profile snippet. It does not quit Desktop, set a
 # machine environment variable, or install the plugin.
 param(
-  [string]$Package = "dsh-control-bridge-host-0.1.4.tgz"
+  [string]$Package = "dsh-control-bridge-host-0.1.6.tgz"
 )
 $ErrorActionPreference = "Stop"
 $root = [System.IO.Path]::GetFullPath((Split-Path (Split-Path $PSScriptRoot -Parent) -Parent))
@@ -12,14 +12,26 @@ function New-SecretFile([string]$Name) {
   $bytes = New-Object byte[] 32
   [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
   $text = ([System.BitConverter]::ToString($bytes) -replace "-", "").ToLower()
-  [System.IO.File]::WriteAllText($path, $text)
+  $tmp = "$path.tmp"
+  [System.IO.File]::WriteAllText($tmp, $text)
+  Move-Item -Force -LiteralPath $tmp -Destination $path
   return $path
 }
-$hostSecret = New-SecretFile "host.secret"
+# The long-lived host secret is created once. Running this script again must not
+# rotate it, because existing grants and scripts are bound to the installed one.
+$hostSecretPath = Join-Path $here "host.secret"
+if (Test-Path $hostSecretPath) {
+  $hostSecret = $hostSecretPath
+  Write-Output "Keeping the existing host secret; this script does not rotate it."
+} else {
+  $hostSecret = New-SecretFile "host.secret"
+}
 $bootstrapSecret = New-SecretFile "bootstrap.secret"
 $expires = [DateTimeOffset]::UtcNow.AddMinutes(20).ToUnixTimeMilliseconds()
 $bootstrap = @{ secret = (Get-Content -Raw $bootstrapSecret).Trim(); expiresAt = $expires; consumed = $false }
-[System.IO.File]::WriteAllText((Join-Path $here "bootstrap.json"), ($bootstrap | ConvertTo-Json -Compress))
+$bootstrapJson = Join-Path $here "bootstrap.json"
+[System.IO.File]::WriteAllText("$bootstrapJson.tmp", ($bootstrap | ConvertTo-Json -Compress))
+Move-Item -Force -LiteralPath "$bootstrapJson.tmp" -Destination $bootstrapJson
 $allow = Join-Path $here "allowlist.json"
 if (-not (Test-Path $allow)) { [System.IO.File]::WriteAllText($allow, "{`"version`":1,`"workspaceAllowlist`":[],`"sessionAllowlist`":[]}") }
 $snippet = @"

@@ -55,6 +55,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 0.1.4 起，`prompt()` 的返回值按官方语义只当"受理"（`{accepted:true}`），回答从会话事件里按 `source.rpcId` 找到本请求所在回合后回收；`/v1/resume` 的超时上限 120 秒，超时返回 `completed:false` 且不重发。授权改成内存/磁盘同源：配对立即生效、撤销立即生效、保存失败不改内存。
 
+0.1.6 增加了请求台账与 owned-turn 取消，并把配对窗口改成可重复布防的文件：`bootstrap.json` / `bootstrap.secret` 每次请求重新读取。重新布防不需要托盘退出，也不需要重启 Desktop；已经装好的 Host 下一次请求就会看到新窗口。窗口单次使用、短期、过期或 JSON 损坏时失败关闭，且不轮换长期 `host.secret`。操作命令：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBootstrap.ps1 -Minutes 20
+```
+
+它只写这两个窗口文件，前后校验 `host.secret` 与 `allowlist.json` 未变。`Prepare-DesktopHost.ps1` 再次运行时也保留已有 host secret。这些仍然是夹具回归；0.1.6 还没有在真机 Desktop 上安装验收。
+
 官方源码和 0.2.1 以后的问题记录都没有 `dsh desktop quit`。关窗口只会进托盘。托盘菜单 **Quit DeepSeek Harness** 会先问 Host 有没有未完成任务，确认后才退出。没有正规外部退出命令，所以这一次托盘退出不能省，也不能改成 taskkill。允许重启不等于可以丢掉还没写完的任务。
 
 `Prepare-DesktopHost.ps1` 把口令写在解压目录的 `desktop-host-local`，不写系统环境变量。空名单且没有 20 分钟发现窗口时插件不监听。打开 Desktop 后，`Pair-DesktopHost.ps1` 按标题列出会话；`Pair-DesktopHost.ps1 -Index 1` 只写入这一条只读授权并作废发现口令。发现不读正文、不启动任务、不改模型。子会话只分类，不挂到根上。列表读取失败会标明失败，不会显示成“没有历史”。

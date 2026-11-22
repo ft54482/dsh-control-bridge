@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import test from 'node:test'
-import { createRequestLedger } from '../requests.js'
+import { classifyOwnedTurn, createRequestLedger } from '../requests.js'
 import { WORKSPACE, call, close, makeStore, officialCtx, startServer } from './fixtures.js'
 
 const WRITE = {
@@ -201,8 +201,18 @@ test('a read-only grant cannot cancel and a model mismatch is not sent', async (
 
 test('a request record that cannot be saved does not prompt', async () => {
   const ctx = officialCtx()
-  const started = await startServer(ctx, { initial: WRITE })
-  fs.chmodSync(started.dir, 0o555)
+  const stored = makeStore(WRITE)
+  // A regular file where the requests directory should be makes the write fail
+  // with ENOTDIR on every platform. A directory chmod would be a no-op on
+  // Windows and would let this regression pass for the wrong reason.
+  const blocked = path.join(stored.dir, 'blocked-requests')
+  fs.writeFileSync(blocked, 'not a directory')
+  const started = await startServer(ctx, {
+    store: stored.store,
+    file: stored.file,
+    dir: stored.dir,
+    requestsFile: path.join(blocked, 'requests.json'),
+  })
   try {
     const refused = await call(started.port, 'POST', '/v1/resume', body())
     assert.equal(refused.status, 500)
@@ -210,7 +220,115 @@ test('a request record that cannot be saved does not prompt', async () => {
     assert.equal(refused.body.started_task, false)
     assert.equal(ctx.state.prompts, 0)
   } finally {
-    fs.chmodSync(started.dir, 0o755)
     await close(started.server)
   }
+})
+
+test('a dropped client connection can be looked up after the turn ends', async () => {
+  const ctx = officialCtx({ holdTurn: true })
+  const started = await startServer(ctx, { initial: WRITE, resumeTimeoutMs: 5000 })
+  const controller = new AbortController()
+  const pending = fetch(`http://127.0.0.1:${started.port}/v1/resume`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer 0123456789abcdef0123456789abcdef', 'content-type': 'application/json' },
+    body: JSON.stringify(body()),
+    signal: controller.signal,
+  }).catch((error) => error)
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  assert.equal(ctx.state.prompts, 1)
+  controller.abort()
+  await pending
+
+  // The bridge wait is not the Desktop turn: ending the official turn is
+  // enough for the durable record to become readable.
+  ctx.state.events.push({
+    seq: ++ctx.state.seq,
+    type: 'turn/end',
+    time: Date.now(),
+    data: { turn: 7, reason: { kind: 'completed' } },
+  })
+  const query = await call(started.port, 'GET', '/v1/requests?request_id=req-life&session_id=session-demo')
+  assert.equal(query.status, 200)
+  assert.equal(query.body.terminal, 'completed')
+  assert.equal(query.body.completed, true)
+  assert.equal(query.body.query, true)
+  assert.equal(ctx.state.prompts, 1)
+  await close(started.server)
+})
+
+test('wait/stop on an unknown request changes nothing', async () => {
+  const ctx = officialCtx()
+  const started = await startServer(ctx, { initial: WRITE })
+  const stopped = await call(started.port, 'POST', '/v1/wait/stop', { request_id: 'req-never-sent' })
+  assert.equal(stopped.status, 200)
+  assert.equal(stopped.body.confirmed, false)
+  assert.equal(stopped.body.reason, 'no_bridge_wait')
+  assert.equal(stopped.body.desktop_cancel_called, false)
+  assert.equal(ctx.state.prompts, 0)
+  assert.equal(ctx.state.cancelled, 0)
+  await close(started.server)
+})
+
+test('a request query refuses an unknown request and a mismatched session', async () => {
+  const ctx = officialCtx()
+  const started = await startServer(ctx, { initial: WRITE })
+  const missing = await call(started.port, 'GET', '/v1/requests?request_id=req-nope&session_id=session-demo')
+  assert.equal(missing.status, 404)
+  assert.equal(missing.body.reason, 'unknown_request')
+  const done = await call(started.port, 'POST', '/v1/resume', body())
+  assert.equal(done.body.completed, true)
+  const mismatch = await call(started.port, 'GET', '/v1/requests?request_id=req-life&session_id=session-busy')
+  assert.equal(mismatch.status, 404)
+  assert.equal(mismatch.body.reason, 'unknown_request')
+  await close(started.server)
+})
+
+test('a finished turn is not cancelled again and the official cancel is not called', async () => {
+  const ctx = officialCtx()
+  const started = await startServer(ctx, { initial: WRITE })
+  const done = await call(started.port, 'POST', '/v1/resume', body())
+  assert.equal(done.body.completed, true)
+  const cancelled = await call(started.port, 'POST', '/v1/cancel', body())
+  assert.equal(cancelled.status, 200)
+  assert.equal(cancelled.body.cancel_accepted, false)
+  assert.equal(cancelled.body.desktop_cancel_called, false)
+  assert.equal(cancelled.body.reason, 'already_terminal')
+  assert.equal(cancelled.body.terminal, 'completed')
+  assert.equal(ctx.state.cancelled, 0)
+  await close(started.server)
+})
+
+test('cancel refuses a session without a live agent instead of calling the official cancel', async () => {
+  const ctx = officialCtx({ holdTurn: true })
+  const started = await startServer(ctx, { initial: WRITE, resumeTimeoutMs: 5000 })
+  const pending = call(started.port, 'POST', '/v1/resume', body())
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  // The official cancel resolves the live Agent; the projection says this one
+  // is not attached, so the bridge must not report a failed Desktop cancel.
+  const row = ctx.state.sessions.find((item) => item.sessionId === 'session-demo')
+  row.agentAvailable = false
+  const refused = await call(started.port, 'POST', '/v1/cancel', body())
+  assert.equal(refused.status, 409)
+  assert.equal(refused.body.reason, 'agent_not_attached')
+  assert.equal(refused.body.desktop_cancel_called, false)
+  assert.equal(ctx.state.cancelled, 0)
+  await call(started.port, 'POST', '/v1/wait/stop', { request_id: 'req-life' })
+  await pending
+  await close(started.server)
+})
+
+test('a prompt spliced before its turn start is not cancellable as an owned turn', () => {
+  const queued = [
+    { seq: 1, type: 'user/message', data: { source: { rpcId: 'req-q' } } },
+    { seq: 2, type: 'turn/start', data: { turn: 9 } },
+  ]
+  const verdict = classifyOwnedTurn(queued, 'req-q')
+  assert.equal(verdict.owned, false)
+  assert.equal(verdict.reason, 'prompt_not_started')
+
+  const started = [
+    { seq: 1, type: 'turn/start', data: { turn: 9 } },
+    { seq: 2, type: 'user/message', data: { source: { rpcId: 'req-q' } } },
+  ]
+  assert.equal(classifyOwnedTurn(started, 'req-q').owned, true)
 })

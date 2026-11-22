@@ -1,8 +1,9 @@
 import http from 'node:http'
+import { bootstrapSourceFromSecret, createStaticBootstrapSource, hashSecret, matchesSecretHash } from './bootstrap.js'
 import { assembleCatalog, findTurnForRequest, readObservation, readSnapshot, safeError, turnAnswer } from './host_read.js'
 import {
   agentIdle, agentSelection, checkSelection, executionModelForTurn, liveAgent,
-  modelStateFromEvents, modelStateFromProjection, sameRoute, selectOnAgent, selectionOf,
+  modelStateFromEvents, modelStateFromProjection, sameRoute, sameSelection, selectOnAgent, selectionOf,
 } from './models.js'
 import {
   authorizeSession, authorizeWorkspace, checkAuth, decideResume, loopbackPeer, pageHistory,
@@ -14,15 +15,35 @@ const DEFAULT_RESUME_TIMEOUT_MS = 120_000
 const DEFAULT_POLL_INTERVAL_MS = 500
 const DEFAULT_POLL_MAX_INTERVAL_MS = 2_000
 const MAX_TEXT_CHARS = 100_000
+const MAX_PAIRING_BODY_BYTES = 16 * 1024
 
-function authScope(header, secrets) {
-  if (secrets.bootstrap && checkAuth(header, secrets.bootstrap)) {
-    if (secrets.consumed) return { scope: '', reason: 'bootstrap_consumed' }
-    if (!(Number(secrets.expiresAt) > Date.now())) return { scope: '', reason: 'bootstrap_expired' }
-    return { scope: 'bootstrap' }
+/**
+ * Authorize one loopback request against the live pairing window.
+ *
+ * The bootstrap window is read again for every request, so re-arming or
+ * consuming it never needs a process restart. A consumed secret is matched by
+ * its stored hash so a replay is named instead of looking like a random bad
+ * bearer; anything unreadable or invalid simply fails closed.
+ */
+function authScope(header, hostSecret, bootstrap, isSpent) {
+  if (hostSecret && checkAuth(header, hostSecret)) return { scope: 'host' }
+  const boot = bootstrap.read()
+  if (boot.armed && checkAuth(header, boot.secret)) {
+    // The durable grant file records the window it spent. That marker still
+    // blocks a replay when the bootstrap-file write itself failed, so one
+    // window cannot grant twice.
+    if (typeof isSpent === 'function' && isSpent(boot.secret)) {
+      return { scope: '', reason: 'bootstrap_consumed', bootstrap: boot }
+    }
+    return { scope: 'bootstrap', secret: boot.secret, bootstrap: boot }
   }
-  if (secrets.host && checkAuth(header, secrets.host)) return { scope: 'host' }
-  return { scope: '', reason: 'unauthorized' }
+  if (boot.status === 'ok' && boot.consumed && matchesSecretHash(header, boot.consumedSecretHash)) {
+    return { scope: '', reason: 'bootstrap_consumed', bootstrap: boot }
+  }
+  if (boot.status === 'ok' && boot.secret && checkAuth(header, boot.secret)) {
+    return { scope: '', reason: boot.reason || 'bootstrap_not_armed', bootstrap: boot }
+  }
+  return { scope: '', reason: 'unauthorized', bootstrap: boot }
 }
 
 function adapterSession(row) {
@@ -87,11 +108,15 @@ function sleep(ms, signal) {
 }
 
 export function createHostServer(ctx, config, secret) {
-  const secrets = typeof secret === 'string'
-    ? { host: secret, bootstrap: '', expiresAt: 0, consumed: true }
-    : { consumed: false, expiresAt: 0, ...secret }
+  const hostSecret = typeof secret === 'string' ? secret : String((secret && secret.host) || '')
+  // A file-backed source re-reads the window per request; the legacy object
+  // form is a static source so existing isolated tests keep their shape.
+  const bootstrap = typeof secret === 'string'
+    ? createStaticBootstrapSource({})
+    : bootstrapSourceFromSecret(secret)
   const grants = config.grants
   const seen = new Map()
+  let pairingTail = Promise.resolve()
   const live = new Map()
   const inflight = new Map()
   const waiters = new Map()
@@ -108,6 +133,28 @@ export function createHostServer(ctx, config, secret) {
     if (!grants) throw new Error('grant store is not configured')
     grants.refresh()
     return grants.snapshot()
+  }
+
+  /** Pairing attempts are serialized so one armed window can be spent once. */
+  function serializedPairing(work) {
+    const run = pairingTail.then(work, work)
+    pairingTail = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  /** Whether the durable grant file already records this window as spent. */
+  function spentWindow(secret) {
+    try {
+      const grantsNow = state()
+      return Boolean(grantsNow.spentBootstrapHash) && grantsNow.spentBootstrapHash === hashSecret(secret)
+    } catch {
+      return false
+    }
+  }
+
+  /** An in-flight resume belongs to one session: the same id on another is not shared. */
+  function waitKey(sessionId, requestId) {
+    return `${sessionId}\u0000${requestId}`
   }
 
   async function recoverStored(sessionId, requestId, record) {
@@ -282,7 +329,7 @@ export function createHostServer(ctx, config, secret) {
     if (!loopbackPeer(remote)) return send(res, 401, { ok: false, reason: 'unauthorized' })
     const browser = rejectBrowser(req.headers)
     if (browser) return send(res, 403, { ok: false, reason: browser })
-    const auth = authScope(req.headers.authorization, secrets)
+    const auth = authScope(req.headers.authorization, hostSecret, bootstrap, spentWindow)
     if (!auth.scope) {
       const status = auth.reason === 'unauthorized' ? 401 : 403
       return send(res, status, { ok: false, reason: auth.reason || 'unauthorized' })
@@ -290,8 +337,114 @@ export function createHostServer(ctx, config, secret) {
     const scope = auth.scope
     const url = new URL(req.url || '/', 'http://127.0.0.1')
     try {
+      if (url.pathname.startsWith('/v1/bootstrap/')) {
+        if (scope !== 'bootstrap') return send(res, 403, { ok: false, reason: 'bootstrap_required' })
+        if (req.method === 'GET' && url.pathname === '/v1/bootstrap/catalog') {
+          const loaded = await loadCatalog()
+          note(config, loaded.warnings)
+          return send(res, 200, loaded.catalog)
+        }
+        if (req.method === 'POST' && url.pathname === '/v1/bootstrap/select') {
+          // Read the body before taking the pairing lock: a client that never
+          // finishes its body must not block every later pairing attempt.
+          let body
+          try {
+            body = await readJsonLimited(req, MAX_PAIRING_BODY_BYTES)
+          } catch (error) {
+            const tooLarge = error && error.code === 'body_too_large'
+            return send(res, tooLarge ? 413 : 400, {
+              ok: false,
+              saved: false,
+              started_task: false,
+              reason: tooLarge ? 'body_too_large' : 'invalid_json',
+            })
+          }
+          return await serializedPairing(async () => {
+            // Re-check under the pairing lock: a concurrent select may have
+            // spent this window, and a re-arm may have replaced it.
+            const usedSecret = auth.secret
+            const current = bootstrap.read()
+            if (!current.armed || current.secret !== usedSecret) {
+              const status = current.status === 'invalid' ? 401 : 403
+              return send(res, status, {
+                ok: false,
+                saved: false,
+                started_task: false,
+                reason: current.reason || 'bootstrap_not_armed',
+              })
+            }
+            // The durable grant file records the spent window; it still blocks
+            // a replay when the bootstrap-file write failed after the grant.
+            if (spentWindow(usedSecret)) {
+              return send(res, 403, { ok: false, saved: false, started_task: false, reason: 'bootstrap_consumed' })
+            }
+            const loaded = await loadCatalog()
+            if (loaded.catalog.session_status === 'read_failed') {
+              return send(res, 409, { ok: false, reason: 'read_failed', started_task: false, warnings: loaded.warnings })
+            }
+            const chosen = selectGrant(loaded.catalog, { session_id: body.session_id, access: body.access })
+            if (!chosen.ok) return send(res, 409, chosen)
+            const spentBootstrapHash = hashSecret(usedSecret)
+            let after
+            try {
+              // The spent-window marker is written in the same atomic file as
+              // the grant, so a later bootstrap-file write failure cannot turn
+              // one window into two grants.
+              after = await grants.grant({
+                workspace: chosen.workspace,
+                session: chosen.session,
+                spentBootstrapHash,
+              })
+            } catch (error) {
+              const detail = safeError(error, 'grants.save')
+              note(config, [detail])
+              // A failed grant write must leave the window armed so pairing can
+              // be retried, and must not change the in-memory grants.
+              return send(res, 500, {
+                ok: false,
+                reason: error && error.code ? error.code : 'allowlist_persist_failed',
+                saved: false,
+                started_task: false,
+                bootstrap_consumed: false,
+                detail,
+              })
+            }
+            // The pairing window is only retired after the grant is durable.
+            // consume() compares the secret that authenticated this request, so
+            // a window re-armed in the meantime stays armed.
+            const retired = bootstrap.consume(usedSecret)
+            if (!retired.consumed) note(config, [{ method: 'bootstrap.consume', error: 'BootstrapConsume', code: retired.reason }])
+            return send(res, 200, {
+              ok: true,
+              started_task: false,
+              model_changed: false,
+              granted: {
+                session_id: chosen.session.sessionId,
+                workspace_id: chosen.session.workspaceId,
+                access: chosen.session.access,
+                title: chosen.session.title,
+                cwd: chosen.session.cwd,
+              },
+              bootstrap_consumed: retired.consumed,
+              bootstrap_retired: true,
+              bootstrap_rearm_detected: !retired.consumed && retired.reason === 'bootstrap_changed',
+              bootstrap_consume_reason: retired.reason,
+              allowlist: {
+                version: after.version,
+                workspaceAllowlist: after.workspaceAllowlist,
+                sessionAllowlist: after.sessionAllowlist,
+              },
+              revision: after.revision,
+            })
+          })
+        }
+        return send(res, 404, { ok: false, reason: 'not_found' })
+      }
+      if (scope !== 'host') return send(res, 403, { ok: false, reason: 'host_secret_required' })
+
       if (req.method === 'GET' && url.pathname === '/v1/health') {
         const grantsNow = state()
+        const boot = bootstrap.read()
         return send(res, 200, {
           ok: true,
           listening: '127.0.0.1',
@@ -303,6 +456,11 @@ export function createHostServer(ctx, config, secret) {
           grants_revision: grantsNow.revision,
           grants_count: grantsNow.workspaceAllowlist.length + grantsNow.sessionAllowlist.length,
           allowlist_warnings: grantsNow.warnings,
+          bootstrap_status: boot.status,
+          bootstrap_armed: boot.armed,
+          bootstrap_consumed: boot.consumed,
+          bootstrap_retired: spentWindow(boot.secret || ''),
+          bootstrap_expires_at: boot.expiresAt || null,
           resume_timeout_ms: resumeTimeoutMs,
         })
       }
@@ -311,59 +469,6 @@ export function createHostServer(ctx, config, secret) {
         note(config, loaded.warnings)
         return send(res, 200, loaded.membership)
       }
-      if (url.pathname.startsWith('/v1/bootstrap/')) {
-        if (scope !== 'bootstrap') return send(res, 403, { ok: false, reason: 'bootstrap_required' })
-        if (req.method === 'GET' && url.pathname === '/v1/bootstrap/catalog') {
-          const loaded = await loadCatalog()
-          note(config, loaded.warnings)
-          return send(res, 200, loaded.catalog)
-        }
-        if (req.method === 'POST' && url.pathname === '/v1/bootstrap/select') {
-          const body = await readJson(req)
-          const loaded = await loadCatalog()
-          if (loaded.catalog.session_status === 'read_failed') {
-            return send(res, 409, { ok: false, reason: 'read_failed', started_task: false, warnings: loaded.warnings })
-          }
-          const chosen = selectGrant(loaded.catalog, { session_id: body.session_id, access: body.access })
-          if (!chosen.ok) return send(res, 409, chosen)
-          let after
-          try {
-            after = await grants.grant({ workspace: chosen.workspace, session: chosen.session })
-          } catch (error) {
-            const detail = safeError(error, 'grants.save')
-            note(config, [detail])
-            return send(res, 500, {
-              ok: false,
-              reason: error && error.code ? error.code : 'allowlist_persist_failed',
-              saved: false,
-              started_task: false,
-              detail,
-            })
-          }
-          // The bootstrap secret is only retired after the grant is durable.
-          secrets.consumed = true
-          if (config.consumeBootstrap) {
-            try {
-              config.consumeBootstrap()
-            } catch (error) {
-              note(config, [safeError(error, 'bootstrap.consume')])
-            }
-          }
-          return send(res, 200, {
-            ok: true,
-            started_task: false,
-            model_changed: false,
-            allowlist: {
-              version: after.version,
-              workspaceAllowlist: after.workspaceAllowlist,
-              sessionAllowlist: after.sessionAllowlist,
-            },
-            revision: after.revision,
-          })
-        }
-        return send(res, 404, { ok: false, reason: 'not_found' })
-      }
-      if (scope !== 'host') return send(res, 403, { ok: false, reason: 'host_secret_required' })
 
       if (req.method === 'GET' && url.pathname === '/v1/granted') {
         const grantsNow = state()
@@ -555,8 +660,8 @@ export function createHostServer(ctx, config, secret) {
         const body = await readJson(req)
         const requestId = typeof body.request_id === 'string' ? body.request_id : ''
         const sessionId = typeof body.session_id === 'string' ? body.session_id : ''
-        if (waiters.has(requestId)) {
-          const shared = await waiters.get(requestId)
+        if (waiters.has(waitKey(sessionId, requestId))) {
+          const shared = await waiters.get(waitKey(sessionId, requestId))
           return send(res, shared.status, shared.body)
         }
         if (typeof body.text !== 'string' || body.text.trim().length === 0) {
@@ -592,6 +697,55 @@ export function createHostServer(ctx, config, secret) {
         })
         if (!decision.accepted) return send(res, 409, decision)
 
+        // A duplicate request id must be answered from its durable record
+        // before the model gate: resolving a model here would mutate the
+        // session for a request that is then rejected as a conflict.
+        const prior = ledger.get(requestId)
+        if (prior) {
+          const priorModel = prior.requested_model || null
+          // The replay's own explicit model participates in the hash, so the
+          // same id with a different model is a conflict, not an idempotent hit.
+          const replayModel = body.model && typeof body.model === 'object'
+            ? selectionOf({
+              provider: body.model.provider,
+              model: body.model.model,
+              reasoningEffort: body.model.reasoning_effort ?? body.model.reasoningEffort,
+            })
+            : priorModel
+          let early
+          try {
+            early = await ledger.claim({
+              requestId,
+              sessionId,
+              workspaceId: body.workspace_id || view.workspaceId,
+              contentHash: contentHash({ sessionId, text: body.text, model: replayModel }),
+              requestedModel: priorModel,
+              confirmedSelection: prior.confirmed_selection,
+              explicitModel: Boolean(prior.explicit_model),
+            })
+          } catch {
+            return send(res, 500, {
+              accepted: false, completed: false, reason: 'request_persist_failed',
+              session_id: sessionId, request_id: requestId, started_task: false, exactly_once: false,
+            })
+          }
+          if (early.conflict) {
+            return send(res, 409, {
+              accepted: false, completed: false, reason: 'idempotency_conflict',
+              session_id: sessionId, request_id: requestId, started_task: false,
+              detail: 'this request id is already bound to different content or a different session',
+            })
+          }
+          if (!early.created) {
+            if (waiters.has(waitKey(sessionId, requestId))) {
+              const shared = await waiters.get(waitKey(sessionId, requestId))
+              return send(res, shared.status, shared.body)
+            }
+            const reused = await recoverStored(sessionId, requestId, early.record)
+            return send(res, reused.status, reused.body)
+          }
+        }
+
         // ---- model gate: a route that is unknown or has no adapter is refused
         // before prompt(), never discovered as NO_ADAPTER in the middle of a turn.
         const models = await modelStateOf(sessionId, found.row)
@@ -618,7 +772,7 @@ export function createHostServer(ctx, config, secret) {
           })
         }
         const agentAtStart = liveAgent(ctx, sessionId)
-        if (explicitModel && !sameRoute(agentSelection(agentAtStart), requested)) {
+        if (explicitModel && !sameSelection(agentSelection(agentAtStart), requested)) {
           const availability = await checkSelection(ctx, requested)
           if (!availability.available) {
             return send(res, 409, {
@@ -657,7 +811,7 @@ export function createHostServer(ctx, config, secret) {
           }
         }
         const confirmed = agentSelection(liveAgent(ctx, sessionId)) || requested
-        if (!sameRoute(confirmed, requested)) {
+        if (!sameSelection(confirmed, requested)) {
           return send(res, 409, {
             accepted: false,
             completed: false,
@@ -706,8 +860,8 @@ export function createHostServer(ctx, config, secret) {
           })
         }
         if (!claim.created) {
-          if (waiters.has(requestId)) {
-            const shared = await waiters.get(requestId)
+          if (waiters.has(waitKey(sessionId, requestId))) {
+            const shared = await waiters.get(waitKey(sessionId, requestId))
             return send(res, shared.status, shared.body)
           }
           const reused = await recoverStored(sessionId, requestId, claim.record)
@@ -715,7 +869,7 @@ export function createHostServer(ctx, config, secret) {
         }
         let settleWait
         const pendingResult = new Promise((resolve) => { settleWait = resolve })
-        waiters.set(requestId, pendingResult)
+        waiters.set(waitKey(sessionId, requestId), pendingResult)
         const publish = async (status, payload, patch) => {
           let nextStatus = status
           let nextBody = payload
@@ -732,7 +886,7 @@ export function createHostServer(ctx, config, secret) {
             }
           }
           settleWait({ status: nextStatus, body: nextBody })
-          waiters.delete(requestId)
+          waiters.delete(waitKey(sessionId, requestId))
           return send(res, nextStatus, nextBody)
         }
         const controller = new AbortController()
@@ -755,7 +909,7 @@ export function createHostServer(ctx, config, secret) {
           // The selection must still be the one confirmed above, and the adapter
           // must still be registered: both can change between preflight and send.
           const liveBeforeSend = agentSelection(liveAgent(ctx, sessionId))
-          if (liveBeforeSend && !sameRoute(liveBeforeSend, confirmed)) {
+          if (liveBeforeSend && !sameSelection(liveBeforeSend, confirmed)) {
             return publish(409, {
               accepted: false,
               completed: false,
@@ -1179,6 +1333,47 @@ export function createHostServer(ctx, config, secret) {
             session_id: sessionId, request_id: requestId, started_task: false,
           })
         }
+        // The official cancel resolves the live Agent and throws when the
+        // Session is not attached. Refuse before the call so a non-live Session
+        // is not reported as a failed Desktop cancel.
+        if (!view.agent_available) {
+          return send(res, 409, {
+            cancel_accepted: false,
+            desktop_cancel_called: false,
+            killed_desktop: false,
+            reason: 'agent_not_attached',
+            session_id: sessionId,
+            request_id: requestId,
+            started_task: true,
+            detail: 'the official cancel needs a live Agent; nothing was called and the turn was not touched',
+          })
+        }
+        // The official cancel has no compare-and-cancel, so re-read immediately
+        // before the call: the check→call gap is one snapshot read, not a
+        // grant-list read plus a model/catalog round trip. If ownership moved,
+        // nothing is called.
+        let confirmedSnap
+        try {
+          confirmedSnap = await readSnapshot(ctx.sessionQuery, sessionId)
+        } catch (error) {
+          return send(res, 502, {
+            cancel_accepted: false, desktop_cancel_called: false, reason: 'session_read_failed',
+            started_task: false, detail: safeError(error, 'sessionQuery.readSession'),
+          })
+        }
+        const confirmedOwned = classifyOwnedTurn(confirmedSnap.events, requestId)
+        if (!confirmedOwned.owned) {
+          return send(res, 409, {
+            cancel_accepted: false,
+            desktop_cancel_called: false,
+            killed_desktop: false,
+            reason: confirmedOwned.ended ? 'already_terminal' : 'ownership_changed',
+            session_id: sessionId,
+            request_id: requestId,
+            started_task: false,
+            detail: 'the owned open turn changed between the check and the call; nothing was cancelled',
+          })
+        }
         let receipt
         try {
           receipt = await ctx.sessionController.cancel({ sessionId })
@@ -1258,9 +1453,24 @@ function note(config, warnings) {
 }
 
 function readJson(req) {
+  return readJsonLimited(req, 1_048_576)
+}
+
+function readJsonLimited(req, limit) {
   return new Promise((resolve, reject) => {
     const chunks = []
-    req.on('data', (chunk) => chunks.push(chunk))
+    let size = 0
+    req.on('data', (chunk) => {
+      size += chunk.length
+      if (size > limit) {
+        const error = new Error('request body is too large')
+        error.code = 'body_too_large'
+        reject(error)
+        req.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
     req.on('end', () => {
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'))

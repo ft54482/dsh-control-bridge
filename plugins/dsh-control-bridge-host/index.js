@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import { createBootstrapSource } from './bootstrap.js'
 import { createGrantStore, loadAllowlistFile } from './grants.js'
 import { loadRequestFile } from './requests.js'
 import { decideListen } from './policy.js'
@@ -7,15 +8,6 @@ import { createHostServer } from './server.js'
 
 export const name = 'dsh-control-bridge-host'
 export const inject = ['sessionController', 'workspaceRegistry', 'sessionQuery', 'agents', 'llm']
-
-function readJson(path) {
-  if (!path) return null
-  try {
-    return JSON.parse(fs.readFileSync(path, 'utf8'))
-  } catch {
-    return null
-  }
-}
 
 function readSecret(path) {
   if (!path) return ''
@@ -64,17 +56,20 @@ export function apply(ctx, config = {}) {
   const snapshot = grants.snapshot()
   const count = snapshot.workspaceAllowlist.length + snapshot.sessionAllowlist.length
   const hostSecret = readSecret(config.secretFile) || process.env[config.secretEnv || ''] || ''
-  const bootstrapFile = readJson(config.bootstrapFile) || {}
+  // The pairing window is read from disk on every request, so re-arming or
+  // consuming it while Desktop keeps running needs no restart. A file that
+  // exists but cannot be read or parsed never arms a window.
+  const bootstrap = createBootstrapSource({
+    bootstrapFile: config.bootstrapFile,
+    bootstrapSecretFile: config.bootstrapSecretFile,
+  })
+  const armed = bootstrap.read()
   const decision = decideListen({
     services,
     hostSecret,
     allowlistCount: count,
     bind: config.bind,
-    bootstrap: {
-      secret: readSecret(config.bootstrapSecretFile) || bootstrapFile.secret || '',
-      expiresAt: bootstrapFile.expiresAt || 0,
-      consumed: Boolean(bootstrapFile.consumed),
-    },
+    bootstrap: armed,
   })
   if (!decision.listening) return decision
   const globalDefault = () => {
@@ -92,18 +87,9 @@ export function apply(ctx, config = {}) {
     requestsFile,
     globalDefault,
     busyPolicy: config.busyPolicy || 'refuse',
-    consumeBootstrap() {
-      if (!config.bootstrapFile) return
-      const current = readJson(config.bootstrapFile) || {}
-      current.consumed = true
-      current.secret = ''
-      fs.writeFileSync(config.bootstrapFile, JSON.stringify(current), { mode: 0o600 })
-    },
   }, {
     host: hostSecret,
-    bootstrap: readSecret(config.bootstrapSecretFile) || bootstrapFile.secret || '',
-    expiresAt: bootstrapFile.expiresAt || 0,
-    consumed: Boolean(bootstrapFile.consumed),
+    bootstrapSource: bootstrap,
   })
   server.listen(config.port || 8765, '127.0.0.1')
   return {

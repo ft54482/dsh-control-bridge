@@ -32,10 +32,21 @@ export function sameRoute(left, right) {
 }
 
 /**
+ * Whether two selections are the same recorded choice. The official projection
+ * compares provider, model, and reasoning effort; effort is part of the identity
+ * even though it is not part of the route.
+ */
+export function sameSelection(left, right) {
+  return Boolean(left && right && sameRoute(left, right) && (left.reasoningEffort || '') === (right.reasoningEffort || ''))
+}
+
+/**
  * Fold the model state out of one Session log.
  *
  * `request/header` is the only durable record of what a request actually used,
  * so it is `lastUsed`; a `model/selection` appended after it is still pending.
+ * The official projection retires pending only when a request header records the
+ * *same* selection; a different later header leaves the pending choice intact.
  * @param events - Session events in seq order.
  */
 export function modelStateFromEvents(events) {
@@ -62,14 +73,16 @@ export function modelStateFromEvents(events) {
       }
     }
   }
-  // A pending choice is retired once a matching (or any later) request was recorded.
-  if (pending && pendingSeq < lastHeaderSeq) pending = null
+  // A pending choice is retired only once a later request recorded that same
+  // choice. A matching header that predates the selection does not retire it.
+  if (pending && lastHeaderSeq > pendingSeq && sameSelection(pending, lastExecution)) pending = null
   return {
     lastUsed,
     pending,
     next: pending || lastUsed,
     lastExecution,
     last_header_seq: lastHeaderSeq,
+    pending_seq: pending ? pendingSeq : -1,
   }
 }
 
@@ -195,7 +208,7 @@ export function selectOnAgent(agent, selection) {
     return { ok: false, reason: 'select_failed', detail: String(error && error.message || error) }
   }
   const confirmed = agentSelection(agent)
-  if (!sameRoute(confirmed, selection)) {
+  if (!sameSelection(confirmed, selection)) {
     return { ok: false, reason: 'readback_mismatch', confirmed }
   }
   return { ok: true, confirmed }

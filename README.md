@@ -242,7 +242,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 
 `Start-DshBridge.ps1 -PythonExe D:\Python312\python.exe` 只做本机 `diagnose`。加上 `-Serve` 才在 `127.0.0.1:8787` 监听。它不启动 desktop，也不启动真实 `dsh`。
 
-既有 home 默认不用。`home_mode = "shared"` 只打开配置里点名的工作区和 session，不能把读到历史文件当成原生 resume。Desktop 的续接走安装到 desktop profile 的 Host 插件，见 [plugins/dsh-control-bridge-host/README.md](plugins/dsh-control-bridge-host/README.md)。headless 路径还在。SuperAgent 仍然没有派工绑定。
+既有 home 默认不用。`home_mode = "shared"` 只打开配置里点名的工作区和 session，不能把读到历史文件当成原生 resume。Desktop 的续接走安装到 desktop profile 的 Host 插件，见 [plugins/dsh-control-bridge-host/README.md](plugins/dsh-control-bridge-host/README.md)。Host 0.1.6 的配对窗口可以重新布防：`scripts/windows/Rearm-DesktopHostBootstrap.ps1` 只写短期窗口，不轮换长期 host secret，Desktop 不需要退出或重启；已有的授权和 `allowlist.json` 不会被重写。headless 路径还在。SuperAgent 仍然没有派工绑定。
 
 ## 事件
 
@@ -286,7 +286,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 | 本地自检、diagnose、preflight | 已实现 |
 | 通知出站：默认关闭；失败状态可查询 | 已实现 |
 | Desktop 上一条已授权既有会话的一次 resume | 插件 0.1.5 在 Windows Desktop 0.2.2-rc.5 上有一次匿名记录，见 [docs/verified-scope.md](docs/verified-scope.md)。这不是对全部 Harness 功能的控制 |
-| Host 0.1.6 的请求查询和官方取消 | 只在夹具中验证，见 [docs/request-lifecycle.md](docs/request-lifecycle.md)。还没有真机验收 |
+| Host 0.1.6 的请求记录、查询和官方 owned-turn 取消 | 只在夹具和官方源码核对中验证，见 [docs/request-lifecycle.md](docs/request-lifecycle.md)、[docs/official-host-contract.md](docs/official-host-contract.md) 与 [docs/release-0.1.6.md](docs/release-0.1.6.md)。还没有真机验收 |
+| Host 0.1.6 的配对窗口重新布防与授权热更新 | 只在同进程夹具中验证：单次使用、过期/损坏失败关闭、不改长期 host secret、Desktop 不必重启。还没有真机验收；证据分级见 [docs/release-0.1.6.md](docs/release-0.1.6.md) |
 | 冷会话改模型、取消/超时的完整生命周期、跨工作区闭环 | 未在真机验证。模拟测试不能写成已经通过 |
 | SuperAgent 派工 | 未实现 |
 | 看板、托管网关、A2A 协议、商业 Harness CI 插件 | 不在本仓库 |

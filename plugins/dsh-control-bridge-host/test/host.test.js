@@ -259,8 +259,15 @@ test('registered sessions keep a title and workspace without listing removed dir
   assert.equal(response.body.sessions[0].model, 'example-model')
   assert.equal(response.body.sessions[0].provider, 'example-provider')
   assert.equal(response.body.omitted_unregistered, 1)
-  const membership = await fetch(`http://127.0.0.1:${started.port}/v1/guard/membership`, {
+  // The pairing window reaches only the two pairing routes; membership and
+  // health stay behind the long-lived host secret.
+  const membershipDenied = await fetch(`http://127.0.0.1:${started.port}/v1/guard/membership`, {
     headers: { authorization: 'Bearer bootstrap-secret-0123456789abcdef' },
+  })
+  assert.equal(membershipDenied.status, 403)
+  assert.equal((await membershipDenied.json()).reason, 'host_secret_required')
+  const membership = await fetch(`http://127.0.0.1:${started.port}/v1/guard/membership`, {
+    headers: { authorization: `Bearer ${SECRET}` },
   }).then(async (item) => item.json())
   assert.deepEqual(membership.workspaces[0].top_level, ['session-top'])
   assert.deepEqual(membership.workspaces[0].unreadable, [])

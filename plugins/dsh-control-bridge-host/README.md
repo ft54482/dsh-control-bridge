@@ -13,6 +13,7 @@ Inside a Desktop Host that has already mounted the official services, the plugin
 - `sessionQuery.readSession(sessionId)` → `{ session, inheritedEventCount, events }` to page history
 - `sessionQuery.observeSession(sessionId)` for the cheaper result polling during a resume (falls back to `readSession`)
 - `sessionController.prompt(request, AbortSignal)` with `mode: "queue"`, whose official result is only `{ accepted: true }`
+- `sessionController.cancel({ sessionId })` only after the log proves the open turn carries this request's `rpcId`
 - `agents.get(sessionId).model.current()/select()` for the session-scoped model choice
 - `llm.listProviders()`, `llm.listModels()`, `llm.resolveCallConfig()` to refuse an unavailable route before sending
 
@@ -65,11 +66,25 @@ One store (`grants.js`) is the single authority for memory and disk:
 4. poll the log (500 ms growing to 2 s, deadline 120 s) for the turn whose `user/message` carries this request's `source.rpcId`;
 5. return `completed: true` with the assistant text of **that** turn, or `completed: false` with `final.reason.kind` of `timeout` / `unattributed_turn` / `model_mismatch` (plus the HTTP-level error captured from `turn/end`, e.g. `NO_ADAPTER`).
 
-`text` never comes from the `prompt()` return value, because the official value carries no text. `POST /v1/cancel` only stops this bridge's wait; the accepted prompt stays in the Desktop queue and the plugin never calls the official `sessionController.cancel` (that would cancel the operator's own turn).
+`text` never comes from the `prompt()` return value, because the official value carries no text. `POST /v1/wait/stop` only stops this bridge's wait; the accepted prompt stays in the Desktop queue. `POST /v1/cancel` is the official owned-turn cancel (Host 0.1.6): it calls `sessionController.cancel({ sessionId })` only when the log proves the open turn carries this request's `rpcId`, refuses a session without a live Agent (`409 agent_not_attached`, nothing called), and never rewrites an already finished turn. A cancellation receipt is not a terminal state; the official `turn/end` is.
+
+## Pairing re-arm and live authorization
+
+The pairing window is a file, not process state. `bootstrap.json` (secret, expiry, consumed flag, retired-secret hash) and `bootstrap.secret` are read again on every request, so an operator can re-arm the window and pair another session while Desktop keeps running:
+
+- a window is armed only while its remaining life is at most 60 minutes, it is unexpired and unconsumed, and its secret is at least 32 characters;
+- `bootstrap.json` is authoritative; a non-empty `bootstrap.secret` that disagrees with it is an inconsistent window and fails closed, so a stale file cannot shadow a re-armed JSON secret (write both copies, or clear the legacy file);
+- `POST /v1/bootstrap/select` is serialized and spends the window compare-and-swap style: only the secret that authenticated the request is retired, and a window re-armed meanwhile stays armed; a failed grant write leaves the window armed;
+- the spent-window hash is written in the same atomic file as the grant, so even if the bootstrap-file write itself fails, one window cannot produce a second grant; a spent window retires the secret (the file keeps only its SHA-256), so a replay reads `403 bootstrap_consumed`; expiry and invalid/unreadable JSON fail closed;
+- pairing merges one selected session into `allowlist.json`; existing grants are never lost, and revoke stays the only removal path; the response names the written grant in `granted`;
+- the long-lived host secret is never rotated by re-arming or pairing;
+- `GET /v1/health` reports `bootstrap_status`, `bootstrap_armed`, `bootstrap_consumed`, `bootstrap_retired`, and `bootstrap_expires_at`, so an operator can confirm the re-arm without restarting anything. Health and membership require the host secret; the window reaches only the two bootstrap routes.
+
+`Rearm-DesktopHostBootstrap.ps1` writes only `bootstrap.secret` and `bootstrap.json`, verifies that `host.secret` and `allowlist.json` did not change, and prints the next pairing command. The running Host picks it up on the next request. `Prepare-DesktopHost.ps1` keeps an existing `host.secret` instead of rotating it.
 
 ## Compatibility
 
-Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-controller` `prompt(request, signal)`, `list(request, signal)`, and `sessionQuery.readSession`, as documented for the 0.2.2 controller. The operator-observed CLI is 0.2.2-rc.5. Host 0.1.5 had one authorized existing-session resume on that Desktop. The anonymous record and the items still unverified are in `docs/verified-scope.md`. In-process fixtures are not that machine.
+Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-controller` `prompt(request, signal)`, `list(request, signal)`, and `sessionQuery.readSession`, as documented for the 0.2.2 controller. The operator-observed CLI is 0.2.2-rc.5. The installed 0.2.2-rc.5 sources were reviewed for this release; the API-level findings and the fixture-only gaps are in `docs/official-host-contract.md`. Host 0.1.5 had one authorized existing-session resume on that Desktop. The anonymous record and the items still unverified are in `docs/verified-scope.md`. In-process fixtures are not that machine.
 
 ## Install and rollback
 
@@ -79,8 +94,8 @@ Quit Desktop from the tray first. The bridge does not quit it. The tray's **Quit
 dsh plugin --profile desktop add dsh-control-bridge-host-0.1.6.tgz
 ```
 
-`Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable. An empty allowlist with no armed bootstrap does not open the port. After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy.
+`Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable, and it keeps an existing host secret instead of rotating it. An empty allowlist with no armed bootstrap does not open the port. After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy. To pair another session later, `Rearm-DesktopHostBootstrap.ps1` arms a fresh window; Desktop does not need to be quit or restarted.
 
-Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. The machine-verified package is still 0.1.5. Host 0.1.6 adds the request ledger, query, and owned-turn cancel described in `docs/request-lifecycle.md`. Those paths are fixture-tested only.
+Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. The machine-verified package is still 0.1.5. Host 0.1.6 adds the request ledger, query, owned-turn cancel, and the re-armable pairing window described in `docs/request-lifecycle.md`. Those paths are fixture-tested only.
 
 The listener is `127.0.0.1` only. It has no outbound call.

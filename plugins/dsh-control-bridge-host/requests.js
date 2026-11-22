@@ -24,13 +24,16 @@ export class RequestPersistError extends Error {
 }
 
 export function contentHash({ sessionId, text, model }) {
-  const body = JSON.stringify({
+  const body = {
     sessionId: String(sessionId || ''),
     text: String(text || ''),
     provider: model && model.provider ? String(model.provider) : '',
     model: model && model.model ? String(model.model) : '',
-  })
-  return crypto.createHash('sha256').update(body).digest('hex')
+  }
+  // Only present when the request really named an effort, so existing
+  // effort-less request records keep their hashes across the upgrade.
+  if (model && model.reasoningEffort) body.reasoningEffort = String(model.reasoningEffort)
+  return crypto.createHash('sha256').update(JSON.stringify(body)).digest('hex')
 }
 
 function emptyState() {
@@ -61,8 +64,23 @@ function writeAtomic(file, state) {
   const dir = path.dirname(file)
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
   const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.tmp`)
-  fs.writeFileSync(tmp, JSON.stringify(state), { mode: 0o600 })
-  fs.renameSync(tmp, file)
+  let handle
+  try {
+    handle = fs.openSync(tmp, 'wx', 0o600)
+    fs.writeFileSync(handle, JSON.stringify(state))
+    // The record is what makes "accepted but unknown" recoverable; make it as
+    // durable as the allowlist file, not just buffered by the OS.
+    fs.fsyncSync(handle)
+    fs.closeSync(handle)
+    handle = undefined
+    fs.renameSync(tmp, file)
+  } catch (error) {
+    if (handle !== undefined) {
+      try { fs.closeSync(handle) } catch { /* ignore */ }
+    }
+    try { fs.unlinkSync(tmp) } catch { /* ignore */ }
+    throw error
+  }
 }
 
 export function createRequestLedger({ file } = {}) {
@@ -148,14 +166,29 @@ export function createRequestLedger({ file } = {}) {
 
 /**
  * Whether the open official turn is the one this request id admitted.
- * A later turn, a missing rpcId, or an already finished turn is not cancellable here.
+ * A later turn, a missing rpcId, a prompt whose user/message was spliced before
+ * its own turn/start (queued, not started), or an already finished turn is not
+ * cancellable here.
  */
 export function classifyOwnedTurn(events, requestId) {
-  const turn = findTurnForRequest(events, { requestId, afterSeq: 0 })
+  const list = Array.isArray(events) ? events : []
+  const turn = findTurnForRequest(list, { requestId, afterSeq: 0 })
   if (!turn || turn.attribution !== 'request_id' || !turn.start) {
     return { owned: false, ended: false, turn, reason: 'turn_not_bound' }
   }
-  const later = (Array.isArray(events) ? events : []).some((event) => (
+  const marker = list.find((event) => (
+    event
+    && event.type === 'user/message'
+    && event.data
+    && event.data.source
+    && event.data.source.rpcId === requestId
+  ))
+  if (!marker || turn.start.seq > marker.seq) {
+    // The prompt is queued behind another turn: the turn that will run it has
+    // not started, and cancelling "the active turn" would hit someone else's.
+    return { owned: false, ended: Boolean(turn.end), turn, reason: 'prompt_not_started' }
+  }
+  const later = list.some((event) => (
     event && event.type === 'turn/start' && event.seq > turn.start.seq
   ))
   if (later) return { owned: false, ended: Boolean(turn.end), turn, reason: 'not_our_turn' }
