@@ -13,8 +13,33 @@ Inside a Desktop Host that has already mounted the official services, the plugin
 - `sessionQuery.readSession(sessionId)` → `{ session, inheritedEventCount, events }` to page history
 - `sessionQuery.observeSession(sessionId)` for the cheaper result polling during a resume (falls back to `readSession`)
 - `sessionController.prompt(request, AbortSignal)` with `mode: "queue"`, whose official result is only `{ accepted: true }`
+- `agents.get(sessionId).model.current()/select()` for the session-scoped model choice
+- `llm.listProviders()`, `llm.listModels()`, `llm.resolveCallConfig()` to refuse an unavailable route before sending
 
-It does not call `selectModel`, so it does not replace the session's recorded provider. The model shown for a session is the session's own recorded selection from the `modelSelection` projection (`next ?? lastUsed`); only when a session has no recorded selection does it fall back to the host's `agentDefaultModel.currentSelection()`, and that fallback is labelled `model_source: "agent_default"`. A session with neither is `model_source: "unresolved"` with a `null` model — it is never presented as resolved. The plugin does not read `.credentials.yaml` and does not read the Desktop launch token.
+## Models: four different things, never conflated
+
+The deployment default, the selection a session recorded, a pending selection, and what a request actually executed are four different values. The plugin reports them separately and never substitutes one for another:
+
+| Field | Source |
+| --- | --- |
+| `global_default` | `agentDefaultModel.currentSelection()` — the deployment default, reported only as itself |
+| `session.last_used` | the last `request/header` event's `config` — what a request really used |
+| `session.pending` | a later `model/selection` event not yet used by a request |
+| `session.next` | `pending ?? last_used` — what the next request will use |
+| `session.last_execution` | the last `request/header` config (the recorded execution) |
+| `execution_model` (resume) | the `request/header` inside the collected turn |
+
+When the session recorded nothing, the model is `null` with `model_source: "unknown"`. **A deployment default is never reported as a session's model.** `model_source` is one of `session_log`, `session_projection`, `request_header`, `unknown`.
+
+`GET /v1/models?session_id=…` returns the four states, the availability of `next`, and `can_set` / `can_set_reason`. `POST /v1/model {session_id, provider, model, reasoning_effort?}`:
+
+1. requires write access and an idle session;
+2. checks `llm.listProviders()` / `llm.listModels()` / `llm.resolveCallConfig()` — a provider without an adapter is `409 no_adapter` **before** anything is sent;
+3. needs a live Agent; without one it returns `409 needs_ui` and changes nothing (the plugin never attaches agents and never edits history files);
+4. records `agent.model.select(...)` — the official session-scoped `model/selection` event — then reads `agent.model.current()` back and fails with `model_readback_mismatch` if it differs;
+5. never changes the deployment default (it does not call `sessionController.selectModel`, which also saves the default).
+
+`POST /v1/resume` accepts an optional `model: {provider, model, reasoning_effort}` and performs the same set-then-confirm path. It always refuses before `prompt()` when: the route is unknown, no adapter is registered, the adapter rejects the call config, the grant is read-only, the session is running, or the confirmed selection changed between the preflight and the send (`409 model_changed_before_send`). After the turn it reports `requested_model`, `confirmed_selection`, `execution_model`, `execution_model_source`, and `model_match`; a mismatch (`execution_model` differs from the confirmed route) is `completed: false` with `terminal: "model_mismatch"`, never a silent fallback.
 
 `sessionController` is part of the Desktop Host because Desktop runs the Web Host. The headless profile does not mount it. If the service is missing, `apply` returns without listening and without throwing, so a headless profile is not crashed and is not described as Desktop.
 
@@ -35,9 +60,10 @@ One store (`grants.js`) is the single authority for memory and disk:
 `POST /v1/resume` is "accepted, then collected":
 
 1. authorize write access, refuse a running session without cancelling it;
-2. record the log watermark, then `prompt(..., mode: "queue")`;
-3. poll the log (500 ms growing to 2 s, deadline 120 s) for the turn whose `user/message` carries this request's `source.rpcId`;
-4. return `completed: true` with the assistant text of **that** turn, or `completed: false` with `final.reason.kind` of `timeout` / `unattributed_turn`.
+2. resolve the model route: optional `model` is set and read back, otherwise `next` is used; refuse an unknown route, a missing adapter, or a selection that changed since the preflight — all before `prompt()`;
+3. record the log watermark, then `prompt(..., mode: "queue")`;
+4. poll the log (500 ms growing to 2 s, deadline 120 s) for the turn whose `user/message` carries this request's `source.rpcId`;
+5. return `completed: true` with the assistant text of **that** turn, or `completed: false` with `final.reason.kind` of `timeout` / `unattributed_turn` / `model_mismatch` (plus the HTTP-level error captured from `turn/end`, e.g. `NO_ADAPTER`).
 
 `text` never comes from the `prompt()` return value, because the official value carries no text. `POST /v1/cancel` only stops this bridge's wait; the accepted prompt stays in the Desktop queue and the plugin never calls the official `sessionController.cancel` (that would cancel the operator's own turn).
 

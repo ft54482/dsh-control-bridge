@@ -74,20 +74,22 @@ function selectionOf(value) {
 }
 
 /**
- * Read the current model selection from one list row.
+ * Read the Session's recorded model selection from one list row.
  *
  * The wire value is `{ lastUsed, next }` (`next` is `pending ?? lastUsed`).
  * A persisted cache record (`{ ver, seq, val }`) is unwrapped only as a
  * fallback so a caller that passes cache rows still reads a real value.
- * @returns `{ selection, source }` where source is
- *   `session_recorded` | `agent_default` | `unresolved`.
+ *
+ * A deployment default is NOT a Session selection: when the row has no
+ * selection the answer is `unknown`, never the default. Endpoints report the
+ * default separately as `global_default`.
+ * @returns `{ selection, source }` where source is `session_recorded | unknown`.
  */
-export function modelSelectionOf(row, defaultSelection) {
+export function modelSelectionOf(row) {
   const values = (row && row.projections && row.projections.values) || {}
   const raw = values.modelSelection
-  let source = 'unresolved'
   let wire = raw
-  if (wire && typeof wire === 'object' && wire.val && typeof wire.val === 'object' && !('lastUsed' in wire)) {
+  if (wire && typeof wire === 'object' && wire.val && typeof wire === 'object' && !('lastUsed' in wire)) {
     wire = wire.val
   }
   const chosen = wire && typeof wire === 'object'
@@ -96,12 +98,7 @@ export function modelSelectionOf(row, defaultSelection) {
   if (chosen) {
     return { selection: chosen, source: 'session_recorded' }
   }
-  const fallback = typeof defaultSelection === 'function' ? selectionOf(defaultSelection()) : selectionOf(defaultSelection)
-  if (fallback) {
-    source = 'agent_default'
-    return { selection: fallback, source }
-  }
-  return { selection: null, source: 'unresolved' }
+  return { selection: null, source: 'unknown' }
 }
 
 export function titleOf(row) {
@@ -124,7 +121,7 @@ export function normalizeSessionRow(row, workspaceId, options = {}) {
   const parent = row?.parentSessionId ?? row?.parentSession ?? row?.parent ?? null
   const origin = row?.origin ?? null
   const named = titleOf(row)
-  const chosen = modelSelectionOf(row, options.defaultSelection)
+  const chosen = modelSelectionOf(row)
   return {
     sessionId: String(sessionId),
     workspaceId: String(workspaceId || ''),

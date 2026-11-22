@@ -18,10 +18,12 @@ const sessions = JSON.parse(process.env.FIXTURE_SESSIONS || '[]')
 const rawEvents = JSON.parse(process.env.FIXTURE_EVENTS || '[]')
 const cwd = sessions[0]?.cwd || process.cwd()
 const answer = process.env.FIXTURE_TEXT || 'ok'
+const MODEL = { provider: 'example-provider', model: 'example-model' }
 
 const state = {
   prompts: 0,
   seq: 0,
+  selection: { ...MODEL },
   events: rawEvents.map((event) => ({
     seq: event.seq,
     type: event.type === 'user' ? 'user/message' : (event.type === 'assistant' ? 'assistant/message' : event.type),
@@ -56,7 +58,19 @@ const ctx = {
   sessionController: {
     async list(request, signal) {
       if (!signal) throw new TypeError('sessionController.list requires a signal')
-      return { items: sessions }
+      return {
+        items: sessions.map((item) => ({
+          ...item,
+          projections: {
+            kind: 'cached',
+            asOfSeq: state.seq,
+            values: {
+              ...(item.projections?.values || {}),
+              modelSelection: { lastUsed: { ...MODEL }, next: { ...MODEL } },
+            },
+          },
+        })),
+      }
     },
     async prompt(body, signal) {
       state.prompts += 1
@@ -75,6 +89,12 @@ const ctx = {
       })
       state.events.push({
         seq: ++state.seq,
+        type: 'request/header',
+        time: Date.now(),
+        data: { header: { config: { ...state.selection } } },
+      })
+      state.events.push({
+        seq: ++state.seq,
         type: 'assistant/message',
         time: Date.now(),
         data: { message: { role: 'assistant', content: [{ type: 'text', text: answer }] } },
@@ -82,6 +102,24 @@ const ctx = {
       state.events.push({ seq: ++state.seq, type: 'turn/end', time: Date.now(), data: { turn: 7, reason: { kind: 'completed' } } })
       return { accepted: true }
     },
+  },
+  agents: {
+    get(sessionId) {
+      if (!sessions.some((item) => item.sessionId === sessionId)) return undefined
+      return {
+        status: 'idle',
+        session: { id: sessionId },
+        model: {
+          current() { return { ...state.selection } },
+          select(selection) { state.selection = { ...selection } },
+        },
+      }
+    },
+  },
+  llm: {
+    listProviders() { return [{ id: 'example-provider', displayName: 'example-provider' }] },
+    async listModels() { return [{ id: MODEL.model, name: MODEL.model }] },
+    async resolveCallConfig(config) { return config },
   },
   sessionQuery: {
     async readSession(sessionId) {

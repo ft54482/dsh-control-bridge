@@ -4,7 +4,7 @@ import { decideListen } from './policy.js'
 import { createHostServer } from './server.js'
 
 export const name = 'dsh-control-bridge-host'
-export const inject = ['sessionController', 'workspaceRegistry', 'sessionQuery']
+export const inject = ['sessionController', 'workspaceRegistry', 'sessionQuery', 'agents', 'llm']
 
 function readJson(path) {
   if (!path) return null
@@ -65,7 +65,7 @@ export function apply(ctx, config = {}) {
     },
   })
   if (!decision.listening) return decision
-  const defaultSelection = () => {
+  const globalDefault = () => {
     try {
       const service = typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : null
       if (!service || typeof service.currentSelection !== 'function') return null
@@ -77,7 +77,7 @@ export function apply(ctx, config = {}) {
   const server = createHostServer(ctx, {
     ...config,
     grants,
-    defaultSelection,
+    globalDefault,
     busyPolicy: config.busyPolicy || 'refuse',
     consumeBootstrap() {
       if (!config.bootstrapFile) return

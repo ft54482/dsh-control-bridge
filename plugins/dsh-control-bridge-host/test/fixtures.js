@@ -40,6 +40,15 @@ export function officialCtx(overrides = {}) {
     cancelled: 0,
     autoComplete: true,
     promptRequestIds: [],
+    // Model-related state: the live Agent's selection, the adapter registry,
+    // and what the fixture records as the request header of a prompted turn.
+    selection: { provider: 'example-provider', model: 'example-model' },
+    selectCalls: [],
+    liveSessions: new Set(['session-demo', 'session-busy']),
+    providers: ['example-provider'],
+    providerModels: { 'example-provider': ['example-model'] },
+    headerOnPrompt: true,
+    requestHeaderConfig: null,
     events: [
       { seq: 1, type: 'turn/start', time: 1_700_000_000_001, data: { turn: 1 } },
       { seq: 2, type: 'user/message', time: 1_700_000_000_002, data: { content: [{ type: 'text', text: 'earlier prompt' }], source: { kind: 'user' } } },
@@ -146,6 +155,12 @@ export function officialCtx(overrides = {}) {
           })
           state.events.push({
             seq: ++state.seq,
+            type: 'request/header',
+            time: Date.now(),
+            data: { header: { config: { ...(state.requestHeaderConfig || state.selection) } } },
+          })
+          state.events.push({
+            seq: ++state.seq,
             type: 'assistant/message',
             time: Date.now(),
             data: { message: { role: 'assistant', content: [{ type: 'text', text: `answer to ${text} sk-livevalue012345` }] } },
@@ -158,6 +173,41 @@ export function officialCtx(overrides = {}) {
       cancel() {
         state.cancelled += 1
         return { accepted: true }
+      },
+    },
+    // Official 'agents' service: only some Sessions have a live Agent.
+    agents: {
+      get(sessionId) {
+        if (!state.liveSessions.has(sessionId)) return undefined
+        return {
+          status: state.liveStatus || 'idle',
+          session: { id: sessionId },
+          model: {
+            current() { return { ...state.selection } },
+            select(selection) {
+              state.selectCalls.push({ ...selection })
+              state.selection = { ...selection }
+            },
+          },
+        }
+      },
+    },
+    // Official 'llm' service: provider routes with an adapter, their models,
+    // and the adapter-side call-config validation that throws NO_ADAPTER.
+    llm: {
+      listProviders() {
+        return state.providers.map((id) => ({ id, displayName: id }))
+      },
+      async listModels(provider) {
+        return (state.providerModels[provider] || []).map((id) => ({ id, name: id }))
+      },
+      async resolveCallConfig(config) {
+        if (!state.providers.includes(config.provider)) {
+          const error = new Error(`no adapter registered for provider "${config.provider}"`)
+          error.code = 'NO_ADAPTER'
+          throw error
+        }
+        return config
       },
     },
     sessionQuery: {
@@ -195,7 +245,8 @@ export async function startServer(ctx, options = {}) {
   const server = createHostServer(ctx, {
     grants: store,
     busyPolicy: 'refuse',
-    defaultSelection: options.defaultSelection,
+    globalDefault: options.globalDefault
+      || (() => ({ provider: 'example-provider', model: 'example-model' })),
     resumeTimeoutMs: options.resumeTimeoutMs,
     pollIntervalMs: options.pollIntervalMs || 10,
   }, options.secret || SECRET)

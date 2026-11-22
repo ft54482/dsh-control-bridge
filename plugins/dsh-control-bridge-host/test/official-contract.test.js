@@ -379,9 +379,9 @@ test('a failed log read is an error, never an empty history', async () => {
   await close(second.server)
 })
 
-test('model resolution reports its real source and never pretends', async () => {
+test('a deployment default is never reported as a session model', async () => {
   const withDefault = await bootServer(officialCtx(), {
-    defaultSelection: () => ({ provider: 'default-provider', model: 'default-model' }),
+    globalDefault: () => ({ provider: 'default-provider', model: 'default-model' }),
   })
   const boot = (method, pathname, body) => call(withDefault.port, method, pathname, body, BOOTSTRAP)
   const catalog = await boot('GET', '/v1/bootstrap/catalog')
@@ -389,19 +389,24 @@ test('model resolution reports its real source and never pretends', async () => 
   assert.equal(demo.model, 'example-model')
   assert.equal(demo.provider, 'example-provider')
   assert.equal(demo.model_source, 'session_recorded')
+  // session-plain recorded nothing: the deployment default must not fill it in.
   const plain = catalog.body.sessions.find((item) => item.session_id === 'session-plain')
-  assert.equal(plain.model, 'default-model')
-  assert.equal(plain.provider, 'default-provider')
-  assert.equal(plain.model_source, 'agent_default')
+  assert.equal(plain.model, null)
+  assert.equal(plain.provider, null)
+  assert.equal(plain.model_source, 'unknown')
   await close(withDefault.server)
 
-  const bare = await bootServer(officialCtx())
-  const catalog2 = await call(bare.port, 'GET', '/v1/bootstrap/catalog', null, BOOTSTRAP)
-  const plain2 = catalog2.body.sessions.find((item) => item.session_id === 'session-plain')
-  assert.equal(plain2.model, null)
-  assert.equal(plain2.provider, null)
-  assert.equal(plain2.model_source, 'unresolved')
-  await close(bare.server)
+  // The default is still visible, but only as a separate field.
+  const started = await startServer(officialCtx(), {
+    initial: READ_DEMO,
+    globalDefault: () => ({ provider: 'default-provider', model: 'default-model' }),
+  })
+  const granted = await call(started.port, 'GET', '/v1/granted')
+  assert.equal(granted.body.global_default.provider, 'default-provider')
+  assert.equal(granted.body.global_default.model, 'default-model')
+  assert.equal(granted.body.sessions[0].model, 'example-model')
+  assert.equal(granted.body.sessions[0].model_source, 'session_projection')
+  await close(started.server)
 })
 
 test('ids come from sessionId and a legacy event array is labelled', async () => {
@@ -547,7 +552,7 @@ test('granted model fields come from the current row, never the pairing snapshot
   const row = granted.body.sessions[0]
   assert.equal(row.model, null)
   assert.equal(row.provider, null)
-  assert.equal(row.model_source, 'unresolved')
+  assert.equal(row.model_source, 'unknown')
   assert.equal(row.catalog_row, true)
   await close(started.server)
 
@@ -555,6 +560,208 @@ test('granted model fields come from the current row, never the pairing snapshot
   const demo = (await call(withRow.port, 'GET', '/v1/granted')).body.sessions[0]
   assert.equal(demo.model, 'example-model')
   assert.equal(demo.provider, 'example-provider')
-  assert.equal(demo.model_source, 'session_recorded')
+  assert.equal(demo.model_source, 'session_projection')
   await close(withRow.server)
+})
+
+// ---------------------------------------------------------------------------
+// Model gate: the deployment default is not a Session selection, and a route
+// without an adapter must be refused before prompt(), not after NO_ADAPTER.
+// ---------------------------------------------------------------------------
+
+function headerEvent(seq, provider, model) {
+  return { seq, type: 'request/header', time: 1_700_000_000_000 + seq, data: { header: { config: { provider, model } } } }
+}
+
+function selectionEvent(seq, provider, model) {
+  return { seq, type: 'model/selection', time: 1_700_000_000_000 + seq, data: { provider, model } }
+}
+
+test('a recorded chengzi session is not shown or sent as the example-provider default', async () => {
+  const ctx = officialCtx()
+  ctx.state.events.push(headerEvent(40, 'chengzi-platform', 'z-ai/glm-5.3-free'))
+  ctx.state.selection = { provider: 'chengzi-platform', model: 'z-ai/glm-5.3-free' }
+  const started = await startServer(ctx, {
+    initial: WRITE_DEMO,
+    globalDefault: () => ({ provider: 'example-provider', model: 'example-model' }),
+  })
+
+  const granted = await call(started.port, 'GET', '/v1/granted')
+  const row = granted.body.sessions[0]
+  assert.equal(row.provider, 'chengzi-platform')
+  assert.equal(row.model, 'z-ai/glm-5.3-free')
+  assert.equal(row.model_source, 'session_log')
+  assert.deepEqual(granted.body.global_default, { provider: 'example-provider', model: 'example-model' })
+
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-chengzi', text: 'go',
+  })
+  assert.equal(resume.status, 409)
+  assert.equal(resume.body.reason, 'no_adapter')
+  assert.equal(resume.body.completed, false)
+  assert.equal(ctx.state.prompts, 0)
+  await close(started.server)
+})
+
+test('a pending selection is adopted by the next request and reported as executed', async () => {
+  const ctx = officialCtx()
+  ctx.state.events.push(headerEvent(40, 'chengzi-platform', 'z-ai/glm-5.3-free'))
+  ctx.state.events.push(selectionEvent(41, 'example-provider', 'example-model'))
+  ctx.state.seq = 41
+  ctx.state.selection = { provider: 'example-provider', model: 'example-model' }
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+
+  const models = await call(started.port, 'GET', '/v1/models?session_id=session-demo')
+  assert.equal(models.body.session.pending.provider, 'example-provider')
+  assert.equal(models.body.session.next.provider, 'example-provider')
+  assert.equal(models.body.availability.available, true)
+
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-pending', text: 'go',
+  })
+  assert.equal(resume.status, 200)
+  assert.equal(resume.body.completed, true)
+  assert.equal(resume.body.confirmed_selection.provider, 'example-provider')
+  assert.equal(resume.body.execution_model.provider, 'example-provider')
+  assert.equal(resume.body.execution_model_source, 'request_header')
+  assert.equal(resume.body.model_match, true)
+  await close(started.server)
+})
+
+test('a provider without an adapter is refused before any prompt', async () => {
+  const ctx = officialCtx()
+  ctx.state.providers = []
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+
+  const set = await call(started.port, 'POST', '/v1/model', {
+    session_id: 'session-demo', provider: 'example-provider', model: 'example-model',
+  })
+  assert.equal(set.status, 409)
+  assert.equal(set.body.reason, 'no_adapter')
+  assert.equal(ctx.state.selectCalls.length, 0)
+
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-noadapter', text: 'go',
+  })
+  assert.equal(resume.status, 409)
+  assert.equal(resume.body.reason, 'no_adapter')
+  assert.equal(ctx.state.prompts, 0)
+  await close(started.server)
+})
+
+test('a read-only grant cannot change the session model', async () => {
+  const ctx = officialCtx()
+  const started = await startServer(ctx, { initial: READ_DEMO })
+  const set = await call(started.port, 'POST', '/v1/model', {
+    session_id: 'session-demo', provider: 'example-provider', model: 'example-model',
+  })
+  assert.equal(set.status, 403)
+  assert.equal(ctx.state.selectCalls.length, 0)
+  assert.equal(ctx.state.prompts, 0)
+  await close(started.server)
+})
+
+test('a cold session reports needs_ui instead of pretending the model changed', async () => {
+  const ctx = officialCtx()
+  ctx.state.liveSessions = new Set()
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+
+  const set = await call(started.port, 'POST', '/v1/model', {
+    session_id: 'session-demo', provider: 'example-provider', model: 'example-model',
+  })
+  assert.equal(set.status, 409)
+  assert.equal(set.body.reason, 'needs_ui')
+  assert.equal(ctx.state.selectCalls.length, 0)
+
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-cold',
+    text: 'go',
+    model: { provider: 'example-provider', model: 'example-model' },
+  })
+  assert.equal(resume.status, 409)
+  assert.equal(resume.body.reason, 'needs_ui')
+  assert.equal(ctx.state.prompts, 0)
+  await close(started.server)
+})
+
+test('changing one session model leaves another session unchanged', async () => {
+  const ctx = officialCtx()
+  const initial = {
+    version: 1,
+    workspaceAllowlist: [{ id: WORKSPACE, cwd: 'C:/work/demo', title: 'demo' }],
+    sessionAllowlist: [
+      { sessionId: 'session-demo', workspaceId: WORKSPACE, access: 'write', cwd: 'C:/work/demo', profile: 'desktop' },
+      { sessionId: 'session-plain', workspaceId: WORKSPACE, access: 'write', cwd: 'C:/work/demo', profile: 'desktop' },
+    ],
+  }
+  const started = await startServer(ctx, { initial })
+  const set = await call(started.port, 'POST', '/v1/model', {
+    session_id: 'session-demo', provider: 'example-provider', model: 'example-model',
+  })
+  assert.equal(set.status, 200)
+  assert.equal(set.body.confirmed.model, 'example-model')
+  const granted = await call(started.port, 'GET', '/v1/granted')
+  const plain = granted.body.sessions.find((item) => item.session_id === 'session-plain')
+  assert.equal(plain.model, null)
+  assert.equal(plain.model_source, 'unknown')
+  await close(started.server)
+})
+
+test('a selection that changes after the preflight is refused before sending', async () => {
+  const ctx = officialCtx()
+  const originalRead = ctx.sessionQuery.readSession
+  let reads = 0
+  ctx.sessionQuery.readSession = async (sessionId) => {
+    reads += 1
+    if (reads === 2) ctx.state.selection = { provider: 'chengzi-platform', model: 'z-ai/glm-5.3-free' }
+    return originalRead(sessionId)
+  }
+  ctx.state.providers = ['example-provider', 'chengzi-platform']
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-change', text: 'go',
+  })
+  assert.equal(resume.status, 409)
+  assert.equal(resume.body.reason, 'model_changed_before_send')
+  assert.equal(ctx.state.prompts, 0)
+  await close(started.server)
+})
+
+test('a turn without a request header reports execution as unknown', async () => {
+  const ctx = officialCtx()
+  ctx.state.headerOnPrompt = false
+  const originalPrompt = ctx.sessionController.prompt
+  ctx.sessionController.prompt = async (body, signal) => {
+    const result = await originalPrompt(body, signal)
+    ctx.state.events = ctx.state.events.filter((event) => event.type !== 'request/header')
+    return result
+  }
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-noheader', text: 'go',
+  })
+  assert.equal(resume.status, 200)
+  assert.equal(resume.body.execution_model, null)
+  assert.equal(resume.body.execution_model_source, 'unknown')
+  assert.equal(resume.body.model_match, null)
+  await close(started.server)
+})
+
+test('an explicit model on the write request is set, confirmed and executed', async () => {
+  const ctx = officialCtx()
+  ctx.state.selection = { provider: 'chengzi-platform', model: 'z-ai/glm-5.3-free' }
+  ctx.state.providers = ['example-provider', 'chengzi-platform']
+  ctx.state.providerModels['chengzi-platform'] = ['z-ai/glm-5.3-free']
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-explicit', text: 'go',
+    model: { provider: 'example-provider', model: 'example-model' },
+  })
+  assert.equal(resume.status, 200)
+  assert.equal(resume.body.model_selection, 'session_selected_by_bridge')
+  assert.equal(resume.body.requested_model.provider, 'example-provider')
+  assert.equal(resume.body.execution_model.provider, 'example-provider')
+  assert.equal(resume.body.completed, true)
+  assert.equal(ctx.state.selectCalls.length, 1)
+  await close(started.server)
 })

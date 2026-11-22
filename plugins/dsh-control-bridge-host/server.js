@@ -1,6 +1,10 @@
 import http from 'node:http'
 import { assembleCatalog, findTurnForRequest, readObservation, readSnapshot, safeError, turnAnswer } from './host_read.js'
 import {
+  agentIdle, agentSelection, checkSelection, executionModelForTurn, liveAgent,
+  modelStateFromEvents, modelStateFromProjection, sameRoute, selectOnAgent, selectionOf,
+} from './models.js'
+import {
   authorizeSession, authorizeWorkspace, checkAuth, decideResume, loopbackPeer, pageHistory,
   promptBody, redactText, rejectBrowser, selectGrant, terminalKind, visibleSessions, visibleWorkspaces,
 } from './policy.js'
@@ -95,7 +99,7 @@ export function createHostServer(ctx, config, secret) {
   )
   const pollIntervalMs = Math.max(50, Number(config.pollIntervalMs) || DEFAULT_POLL_INTERVAL_MS)
   const pollMaxIntervalMs = Math.max(pollIntervalMs, Number(config.pollMaxIntervalMs) || DEFAULT_POLL_MAX_INTERVAL_MS)
-  const defaultSelection = typeof config.defaultSelection === 'function' ? config.defaultSelection : undefined
+  const globalDefault = typeof config.globalDefault === 'function' ? config.globalDefault : undefined
 
   function state() {
     if (!grants) throw new Error('grant store is not configured')
@@ -103,8 +107,42 @@ export function createHostServer(ctx, config, secret) {
     return grants.snapshot()
   }
 
+  /** The deployment default, reported separately and never as a Session model. */
+  function defaultSelection() {
+    try {
+      return selectionOf(globalDefault ? globalDefault() : null)
+    } catch {
+      return null
+    }
+  }
+
+  /** Read one Session's model state from its log; the cached projection is the fallback. */
+  async function modelStateOf(sessionId, row) {
+    const fromRow = () => {
+      const selection = row && row.model && row.provider
+        ? selectionOf({ provider: row.provider, model: row.model, reasoningEffort: row.reasoning_effort })
+        : null
+      return selection
+        ? { lastUsed: selection, pending: null, next: selection, lastExecution: null, last_header_seq: -1, source: 'session_projection' }
+        : { lastUsed: null, pending: null, next: null, lastExecution: null, last_header_seq: -1, source: 'unknown' }
+    }
+    try {
+      const snapshot = await readSnapshot(ctx.sessionQuery, sessionId)
+      const fromEvents = modelStateFromEvents(snapshot.events)
+      if (fromEvents.lastUsed || fromEvents.pending) return { ...fromEvents, source: 'session_log' }
+      return fromRow()
+    } catch (error) {
+      const fallback = fromRow()
+      if (fallback.next) return fallback
+      return {
+        ...fallback,
+        detail: safeError(error, 'sessionQuery.readSession'),
+      }
+    }
+  }
+
   async function loadCatalog() {
-    return assembleCatalog(ctx, { defaultSelection })
+    return assembleCatalog(ctx)
   }
 
   async function findSessionRow(sessionId) {
@@ -137,6 +175,7 @@ export function createHostServer(ctx, config, secret) {
           outbound: false,
           desktop_verified: false,
           services: Boolean(ctx.sessionController && ctx.workspaceRegistry && ctx.sessionQuery),
+          model_services: Boolean(ctx.agents && ctx.llm),
           allowlist_loaded: grantsNow.loaded,
           grants_revision: grantsNow.revision,
           grants_count: grantsNow.workspaceAllowlist.length + grantsNow.sessionAllowlist.length,
@@ -210,34 +249,43 @@ export function createHostServer(ctx, config, secret) {
         const byId = new Map(catalogOk
           ? (loaded.catalog.sessions || []).map((item) => [item.session_id, item])
           : [])
+        const sessions = []
+        for (const item of grantsNow.sessionAllowlist || []) {
+          const row = byId.get(item.sessionId)
+          // The grant record is never evidence of the Session's model. The log
+          // is, and when it says nothing the answer is unknown.
+          const models = row
+            ? await modelStateOf(item.sessionId, row)
+            : { lastUsed: null, pending: null, next: null, lastExecution: null, source: 'unknown' }
+          sessions.push({
+            session_id: item.sessionId,
+            workspace_id: item.workspaceId,
+            title: (row && row.title) || item.title || '',
+            title_source: (row && row.title_source) || (item.title ? 'projection' : 'missing'),
+            cwd: (row && row.cwd) || item.cwd || '',
+            access: item.access,
+            profile: (row && row.profile) || item.profile || 'unknown',
+            // `model`/`provider` keep the compatibility meaning "next turn".
+            model: models.next ? models.next.model : null,
+            provider: models.next ? models.next.provider : null,
+            model_source: models.next ? models.source : 'unknown',
+            model_last_used: models.lastUsed,
+            model_pending: models.pending,
+            model_next: models.next,
+            model_last_execution: models.lastExecution,
+            model_known: Boolean(models.next),
+            global_default: defaultSelection(),
+            running: Boolean(row && row.busy),
+            busy: Boolean(row && row.busy),
+            agent_available: Boolean(row && row.agent_available),
+            catalog_row: Boolean(row),
+          })
+        }
         return send(res, 200, {
           revision: grantsNow.revision,
           catalog_status: catalogOk ? loaded.catalog.session_status : 'read_failed',
-          sessions: (grantsNow.sessionAllowlist || []).map((item) => {
-            const row = byId.get(item.sessionId)
-            // Model fields and model_source must come from the same place. The
-            // pairing-time snapshot is only a grant record, never evidence of
-            // the session's current selection.
-            const model = row ? (row.model ?? null) : null
-            const provider = row ? (row.provider ?? null) : null
-            const modelSource = row ? (row.model_source || 'unresolved') : 'unresolved'
-            return {
-              session_id: item.sessionId,
-              workspace_id: item.workspaceId,
-              title: (row && row.title) || item.title || '',
-              title_source: (row && row.title_source) || (item.title ? 'projection' : 'missing'),
-              cwd: (row && row.cwd) || item.cwd || '',
-              access: item.access,
-              profile: (row && row.profile) || item.profile || 'unknown',
-              model,
-              provider,
-              model_source: modelSource,
-              running: Boolean(row && row.busy),
-              busy: Boolean(row && row.busy),
-              agent_available: Boolean(row && row.agent_available),
-              catalog_row: Boolean(row),
-            }
-          }),
+          global_default: defaultSelection(),
+          sessions,
         })
       }
       if (req.method === 'GET' && url.pathname === '/v1/workspaces') {
@@ -257,7 +305,9 @@ export function createHostServer(ctx, config, secret) {
         const rows = (loaded.catalog.sessions || [])
           .filter((item) => item.workspace_id === workspaceId)
           .map(camelSession)
-        return send(res, 200, visibleSessions(grantsNow, workspaceId, rows))
+        const body = visibleSessions(grantsNow, workspaceId, rows)
+        body.global_default = defaultSelection()
+        return send(res, 200, body)
       }
       if (req.method === 'GET' && url.pathname === '/v1/history') {
         const grantsNow = state()
@@ -282,6 +332,101 @@ export function createHostServer(ctx, config, secret) {
           return send(res, status, { ok: false, reason: detail.code, source: 'desktop_session', detail })
         }
         return send(res, 200, pageHistory(grantsNow, view, snapshot, url.searchParams.get('offset'), url.searchParams.get('limit')))
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/models') {
+        const grantsNow = state()
+        const sessionId = url.searchParams.get('session_id') || ''
+        if (!sessionId) return send(res, 400, { ok: false, reason: 'missing_session_id' })
+        const found = await findSessionRow(sessionId)
+        if (found.status === 'read_failed') {
+          return send(res, 502, { ok: false, reason: 'session_list_read_failed', session_id: sessionId })
+        }
+        if (found.status === 'missing') {
+          return send(res, 404, { ok: false, reason: 'missing_session', session_id: sessionId })
+        }
+        const view = adapterSession(found.row)
+        const auth = authorizeSession(grantsNow, view, { workspaceId: view.workspaceId, need: 'read' })
+        if (!auth.ok) return send(res, 403, { ok: false, reason: auth.reason, session_id: sessionId })
+        const models = await modelStateOf(sessionId, found.row)
+        const agent = liveAgent(ctx, sessionId)
+        const availability = models.next
+          ? await checkSelection(ctx, models.next)
+          : { available: false, reason: 'unknown_model', detail: 'the session records no model selection' }
+        const canSet = auth.access === 'write' && !view.running && Boolean(agent)
+        return send(res, 200, {
+          ok: true,
+          session_id: sessionId,
+          access: auth.access,
+          running: Boolean(view.running),
+          agent_available: Boolean(agent),
+          global_default: defaultSelection(),
+          session: {
+            last_used: models.lastUsed,
+            pending: models.pending,
+            next: models.next,
+            last_execution: models.lastExecution,
+            source: models.source,
+          },
+          availability,
+          can_set: canSet,
+          can_set_reason: canSet
+            ? null
+            : (auth.access !== 'write' ? 'read_only' : (view.running ? 'busy' : 'agent_not_attached')),
+        })
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/model') {
+        const body = await readJson(req)
+        const sessionId = typeof body.session_id === 'string' ? body.session_id : ''
+        const selection = selectionOf({
+          provider: body.provider,
+          model: body.model,
+          reasoningEffort: body.reasoning_effort ?? body.reasoningEffort,
+        })
+        if (!sessionId) return send(res, 400, { ok: false, reason: 'missing_session_id' })
+        if (!selection) return send(res, 400, { ok: false, reason: 'invalid_selection', detail: 'provider and model are required' })
+        const grantsNow = state()
+        const found = await findSessionRow(sessionId)
+        if (found.status === 'read_failed') return send(res, 502, { ok: false, reason: 'session_list_read_failed' })
+        if (found.status === 'missing') return send(res, 404, { ok: false, reason: 'missing_session' })
+        const view = adapterSession(found.row)
+        const auth = authorizeSession(grantsNow, view, { workspaceId: view.workspaceId, need: 'write' })
+        if (!auth.ok) return send(res, 403, { ok: false, reason: auth.reason, session_id: sessionId })
+        if (view.running) {
+          return send(res, 409, { ok: false, reason: 'busy', detail: 'the session is running a turn; the model was not changed' })
+        }
+        const availability = await checkSelection(ctx, selection)
+        if (!availability.available) {
+          return send(res, 409, { ok: false, reason: availability.reason, detail: availability.detail, requested: selection })
+        }
+        const agent = liveAgent(ctx, sessionId)
+        if (!agent) {
+          return send(res, 409, {
+            ok: false,
+            reason: 'needs_ui',
+            detail: 'the session has no live agent; choose the model in the Desktop UI for this session. The bridge does not attach agents and does not change history files.',
+            requested: selection,
+          })
+        }
+        if (!agentIdle(agent)) {
+          return send(res, 409, { ok: false, reason: 'busy', detail: 'the live agent is running a turn; the model was not changed' })
+        }
+        const defaultBefore = defaultSelection()
+        const selected = selectOnAgent(agent, selection)
+        if (!selected.ok) {
+          const status = selected.reason === 'readback_mismatch' ? 500 : 409
+          return send(res, status, { ok: false, reason: selected.reason, detail: selected.detail || null, requested: selection, confirmed: selected.confirmed || null })
+        }
+        return send(res, 200, {
+          ok: true,
+          session_id: sessionId,
+          requested: selection,
+          confirmed: selected.confirmed,
+          model_source: 'session_pending',
+          global_default: defaultSelection(),
+          global_default_unchanged: JSON.stringify(defaultBefore) === JSON.stringify(defaultSelection()),
+          next_requires_request: true,
+          note: 'recorded as a session-level model/selection event; it applies to the next request of this session only',
+        })
       }
       if (req.method === 'POST' && url.pathname === '/v1/resume') {
         const body = await readJson(req)
@@ -320,6 +465,95 @@ export function createHostServer(ctx, config, secret) {
           text: body.text,
         })
         if (!decision.accepted) return send(res, 409, decision)
+
+        // ---- model gate: a route that is unknown or has no adapter is refused
+        // before prompt(), never discovered as NO_ADAPTER in the middle of a turn.
+        const models = await modelStateOf(sessionId, found.row)
+        let requested = models.next
+        const explicitModel = body.model && typeof body.model === 'object'
+        if (explicitModel) {
+          requested = selectionOf({
+            provider: body.model.provider,
+            model: body.model.model,
+            reasoningEffort: body.model.reasoning_effort ?? body.model.reasoningEffort,
+          })
+          if (!requested) {
+            return send(res, 400, { accepted: false, completed: false, reason: 'invalid_requested_model', session_id: sessionId, started_task: false })
+          }
+        }
+        if (!requested) {
+          return send(res, 409, {
+            accepted: false,
+            completed: false,
+            reason: 'model_unknown',
+            session_id: sessionId,
+            detail: 'the session records no model selection; set one with POST /v1/model or in the Desktop UI',
+            started_task: false,
+          })
+        }
+        const agentAtStart = liveAgent(ctx, sessionId)
+        if (explicitModel && !sameRoute(agentSelection(agentAtStart), requested)) {
+          const availability = await checkSelection(ctx, requested)
+          if (!availability.available) {
+            return send(res, 409, {
+              accepted: false,
+              completed: false,
+              reason: availability.reason,
+              detail: availability.detail,
+              requested_model: requested,
+              started_task: false,
+            })
+          }
+          if (!agentAtStart) {
+            return send(res, 409, {
+              accepted: false,
+              completed: false,
+              reason: 'needs_ui',
+              detail: 'the session has no live agent; choose the model in the Desktop UI for this session',
+              requested_model: requested,
+              started_task: false,
+            })
+          }
+          if (!agentIdle(agentAtStart)) {
+            return send(res, 409, { accepted: false, completed: false, reason: 'busy', session_id: sessionId, started_task: false })
+          }
+          const selected = selectOnAgent(agentAtStart, requested)
+          if (!selected.ok) {
+            return send(res, selected.reason === 'readback_mismatch' ? 500 : 409, {
+              accepted: false,
+              completed: false,
+              reason: selected.reason,
+              detail: selected.detail || null,
+              requested_model: requested,
+              confirmed_selection: selected.confirmed || null,
+              started_task: false,
+            })
+          }
+        }
+        const confirmed = agentSelection(liveAgent(ctx, sessionId)) || requested
+        if (!sameRoute(confirmed, requested)) {
+          return send(res, 409, {
+            accepted: false,
+            completed: false,
+            reason: 'model_changed_before_send',
+            requested_model: requested,
+            confirmed_selection: confirmed,
+            detail: 'the session selection differs from the requested model; nothing was sent',
+            started_task: false,
+          })
+        }
+        const availabilityAtStart = await checkSelection(ctx, confirmed)
+        if (!availabilityAtStart.available) {
+          return send(res, 409, {
+            accepted: false,
+            completed: false,
+            reason: availabilityAtStart.reason,
+            detail: availabilityAtStart.detail,
+            requested_model: requested,
+            confirmed_selection: confirmed,
+            started_task: false,
+          })
+        }
         const controller = new AbortController()
         live.set(requestId, controller)
         inflight.set(sessionId, requestId)
@@ -335,6 +569,33 @@ export function createHostServer(ctx, config, secret) {
             return send(res, 502, { accepted: false, reason: detail.code, session_id: sessionId, started_task: false, detail })
           }
           const lastSeq = lastSeqOf(before)
+          // The selection must still be the one confirmed above, and the adapter
+          // must still be registered: both can change between preflight and send.
+          const liveBeforeSend = agentSelection(liveAgent(ctx, sessionId))
+          if (liveBeforeSend && !sameRoute(liveBeforeSend, confirmed)) {
+            return send(res, 409, {
+              accepted: false,
+              completed: false,
+              reason: 'model_changed_before_send',
+              requested_model: requested,
+              confirmed_selection: confirmed,
+              current_selection: liveBeforeSend,
+              detail: 'the selection changed after the preflight; nothing was sent',
+              started_task: false,
+            })
+          }
+          const availableBeforeSend = await checkSelection(ctx, liveBeforeSend || confirmed)
+          if (!availableBeforeSend.available) {
+            return send(res, 409, {
+              accepted: false,
+              completed: false,
+              reason: availableBeforeSend.reason,
+              detail: availableBeforeSend.detail,
+              requested_model: requested,
+              confirmed_selection: confirmed,
+              started_task: false,
+            })
+          }
           let accepted
           try {
             accepted = await ctx.sessionController.prompt(promptBody({
@@ -412,7 +673,12 @@ export function createHostServer(ctx, config, secret) {
                 completed: false,
                 session_id: sessionId,
                 request_id: requestId,
-                model_selection: 'session_recorded_not_overridden',
+                model_selection: explicitModel ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+                requested_model: requested,
+                confirmed_selection: confirmed,
+                execution_model: null,
+                execution_model_source: 'unknown',
+                model_match: null,
                 text: '',
                 final: { reason: { kind: 'unattributed_turn' } },
                 attribution: 'ambiguous',
@@ -433,7 +699,12 @@ export function createHostServer(ctx, config, secret) {
               completed: false,
               session_id: sessionId,
               request_id: requestId,
-              model_selection: 'session_recorded_not_overridden',
+              model_selection: explicitModel ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+              requested_model: requested,
+              confirmed_selection: confirmed,
+              execution_model: executionModelForTurn(lastSnapshot.events, turn),
+              execution_model_source: executionModelForTurn(lastSnapshot.events, turn) ? 'request_header' : 'unknown',
+              model_match: null,
               text: '',
               final: { reason: { kind: 'timeout' } },
               turn: turn && turn.number !== null ? turn.number : null,
@@ -452,18 +723,31 @@ export function createHostServer(ctx, config, secret) {
           // A turn that ended is not the same as a turn that succeeded: only a
           // `completed` reason is reported as completed, so an error, an abort,
           // or a token limit cannot be mistaken for a finished task.
-          const terminal = terminalKind(answer.reason)
+          const execution = executionModelForTurn(lastSnapshot.events, turn)
+          const modelMatch = execution ? sameRoute(execution, confirmed) : null
+          let terminal = terminalKind(answer.reason)
+          let finalReason = answer.reason || { kind: terminal }
+          if (modelMatch === false) {
+            terminal = 'model_mismatch'
+            finalReason = { kind: 'model_mismatch', requested: confirmed, execution }
+          }
           const result = {
             accepted: true,
             completed: terminal === 'completed',
             session_id: sessionId,
             request_id: requestId,
-            model_selection: 'session_recorded_not_overridden',
-            model: view.model,
-            provider: view.provider,
-            model_source: view.model_source,
+            model_selection: explicitModel ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+            requested_model: requested,
+            confirmed_selection: confirmed,
+            execution_model: execution,
+            execution_model_source: execution ? 'request_header' : 'unknown',
+            model_match: modelMatch,
+            global_default: defaultSelection(),
+            model: execution ? execution.model : null,
+            provider: execution ? execution.provider : null,
+            model_source: execution ? 'request_header' : 'unknown',
             text: redactText(answer.texts.join('\n\n')),
-            final: { reason: answer.reason || { kind: terminal } },
+            final: { reason: finalReason },
             terminal,
             turn: turn.number,
             events_count: answer.texts.length,
