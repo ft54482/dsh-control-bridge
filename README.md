@@ -8,7 +8,7 @@
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![CI](https://github.com/ft54482/dsh-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/ft54482/dsh-control-bridge/actions/workflows/ci.yml)
 
-便携包里的使用顺序写在 [docs/windows-delivery.md](docs/windows-delivery.md)：安装桥、假进程自检、凭证配置、真实计费 smoke。默认不启动真实 `dsh`，也不发送模型请求。这个文件属于预览分支，不是默认分支首页。
+便携包里的使用顺序写在 [docs/windows-delivery.md](docs/windows-delivery.md)：安装桥、假进程自检、凭证配置、真实计费 smoke。默认不启动真实 `dsh`，也不发送模型请求。默认分支包含这份说明、封面和可运行的桥。这不是对全部 Harness 功能的控制。
 
 ## 这是什么
 
@@ -21,7 +21,7 @@ DeepSeek Harness 负责执行，而且只有两条路：
 
 执行器说“做完了”，只表示任务进入 **待验收**。它不会自动变成交付完成，也不会自动合并、发布、扩大范围或追加预算。下一份任务书默认只起草，等人批准后再发送。
 
-本仓库是独立的开源控制桥。Grok Bot 指负责人自己运行的协调代理，DeepSeek Harness 指执行环境。这里没有看板，也没有托管网关。
+本仓库是独立的开源控制桥。Grok Bot 指负责人自己运行的协调代理，DeepSeek Harness 指执行环境，不是这些产品的官方组件，也不表示其厂商提供支持。这里没有看板，也没有托管网关。
 
 ## English
 
