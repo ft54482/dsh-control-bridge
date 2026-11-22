@@ -77,6 +77,72 @@ def test_dispatch_uses_one_post_and_preserves_request_id_and_unicode(invoke_clie
     assert json.loads(result.stdout)["phase"] == "accepted"
 
 
+def test_preset_creation_stops_before_post_on_older_host(invoke_client):
+    result, requests = invoke_client(
+        [(200, "application/json", b'{"ok":true,"outbox_enabled":false}')],
+        ["create-session", "--data", "-"], b'{"workspace_id":"w"}',
+    )
+    assert result.returncode == 1
+    assert [item[:2] for item in requests] == [("GET", "/v1/health")]
+    assert json.loads(result.stdout)["reason"] == "preset_creation_unavailable"
+
+
+@pytest.mark.parametrize("change", [
+    {}, {"agent_preset_source": "request"}, {"workspace_id": "other"}, {"session_id": "unexpected"},
+    {"grant": None}, {"grant": {"session_id": "fresh", "workspace_id": "w", "access": "read"}},
+])
+def test_preset_creation_requires_an_identity_bound_receipt(invoke_client, change):
+    body = {"workspace_id": "w", "agent_preset": "another-preset", "access": "write"}
+    receipt = {"ok": True, "session_id": "fresh", "workspace_id": "w", "agent_preset": "another-preset",
+               "grant": {"session_id": "fresh", "workspace_id": "w", "access": "write"},
+               "agent_preset_source": "session_projection", "started_task": False, **change}
+    result, requests = invoke_client(
+        [(200, "application/json", b'{"ok":true,"preset_create_verified":true}'),
+         (200, "application/json", json.dumps(receipt).encode())],
+        ["create-session", "--data", "-"], json.dumps(body).encode(),
+    )
+    assert [item[:2] for item in requests] == [("GET", "/v1/health"), ("POST", "/v1/sessions")]
+    assert json.loads(requests[-1][3]) == body
+    output = json.loads(result.stdout)
+    assert output["session_id"] == receipt["session_id"]
+    assert result.returncode == int(bool(change))
+    if change:
+        assert output["reason"] == "agent_preset_unverified"
+        assert output["manual_reconcile"] is True
+
+
+def test_new_task_in_existing_workspace_defaults_to_master_control(invoke_client):
+    receipt = {"ok": True, "session_id": "fresh", "workspace_id": "w", "agent_preset": "master-control",
+               "grant": {"session_id": "fresh", "workspace_id": "w", "access": "read"},
+               "agent_preset_source": "session_projection", "started_task": False}
+    result, requests = invoke_client(
+        [(200, "application/json", b'{"ok":true,"preset_create_verified":true}'),
+         (200, "application/json", json.dumps(receipt).encode())],
+        ["create-session", "--data", "-"], b'{"workspace_id":"w"}',
+    )
+    assert result.returncode == 0
+    assert json.loads(requests[1][3]) == {"workspace_id": "w", "agent_preset": "master-control"}
+
+
+def test_fresh_create_rejects_caller_id_before_contacting_host(invoke_client):
+    result, requests = invoke_client([], ["create-session", "--data", "-"],
+                                     b'{"workspace_id":"w","session_id":"existing"}')
+    assert result.returncode != 0
+    assert not requests
+
+
+def test_ambiguous_failure_after_creation_post_requires_reconciliation(invoke_client):
+    result, requests = invoke_client(
+        [(200, "application/json", b'{"ok":true,"preset_create_verified":true}'),
+         (502, "application/json", b'{"ok":false,"reason":"gateway/internal","session_id":"minted"}')],
+        ["create-session", "--data", "-"], b'{"workspace_id":"w"}',
+    )
+    assert result.returncode == 1
+    assert [item[:2] for item in requests] == [("GET", "/v1/health"), ("POST", "/v1/sessions")]
+    assert json.loads(result.stdout)["manual_reconcile"] is True
+    assert json.loads(result.stdout)["session_id"] == "minted"
+
+
 def test_sse_resume_retains_frame_cursor_and_ignores_heartbeats(invoke_client):
     result, requests = invoke_client(
         [(200, "text/event-stream", b': heartbeat\n\nid: 42\nevent: request\ndata: {"seq":42}\n\n'

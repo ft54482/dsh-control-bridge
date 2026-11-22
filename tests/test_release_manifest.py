@@ -2,10 +2,38 @@
 
 import json
 from pathlib import Path
+import runpy
+import tomllib
+import zipfile
 
 import pytest
 
+from dsh_control_bridge import __version__
 from dsh_control_bridge.release_manifest import verify_manifest, write_manifest
+
+
+def test_runtime_and_published_package_versions_match():
+    root = Path(__file__).resolve().parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    host = json.loads((root / "plugins/dsh-control-bridge-host/package.json").read_text(encoding="utf-8"))
+    assert __version__ == project["project"]["version"] == host["version"]
+
+
+def test_skill_archive_is_installable_and_omits_local_pairing_files(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    builder = runpy.run_path(str(root / "scripts" / "build_release.py"))
+    skill_dir = tmp_path / "installed"
+    public = ("SKILL.md", "references/desktop.md", "references/superagent.md",
+              "scripts/desktop.py", "scripts/superagent.py")
+    for relative in (*public, "connection.json", "private-notes.md", "scripts/__pycache__/cache.pyc"):
+        path = skill_dir / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(relative.encode())
+    archive = builder["build_skill_zip"](tmp_path, "test", skill_dir)
+    with zipfile.ZipFile(archive) as packed:
+        assert sorted(packed.namelist()) == sorted(f"deepseek-harness-bridge/{p}" for p in public)
+        for relative in public:
+            assert packed.read(f"deepseek-harness-bridge/{relative}") == relative.encode()
 
 
 def test_plugin_runtime_modules_are_all_declared_for_packaging():

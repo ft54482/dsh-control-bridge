@@ -1,4 +1,4 @@
-# Host 控制面 API（0.2.0）
+# Host 控制面 API（0.2.1）
 
 进程内 Desktop Host 插件 `dsh-control-bridge-host` 的 loopback HTTP 契约。0.2.0 的每条能力都先按官方 0.2.2-rc.5 源码核对；夹具回归只证明协议行为和失败关闭，**不等于真机验收**。
 
@@ -76,10 +76,20 @@
 | POST | `/v1/model` | 会话 `write`；`reasoning_effort:null` 清除旧 effort；`auto` 不是合法值 |
 | POST | `/v1/access` / `/v1/revoke` | 会话/目录授权；撤销是唯一移除路径 |
 | POST | `/v1/workspaces` | `allowCreateWorkspace` + `workspaceRoots`；注册已存在目录（可选创建一层） |
-| POST | `/v1/sessions` | `allowCreateSession` + `workspaceRoots`；官方 `sessionController.create`，默认 `read` 授权 |
+| POST | `/v1/sessions` | 需要 `allowCreateSession` 和允许的工作区根目录。通过官方 `sessionController.create` 创建，默认授予 `read`；传入 `agent_preset` 时还会核验预设。 |
 | POST | `/v1/open` | `allowOpenPath` + `workspaceRoots`；官方 `openWorkspacePath`，只打开不创建 |
 
 创建类端点在未配置时返回 `403 *_disabled` / `no_allowed_roots`；官方服务未挂载时返回 `501 *_unavailable`；不猜方法、不落盘伪造。路径必须是已存在目录（或显式 `create_directory:true` 创建**一层**），按 realpath 校验在根内；根本身、兄弟前缀、`..` 穿越、逃出根的符号链接都拒绝。
+
+### 新建会话时核验主控预设
+
+Codex Skill 默认在选定的工作区新建 `master-control` 会话。该预设需由操作者安装到 Harness。在原有任务上继续工作时，Skill 直接续接原会话。
+
+1. `GET /v1/health` 的 `preset_create_verified: true` 表明 Host 能查询预设、创建会话并读取会话当前的预设。工作区的创建权限仍单独检查。
+2. 向 `POST /v1/sessions` 提交 `{"workspace_id":"WORKSPACE","agent_preset":"master-control"}`。Host 先在 Harness 注册表里解析预设，再比对创建回执和会话投影，成功后才为新会话保存桥接授权。
+3. 确认响应中的 `workspace_id`、`session_id`、`agent_preset: "master-control"`、`agent_preset_source: "session_projection"` 及 `started_task: false`。需要派工时再调用 `resume`。
+
+创建后核验失败时，先用已返回的会话 ID 到 Desktop 核对；若连接中断且没有 ID，从原工作区查找新会话，避免重复创建。使用旧 Host 时可在 Desktop 手动新建并核对标题旁的预设，再按已有授权流程继续。[Codex 操作指南](../skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
 
 ## 请求状态与自动感知交卷
 

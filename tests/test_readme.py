@@ -3,7 +3,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HERO = ROOT / "docs" / "assets" / "hero.jpg"
-HERO_SHA256 = "c4488da680a4578d0ed76f7da8728726a3191aa42972730d2593a2e65725233e"
+HERO_SHA256 = "ff1384e0bc4f2f78504f848958c288f914d0c1614493da2b5e71e8cc246b3458"
 
 
 def test_readme_opens_with_the_exact_hero():
@@ -14,6 +14,7 @@ def test_readme_opens_with_the_exact_hero():
     assert 'width="100%"' in first
     assert "alt=" in first
     assert "DSH Control Bridge" in first
+    assert "Codex" in first and "Grok Bot" in first and "DeepSeek Harness" in first
     data = HERO.read_bytes()
     assert data[:3] == b"\xff\xd8\xff"
     assert data[-2:] == b"\xff\xd9"

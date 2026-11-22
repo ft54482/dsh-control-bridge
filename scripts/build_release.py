@@ -2,6 +2,7 @@
 
 Produces, inside ``--dist``:
 - ``dsh-control-bridge-<version>-portable.zip``  (source tree, no secrets)
+- ``deepseek-harness-bridge-<version>-skill.zip`` (installable Codex skill)
 - ``MANIFEST.json`` and ``<artifact>.sha256`` for every artifact
 - a verification pass that unpacks both artifacts and compares per-file SHA256
   against the source tree and against the packed manifest
@@ -21,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import sys
 import tarfile
 import zipfile
 from pathlib import Path
@@ -32,6 +34,10 @@ SKIP_SUFFIXES = {".pyc", ".pyo"}
 SKIP_NAMES = {"bridge.secret", "host.secret", "bootstrap.secret", ".credentials.yaml", "connection.json"}
 PACKAGE_TOP = ["README.md", "LICENSE", "pyproject.toml", "Makefile", "CONTRIBUTING.md", "SECURITY.md"]
 PACKAGE_DIRS = ["src", "scripts", "examples", "docs", "plugins", "skills", "tests"]
+SKILL_NAME = "deepseek-harness-bridge"
+# Explicit public payload. An installed copy may also hold local pairing files.
+SKILL_FILES = ("SKILL.md", "references/desktop.md", "references/superagent.md",
+               "scripts/desktop.py", "scripts/superagent.py")
 
 
 def plugin_version() -> str:
@@ -94,6 +100,23 @@ def verify_zip(target: Path, version: str) -> list[str]:
     for missing in sorted(expected - packed):
         problems.append(f"zip is missing: {missing}")
     return [f"{checked} entries compared", *problems]
+
+
+def build_skill_zip(dist: Path, version: str, skill_dir: Path) -> Path:
+    target = dist / f"{SKILL_NAME}-{version}-skill.zip"
+    with zipfile.ZipFile(target, "w") as archive:
+        for relative in SKILL_FILES:
+            info = zipfile.ZipInfo(f"{SKILL_NAME}/{relative}")
+            info.external_attr = 0o644 << 16
+            archive.writestr(info, (skill_dir / relative).read_bytes(), zipfile.ZIP_DEFLATED)
+    with zipfile.ZipFile(target) as archive:
+        expected = [f"{SKILL_NAME}/{relative}" for relative in SKILL_FILES]
+        if archive.namelist() != expected:
+            raise ValueError("unexpected skill archive layout")
+        for relative, name in zip(SKILL_FILES, expected):
+            if archive.read(name) != (skill_dir / relative).read_bytes():
+                raise ValueError(f"skill archive differs from source: {relative}")
+    return target
 
 
 def verify_tgz(target: Path) -> list[str]:
@@ -174,6 +197,12 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(report[1:]))
         return 1
 
+    skill_zip = build_skill_zip(args.dist, version, ROOT / "skills" / SKILL_NAME)
+    names.append(skill_zip.name)
+    print(f"skill: {skill_zip.name} -> {len(SKILL_FILES)} entries compared")
+
+    # Use the manifest implementation from the checkout being packaged.
+    sys.path.insert(0, str(ROOT / "src"))
     from dsh_control_bridge.release_manifest import write_manifest, verify_manifest
 
     manifest = write_manifest(args.dist, names, version=version)

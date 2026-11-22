@@ -156,6 +156,12 @@ export function createHostServer(ctx, config, secret) {
   const openPathEnabled = config.allowOpenPath === true
   const rootsUnavailable = () => !hasRoots(workspaceRoots)
 
+  function presetCreationAvailable() {
+    return typeof ctx.get?.('agentPresets')?.resolve === 'function'
+      && typeof ctx.sessionController?.create === 'function'
+      && typeof ctx.sessionController?.projections === 'function'
+  }
+
   function state() {
     if (!grants) throw new Error('grant store is not configured')
     grants.refresh()
@@ -310,18 +316,19 @@ export function createHostServer(ctx, config, secret) {
   }
 
   /** Map the official ApiError code to an HTTP status; unknown codes are a 502. */
-  function sendOfficialError(res, error, method) {
+  function sendOfficialError(res, error, method, serverErrorFields = {}) {
     const detail = safeError(error, method)
     const code = (error && error.code) || 'call_failed'
     let status = 502
     if (code === 'gateway/bad-request' || code === 'gateway/arguments-invalid') status = 400
     else if (code === 'workspace/invalid-path' || code === 'workspace/move-invalid') status = 400
     else if (/session\/invalid|session\/bad/.test(code)) status = 400
-    else if (code === 'workspace/not-found' || code === 'session/not-found') status = 404
+    else if (code === 'workspace/not-found' || code === 'session/not-found' || code === 'agent-preset/not-found') status = 404
+    else if (code === 'agent-preset/invalid') status = 409
     else if (code === 'workspace/session-active' || code === 'session/conflict' || code === 'agent-preset/conflict') status = 409
     else if (code === 'workspace/name-conflict') status = 409
     else if (code === 'gateway/cancelled') status = 409
-    return send(res, status, { ok: false, reason: code, started_task: false, detail })
+    return send(res, status, { ok: false, reason: code, started_task: false, detail, ...(status >= 500 ? serverErrorFields : {}) })
   }
 
   function bodyOfRequest(record) {    if (record.phase === 'terminal' && record.response) return { status: record.http_status || 200, body: record.response }
@@ -737,6 +744,7 @@ export function createHostServer(ctx, config, secret) {
           desktop_verified: false,
           services: Boolean(ctx.sessionController && ctx.workspaceRegistry && ctx.sessionQuery),
           model_services: Boolean(ctx.agents && ctx.llm),
+          preset_create_verified: presetCreationAvailable(),
           allowlist_loaded: grantsNow.loaded,
           grants_revision: grantsNow.revision,
           grants_count: grantsNow.workspaceAllowlist.length + grantsNow.sessionAllowlist.length,
@@ -833,6 +841,28 @@ export function createHostServer(ctx, config, secret) {
         if (rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
         const body = await readJson(req)
         let workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id : ''
+        const preset = body.agent_preset
+        if (preset !== undefined) {
+          if (typeof preset !== 'string' || !preset.trim() || preset !== preset.trim()) {
+            return send(res, 400, { ok: false, reason: 'invalid_agent_preset', started_task: false })
+          }
+          if (body.session_id !== undefined) {
+            return send(res, 400, { ok: false, reason: 'omit_session_id_for_preset_create', started_task: false })
+          }
+          // Without a preset roster the official fresh-create path can silently
+          // compose the default. Resolve the exact id before creating anything.
+          if (!presetCreationAvailable()) {
+            return send(res, 501, { ok: false, reason: 'preset_creation_unavailable', started_task: false })
+          }
+          try {
+            const declared = await ctx.get('agentPresets').resolve(preset)
+            if (declared?.id !== preset || declared.broken !== undefined) {
+              return send(res, 409, { ok: false, reason: 'agent-preset/invalid', started_task: false })
+            }
+          } catch (error) {
+            return sendOfficialError(res, error, 'agentPresets.resolve')
+          }
+        }
         let workspace = null
         if (workspaceId) {
           const registry = ctx.workspaceRegistry
@@ -910,16 +940,44 @@ export function createHostServer(ctx, config, secret) {
           plannedEffortUnverified = Boolean(plannedSelection.reasoningEffort && !support.known)
         }
         const createRequest = { workspaceId }
-        if (typeof body.agent_preset === 'string' && body.agent_preset) createRequest.agentPreset = body.agent_preset
+        if (preset !== undefined) createRequest.agentPreset = preset
         if (typeof body.session_id === 'string' && body.session_id) createRequest.sessionId = body.session_id
         let created
         try {
           created = await ctx.sessionController.create(createRequest)
         } catch (error) {
-          return sendOfficialError(res, error, 'sessionController.create')
+          if (error?.code === 'session/workspace-attach-failed') {
+            // The controller already created the Session. Preserve its official
+            // ID so a client can reconcile instead of creating a duplicate.
+            return send(res, 502, {
+              ok: false, reason: error.code, session_id: error.details?.sessionId ?? null,
+              workspace_id: workspaceId, saved: false, started_task: false, manual_reconcile: true,
+            })
+          }
+          return sendOfficialError(res, error, 'sessionController.create', { workspace_id: workspaceId, manual_reconcile: true })
         }
-        const sessionId = String((created && created.sessionId) || createRequest.sessionId || '')
-        if (!sessionId) return send(res, 502, { ok: false, reason: 'create_returned_no_session_id' })
+        const sessionId = created?.sessionId ?? (preset === undefined ? createRequest.sessionId : null)
+        if (typeof sessionId !== 'string' || !sessionId) return send(res, 502, {
+          ok: false, reason: 'create_returned_no_session_id', workspace_id: workspaceId, manual_reconcile: true,
+        })
+        if (preset !== undefined) {
+          // The header is creation-time state. Blank Sessions can change preset,
+          // so only the current sequenced projection confirms the selection.
+          let projection
+          try {
+            projection = await ctx.sessionController.projections({ sessionId }, new AbortController().signal)
+          } catch (error) {
+            note(config, [safeError(error, 'sessionController.projections')])
+          }
+          if (created.agentPreset !== preset
+            || projection?.kind !== 'sequenced' || projection.values?.agentPreset !== preset) {
+            return send(res, 409, {
+              ok: false, reason: 'agent_preset_unverified', session_id: sessionId, workspace_id: workspaceId,
+              saved: false, started_task: false, manual_reconcile: true,
+              note: 'inspect this Session in Desktop before continuing; do not retry creation',
+            })
+          }
+        }
         const access = body.access === 'write' ? 'write' : 'read'
         const sessionGrant = {
           sessionId,
@@ -944,6 +1002,7 @@ export function createHostServer(ctx, config, secret) {
             session_id: sessionId,
             workspace_id: workspaceId,
             saved: false,
+            manual_reconcile: true,
             detail,
             note: 'the Session exists but is not granted; fix the allowlist and grant it explicitly',
           })
@@ -972,6 +1031,7 @@ export function createHostServer(ctx, config, secret) {
           session_id: sessionId,
           workspace_id: workspaceId,
           path: workspace.path || '',
+          ...(preset === undefined ? {} : { agent_preset: created.agentPreset, agent_preset_source: 'session_projection' }),
           access,
           grant: {
             session_id: sessionId,

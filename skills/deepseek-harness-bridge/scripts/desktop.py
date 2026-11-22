@@ -46,6 +46,22 @@ def object_from(raw: bytes) -> dict:
     return value
 
 
+def verified_preset_receipt(request: dict, receipt: dict) -> bool:
+    session_id = receipt.get("session_id")
+    workspace_id = receipt.get("workspace_id")
+    grant = receipt.get("grant")
+    return (
+        receipt.get("ok") is True and receipt.get("started_task") is False
+        and receipt.get("agent_preset_source") == "session_projection"
+        and receipt.get("agent_preset") == request["agent_preset"]
+        and isinstance(session_id, str) and bool(session_id.strip())
+        and isinstance(workspace_id, str) and bool(workspace_id.strip())
+        and workspace_id == request.get("workspace_id", workspace_id)
+        and isinstance(grant, dict) and grant.get("session_id") == session_id
+        and grant.get("workspace_id") == workspace_id and grant.get("access") == request.get("access", "read")
+    )
+
+
 def load_secret() -> str:
     path = os.environ.get("DSH_BRIDGE_SECRET_FILE")
     if not path and LOCAL_CONFIG.exists():
@@ -116,6 +132,7 @@ def main() -> int:
         parser.error("--param KEY=VALUE applies to read commands")
 
     request_id = args.request_id
+    verify_preset = False
     try:
         if command in OBSERVE:
             route = f"requests/{quote(request_id, safe='')}/{command}"
@@ -129,6 +146,15 @@ def main() -> int:
             body = object_from(sys.stdin.buffer.read() if args.data == "-" else Path(args.data).read_bytes())
             if command == "set-access" and body.get("access") not in ("read", "write"):
                 parser.error("set-access requires an explicit read or write access value")
+            verify_preset = command == "create-session"
+            if verify_preset:
+                preset = body.setdefault("agent_preset", "master-control")
+                if not isinstance(preset, str) or not preset.strip() or preset != preset.strip():
+                    parser.error("create-session requires a nonempty agent_preset id when supplied")
+                if "session_id" in body:
+                    parser.error("omit session_id for a fresh create-session; use resume for an existing Session")
+                if body.get("access", "read") not in ("read", "write"):
+                    parser.error("create-session access must be read or write")
             if command == "resume":
                 request_id = body.get("request_id")
                 if not isinstance(request_id, str) or not request_id.strip():
@@ -140,31 +166,44 @@ def main() -> int:
 
     headers = {"Authorization": f"Bearer {secret}", "Accept": "application/json"}
     connection = http.client.HTTPConnection("127.0.0.1", args.port, timeout=args.timeout)
+    create_attempted = False
     try:
         if body is not None:
             headers["Content-Type"] = "application/json"
-        if command == "resume" and "wait" not in body and "wait_ms" not in body:
+        if verify_preset or (command == "resume" and "wait" not in body and "wait_ms" not in body):
             connection.request("GET", "/v1/health", headers=headers)
             probe = connection.getresponse()
             health = object_from(probe.read())
             if probe.status != 200 or health.get("ok") is not True:
                 emit({"http_status": probe.status, **health}, secret)
                 return 1
-            if "outbox_enabled" in health:
+            if verify_preset and health.get("preset_create_verified") is not True:
+                emit({"ok": False, "reason": "preset_creation_unavailable", "started_task": False}, secret)
+                return 1
+            if command == "resume" and "outbox_enabled" in health:
                 body["wait"] = False
         if command == "stream":
             headers["Accept"] = "text/event-stream"
             headers["Last-Event-ID"] = str(args.last_event_id)
         data = json.dumps(body).encode("utf-8") if body is not None else None
+        create_attempted = command == "create-session"
         connection.request("POST" if body is not None else "GET", path, body=data, headers=headers)
         with connection.getresponse() as response:
             if command == "stream" and response.status == 200 and response.headers.get_content_type() == "text/event-stream":
                 return print_stream(response, secret)
             result = object_from(response.read())
+            if verify_preset and response.status < 400 and not verified_preset_receipt(body, result):
+                emit({"http_status": response.status, "ok": False, "reason": "agent_preset_unverified",
+                      "session_id": result.get("session_id"), "workspace_id": result.get("workspace_id"),
+                      "manual_reconcile": True}, secret)
+                return 1
+            if create_attempted and response.status >= 500:
+                result["manual_reconcile"] = True
             emit({"http_status": response.status, **result}, secret)
             return int(response.status >= 400 or result.get("ok") is False)
     except (OSError, UnicodeError, http.client.HTTPException, ValueError):
-        emit({"ok": False, "reason": "bridge_transport_error", "request_id": request_id}, secret)
+        emit({"ok": False, "reason": "bridge_transport_error", "request_id": request_id,
+              **({"manual_reconcile": True} if create_attempted else {})}, secret)
         return 2
     finally:
         connection.close()
