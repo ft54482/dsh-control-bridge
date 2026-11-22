@@ -1,4 +1,72 @@
-# 四个阶段
+# Windows 安装与使用
+
+<a id="codex-desktop-setup"></a>
+
+## 连接 Codex 桌面端与 Harness Desktop
+
+在运行 DeepSeek Harness Desktop 的同一台机器上，以本地执行环境打开 Codex。需要 Python 3.11+ 和一个已初始化的 Harness Desktop profile。技能脚本仅依赖 Python 标准库。
+
+### 安装或升级 Codex skill
+
+个人安装可用于多个项目，目标为 `~/.agents/skills/deepseek-harness-bridge`。只在一个仓库使用时，可将目标改为该仓库内的 `.agents/skills/deepseek-harness-bridge`。已有自定义技能目录的用户可在 Codex 的技能列表核对实际加载位置，更新同一份安装。[OpenAI 技能目录说明](https://developers.openai.com/codex/skills/)
+
+下载 [v0.2.1 独立技能包](https://github.com/ft54482/dsh-control-bridge/releases/download/v0.2.1/deepseek-harness-bridge-0.2.1-skill.zip)，在下载目录运行。压缩包已有顶层技能文件夹，直接解压到 `skills` 目录即可。
+
+```powershell
+$skillRoot = Join-Path $HOME '.agents/skills'
+Expand-Archive -LiteralPath './deepseek-harness-bridge-0.2.1-skill.zip' -DestinationPath $skillRoot -Force
+$skill = Join-Path $skillRoot 'deepseek-harness-bridge'
+$client = Join-Path $skill 'scripts/desktop.py'
+python $client --help
+```
+
+若从源码安装，在本仓库的公开 Git 检出目录运行以下命令。
+
+```powershell
+$source = 'skills/deepseek-harness-bridge'
+$skill = Join-Path $HOME '.agents/skills/deepseek-harness-bridge'
+git ls-files -- $source | ForEach-Object {
+    $target = Join-Path $skill $_.Substring($source.Length + 1)
+    New-Item -ItemType Directory -Force -Path (Split-Path $target) | Out-Null
+    Copy-Item -LiteralPath $_ -Destination $target -Force
+}
+$client = Join-Path $skill 'scripts/desktop.py'
+python $client --help
+```
+
+升级时先在公开检出中执行 `git pull --ff-only`，再重跑复制命令。它只复制 Git 追踪的技能文件。Codex 通常会发现更新；若列表仍显示旧版本，重启 Codex。首次安装也可用 Codex 内置的 `$skill-installer`，指定本仓库和 `skills/deepseek-harness-bridge` 子目录。
+
+### 安装 Host 并完成首次配对
+
+1. 已经配对的用户可直接做下方连接检查。首次安装或升级需要与所需能力匹配的 Host 包和同一版本的 SHA-256 校验值。若从公开源码构建，先准备 Node.js、pnpm 和 Python，在仓库根目录运行以下命令。它们在 `dist` 下生成并逐文件核验安装包、清单与 `.sha256` 文件。
+
+   ```powershell
+   New-Item -ItemType Directory -Force -Path dist | Out-Null
+   Push-Location plugins/dsh-control-bridge-host
+   try { pnpm pack --pack-destination ../../dist } finally { Pop-Location }
+   python scripts/build_release.py --dist dist
+   ```
+
+2. 将便携源码 ZIP 解压到一个私有目录，进入其中包含 `scripts/windows` 的文件夹，后续安装和配对脚本在此运行。把同版本 Host TGZ 和校验清单保留在便于引用的位置。等待运行中的任务结束，从 Harness 托盘选择 **Quit DeepSeek Harness**。按下方[安装、升级和回滚](#host-install)命令安装刚核验的包，首次选择 `Install`，已有 Host 则选择 `Upgrade`。
+3. 首次安装时运行 `.\scripts\windows\Prepare-DesktopHost.ps1 -Package <包路径>`。备份 Desktop profile 的 `cordis.patch.yml`，把生成的 `desktop-host-local/cordis-snippet.yml` 应用到其中的 Host 配置项。保管该目录下的配对与凭据文件。若要允许新建会话，在同一项下配置 `allowCreateSession: true` 和 `workspaceRoots`，目标工作区必须位于其中一个已允许目录之下。[Host 配置示例](host-api.md)
+4. 重新打开 Harness Desktop，在已登记的工作区准备一条可供配对的空闲会话。运行 `.\scripts\windows\Pair-DesktopHost.ps1` 查看编号，再加 `-Index <编号>` 授予读取权限。要续接并发送任务还需该会话的 `write` 授权。配对窗口过期时运行 `.\scripts\windows\Rearm-DesktopHostBootstrap.ps1` 重新开启。
+
+### 检查 Codex 连接
+
+让技能读取该 Host 的长期凭据文件。下面的命令只在个人技能目录写入文件路径，适用于上文首次配对时生成的位置。已有配对请改用自己现有的 `host.secret` 路径。也可给运行 Codex 的进程设置 `DSH_BRIDGE_SECRET_FILE` 指向同一文件。按步骤运行前应确认选用的是个人技能目录，项目级安装请使用环境变量。
+
+```powershell
+$secretFile = (Resolve-Path -LiteralPath './desktop-host-local/host.secret').Path
+@{ secret_file = $secretFile } | ConvertTo-Json | Set-Content -Encoding utf8 (Join-Path $skill 'connection.json')
+python $client health
+python $client granted
+```
+
+`health` 返回 `ok: true`，且 `granted` 能找到目标会话后，在 Codex 打开 `$deepseek-harness-bridge` 即可查找旧任务。续接原会话支持 Host 0.1.6 起的授权操作。Host 0.2.0 增加全局元数据发现，历史正文仅对已授权的会话开放。
+
+独立任务默认在同一工作区新建主控会话。需要 Host 0.2.1 的验证式创建能力（`health.preset_create_verified`）和自行安装的可信 Harness Agent 预设 `master-control`。在同一 Harness profile 的侧栏打开「插件 → 添加插件」，安装并启用可信的本地预设包。也可在有插件管理工具时使用 `install_bundle` 和 `list_plugins`。预设对该 profile 的工作区共享。打开目标工作区的空白会话，在预设选择器中确认“主控模式”。此预设决定会话的角色与工具。桥只在成功读回会话实际选中的预设后才发送任务。缺少 bundle 时，可继续使用既有授权会话。SuperAgent 的派工另以 Source、Ticket 和 Assignment 作为凭据。[主控会话回读](../skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode) · [SuperAgent 用法](../skills/deepseek-harness-bridge/references/superagent.md)
+
+## 便携包与假进程自检
 
 这些阶段按顺序进行。缺凭证不是代码已经结束，也还没有进入真实计费。这一包只补 Windows 假进程自检，不配置真实凭证，也不做 SuperAgent 绑定。
 
@@ -67,7 +135,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 
 `Prepare-DesktopHost.ps1` 把口令写在解压目录的 `desktop-host-local`，不写系统环境变量。空名单且没有 20 分钟发现窗口时插件不监听。打开 Desktop 后，`Pair-DesktopHost.ps1` 按标题列出会话；`Pair-DesktopHost.ps1 -Index 1` 只写入这一条只读授权并作废发现口令。发现不读正文、不启动任务、不改模型。子会话只分类，不挂到根上。列表读取失败会标明失败，不会显示成“没有历史”。
 
-写入要另一步：发现口令作废后，用持久口令 `python -m dsh_control_bridge.pair_desktop --grant-write --host-secret-file desktop-host-local\host.secret --index 编号`。忙会话拒绝写入。
+对已经授予只读的会话，可用技能的 `set-access` 命令，以所选 `session_id` 和 `access: "write"` 提交本地 JSON。Host 会拒绝对忙会话提升写权限。
 
 安装后先保存 `GET /v1/guard/membership` 指纹，升级后再比对。缺了工作区或会话、或者子会话被抬到根上，比对失败并停止。不要用旧的 profile 备份覆盖用户后来的修改。插件不改 workspace 登记。目录只列出当前工作区 `sessionIds` 里的顶层会话。标题来自 list 投影的 `title`，没有投影时用工作区名并标明来源，不读会话正文。子会话按 list 行的 `origin: "subagent"` 分类；`origin` 缺失但带 `parentSessionId` 时保守地留在父会话下，不抬到根列表。会话模型只来自这条会话自己的记录：最后一次 `request/header` 是已经执行过的选择，其后的 `model/selection` 是尚未使用的 pending，`next` 是 `pending ?? lastUsed`。部署默认值单独叫 `global_default`，不会填进会话模型。没有记录时是 `null` 和 `model_source: "unknown"`。`POST /v1/model` 需要写授权、空闲会话和已挂上的 Agent；没有 Agent 时返回 `needs_ui` 且不改任何东西。这条冷会话路径还没有在真机上验证。
 
@@ -85,18 +153,23 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 - `Prepare-HeadlessReuse.ps1` 不加 `-Apply` 的计划，以及操作者明确 `-Apply` 后只改 headless、并能回滚。
 - 真实 `dsh --profile headless --session-id` 接续一条人工授权的演示会话。
 - 一次超时 120 秒、不自动重试的最小真实模型调用。这次没有发。
-- Desktop、Web、SuperAgent 仍然没有受支持的接管。
+- 这批 headless 测试只覆盖 headless profile。Desktop Host 的独立测试见[真机验收](verified-scope.md)。
 
-## 0.2.0 的安装、升级和回滚
+<a id="host-install"></a>
 
-先记录 `GET /v1/guard/membership` 的指纹，再从托盘选择 **Quit DeepSeek Harness**。使用 Desktop 安装目录里 `resources\runtime\cli\bin\dsh.cmd`，让执行安装的 CLI 和 Desktop 运行时版本一致。
+## Host 的安装、升级和回滚
+
+升级前先记录 `GET /v1/guard/membership` 的指纹，再从托盘选择 **Quit DeepSeek Harness**。使用 Desktop 安装目录里 `resources\runtime\cli\bin\dsh.cmd`，让执行安装的 CLI 和 Desktop 运行时版本一致。
 
 ```powershell
-$desktopCli = 'C:\path\to\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd'
-$backup = 'C:\path\to\private\desktop-host-upgrade'
+$desktopCli = Read-Host 'Desktop 自带的 dsh.cmd 的完整路径'
+$backup = Read-Host '本次安装或升级使用的私有空目录'
+$package = Read-Host 'dsh-control-bridge-host-0.2.1.tgz 的完整路径'
+$digest = Read-Host '同版本交付清单中的 TGZ SHA-256'
+$action = Read-Host '首次安装输入 Install，升级输入 Upgrade'
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Manage-DesktopHost.ps1 `
   -DshExe $desktopCli `
-  -Action Upgrade -Package .\dsh-control-bridge-host-0.2.0.tgz -Sha256 <manifest 中的 sha256> `
+  -Action $action -Package $package -Sha256 $digest `
   -BackupDir $backup
 ```
 

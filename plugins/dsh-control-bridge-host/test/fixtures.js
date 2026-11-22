@@ -128,6 +128,13 @@ export function officialCtx(overrides = {}) {
 
   const ctx = {
     state,
+    get(name) { return this[name] },
+    agentPresets: {
+      async resolve(id) {
+        if (['standard', 'master-control'].includes(id)) return { id }
+        throw Object.assign(new Error('unknown preset'), { code: 'agent-preset/not-found' })
+      },
+    },
     workspaceRegistry: {
       list() { return workspaces },
       get(id) { return workspaces.find((item) => item.id === id) },
@@ -156,6 +163,12 @@ export function officialCtx(overrides = {}) {
       },
     },
     sessionController: {
+      async projections({ sessionId }, signal) {
+        signal.throwIfAborted()
+        const row = state.sessions.find((item) => item.sessionId === sessionId)
+        if (!row) return null
+        return { kind: 'sequenced', asOfSeq: state.seq, values: row.projections?.values || {} }
+      },
       async list(request, signal) {
         if (!signal) throw new TypeError('sessionController.list requires a signal')
         return { items: state.sessions }
@@ -184,7 +197,7 @@ export function officialCtx(overrides = {}) {
           blank: false,
           agentAvailable: true,
           cwd,
-          projections: { kind: 'cached', asOfSeq: 0, values: { title: request.agentPreset || 'New chat' } },
+          projections: { kind: 'cached', asOfSeq: 0, values: { title: 'New chat', agentPreset: request.agentPreset ?? null } },
         })
         if (workspace) workspace.sessionIds.push(sessionId)
         state.liveSessions.add(sessionId)

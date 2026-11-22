@@ -6,6 +6,7 @@ import os
 from typing import Any
 from urllib.parse import urlparse
 
+from dsh_control_bridge import __version__
 from dsh_control_bridge.config import Config, dev_unsigned
 
 CONNECTOR_FACTS = (
@@ -59,7 +60,7 @@ def diagnose(config: Config) -> dict[str, Any]:
     if not any_harness:
         missing = []
     return {
-        "version": "0.1.0",
+        "version": __version__,
         "connected_to_harness": False,
         "connection_reason": (
             "no supported connector facts are loaded; the harness adapter does not call a network API"

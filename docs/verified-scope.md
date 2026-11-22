@@ -2,6 +2,12 @@
 
 本文记录 Windows Desktop 上的匿名验收和隔离测试。会话标识、路径、业务名称及凭据保存在本机。
 
+## 0.2.1 的主控会话创建
+
+在 Windows 上，用 DeepSeek Harness Desktop 0.2.2-rc.5 随附的 CLI 启动独立的官方 Web profile。该实例使用临时工作区、仅本机监听的端口和同 ID 的合成主控预设。Codex helper 连接 Host 0.2.1，获得 `preset_create_verified: true`，并在指定工作区创建了只读的空白会话。
+
+创建响应给出了 `agent_preset: "master-control"`、`agent_preset_source: "session_projection"` 和 `started_task: false`。独立读取该会话的官方投影，确认预设相同、`blank=true`，且没有对话轮次。核验后关闭了隔离服务。此次验证覆盖官方会话控制器的创建和回读；现用 Desktop GUI 保持原版本，未发送模型提示词或发起 SuperAgent Assignment。
+
 ## 0.1.5 上已经发生的一次往返
 
 环境是 Windows Desktop 0.2.2-rc.5，Host 插件 0.1.5。对象是一条已经授权的既有对话。安装用的是官方 `dsh plugin` CLI。

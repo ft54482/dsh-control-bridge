@@ -1,18 +1,29 @@
-<img src="docs/assets/hero.jpg" alt="横幅封面：左侧金色光球与规划草图，经一条光带连接到右侧青色代码屏幕。图中文字为 DSH Control Bridge，以及 Grok Bot × DeepSeek Harness。这是本仓库的项目封面，表示协调代理与 DeepSeek Harness 之间的控制桥。" width="100%">
+<img src="docs/assets/hero.jpg" alt="DSH Control Bridge — Codex / Grok Bot → DeepSeek Harness" width="100%">
 
 # DSH Control Bridge
 
-协调代理与多套 DeepSeek Harness 之间的控制桥。负责人定目标，协调代理审阅并起草任务书，Harness 在指定实例和工作区里执行，结果回到桥上等待验收。
+用 Codex 桌面端或 Grok Bot 把任务交给指定的 DeepSeek Harness 工作区。Codex 可以查找上次工作的上下文、回到原会话继续，也可以为独立任务新建主控会话。负责人在执行结束后验收结果。
 
 [![MIT license](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/downloads/)
 [![CI](https://github.com/ft54482/dsh-control-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/ft54482/dsh-control-bridge/actions/workflows/ci.yml)
 
-便携包里的使用顺序写在 [docs/windows-delivery.md](docs/windows-delivery.md)：安装桥、假进程自检、凭证配置、真实计费 smoke。默认不启动真实 `dsh`，也不发送模型请求。默认分支包含这份说明、封面和可运行的桥。这不是对全部 Harness 功能的控制。
+## 在 Codex 桌面端使用
+
+**Codex 桌面端支持这个独立 skill。** 在本机打开 Codex，技能从本机读配对文件，通过 `127.0.0.1` 访问正在运行的 DeepSeek Harness Desktop。它需要 Python 3.11+、已安装并配对的 Desktop Host，以及目标会话的相应授权。[OpenAI 技能文档](https://developers.openai.com/codex/skills/)
+
+1. 下载 [Codex skill ZIP（v0.2.1）](https://github.com/ft54482/dsh-control-bridge/releases/download/v0.2.1/deepseek-harness-bridge-0.2.1-skill.zip)，将里面的 `deepseek-harness-bridge` 文件夹解压到个人 `~/.agents/skills/`。也可在 Codex 中输入 `$skill-installer 从 GitHub 仓库 ft54482/dsh-control-bridge 的 skills/deepseek-harness-bridge 目录安装技能`。手动源码安装与升级命令见[桌面端配置](docs/windows-delivery.md#codex-desktop-setup)。
+2. 安装并配对 Harness Host，把长期凭据文件的**路径**配置给技能。先在 Codex 中输入 `$deepseek-harness-bridge 检查本机连接，列出已授权工作区`。这一步可验证连接与授权，无需发送模型任务。[安装与配对](docs/windows-delivery.md#codex-desktop-setup)
+3. 按意图使用下面两种说法。主控会话要求 Harness 已安装可信的 `master-control` 自定义 Agent 预设，并且 Host 支持创建后回读预设。[会话命令与回读字段](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
+
+| 你对 Codex 说 | Harness 中发生什么 |
+| --- | --- |
+| `$deepseek-harness-bridge 找到上次修导出格式的会话，接着处理未通过的用例。` | 在目标工作区查候选，会话历史与任务对上后，用原 `session_id` 续接，保留之前的决策和模型。 |
+| `$deepseek-harness-bridge 在同一工作区做一个无关的新任务，整理 README。` | 在同一工作区新建会话，确认 Harness 记录的预设为“主控模式”后再派工。预设缺失或无法确认时，保留现状并报告原因。 |
 
 ## 这是什么
 
-一个人把目标交给协调代理。协调代理可以是你自己运行的 Grok Bot，也可以是别的总控程序。它不直接代替 Harness 写代码或改仓库，而是通过这座桥做三件事：读事件、写成给人看的阶段摘要、把下一份任务书派回正确的实例和工作区。
+协调代理可以是 Codex、你自己运行的 Grok Bot，或使用桥接口的其他程序。它读取阶段事件，为负责人整理摘要，把下一份任务书交给指定实例和工作区的 Harness。
 
 DeepSeek Harness 负责执行，而且只有两条路：
 
@@ -21,13 +32,13 @@ DeepSeek Harness 负责执行，而且只有两条路：
 
 执行器说“做完了”，只表示任务进入 **待验收**。它不会自动变成交付完成，也不会自动合并、发布、扩大范围或追加预算。下一份任务书默认只起草，等人批准后再发送。
 
-本仓库是独立的开源控制桥。Grok Bot 指负责人自己运行的协调代理，DeepSeek Harness 指执行环境，不是这些产品的官方组件，也不表示其厂商提供支持。这里没有看板，也没有托管网关。
+本仓库是独立的开源项目。Codex 和 Grok Bot 在这里承担协调工作，DeepSeek Harness 提供执行环境。
 
 ## English
 
 DSH Control Bridge is a small control plane between a coordinating agent and one or more DeepSeek Harness instances. A person sets the goal. The coordinator reviews events, writes the next task brief, and dispatches it only after an explicit approval. Harness runs the work as an ordinary session or as SuperAgent. A completion report means “ready for review”. The default action is to draft the next brief and wait.
 
-This repository is an independent project. Credentials stay outside git, and the bundled Harness adapter is a documented skeleton until a public interface is connected.
+The standalone Codex skill works in the desktop app with a paired local Harness Host. It finds related work from authorized history and resumes the original session. Unrelated work starts in a fresh session in the same workspace after Harness confirms the operator-installed `master-control` preset. See the [session commands](skills/deepseek-harness-bridge/references/desktop.md).
 
 ## 为什么存在
 
@@ -244,7 +255,6 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 
 既有 home 默认不用。`home_mode = "shared"` 只打开配置里点名的工作区和 session，不能把读到历史文件当成原生 resume。Desktop 的续接走安装到 desktop profile 的 Host 插件，见 [plugins/dsh-control-bridge-host/README.md](plugins/dsh-control-bridge-host/README.md)。Host 0.2.0 在 0.1.6 的可重布防配对窗口之上，增加了持久请求日志与 SSE/长轮询、全局发现、逐会话 effort 控制，以及需要显式开启的创建/打开目录端点。SuperAgent 查询使用独立的官方管理面，新派工由配置的 Source 触发。见 [Host API](docs/host-api.md) 和 [0.2.0 交付记录](docs/release-0.2.0.md)。
 
-Codex 可以通过 `$deepseek-harness-bridge` 操作本机 Desktop。安装技能时将 `skills/deepseek-harness-bridge` 复制到 `~/.codex/skills/`，然后按技能入口配置本机 bearer 文件路径。技能包含 Python 标准库 CLI，支持 0.1.6 的授权会话操作以及 0.2.0 的发现、创建和请求事件。见 [技能入口](skills/deepseek-harness-bridge/SKILL.md)。
 
 ## 事件
 

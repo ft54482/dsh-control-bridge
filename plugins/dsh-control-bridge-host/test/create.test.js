@@ -155,6 +155,114 @@ test('a session is created through the official API, granted, and never uses the
   await close(started.server)
 })
 
+test('a new task gets a fresh verified preset Session in the existing workspace', async (t) => {
+  const { real } = tempRoot()
+  const ctx = officialCtx()
+  const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'project-')))
+  const started = await startServer(ctx, writable({ workspaceRoots: [real], allowCreateSession: true }))
+  t.after(() => close(started.server))
+  const health = await call(started.port, 'GET', '/v1/health')
+  assert.equal(health.body.preset_create_verified, true)
+  const body = { workspace_id: ws.id, access: 'write', agent_preset: 'master-control' }
+  const first = await call(started.port, 'POST', '/v1/sessions', body)
+  const next = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.notEqual(first.body.session_id, next.body.session_id)
+  for (const receipt of [first, next]) {
+    assert.equal(receipt.status, 200)
+    assert.equal(receipt.body.agent_preset, 'master-control')
+    assert.equal(receipt.body.agent_preset_source, 'session_projection')
+    assert.equal(receipt.body.workspace_id, ws.id)
+    assert.equal(receipt.body.grant.access, 'write')
+    assert.ok(ws.sessionIds.includes(receipt.body.session_id))
+    assert.equal(receipt.body.started_task, false)
+  }
+  assert.equal(ctx.state.prompts, 0)
+})
+
+test('unavailable and broken presets fail before creating or granting anything', async (t) => {
+  const { real } = tempRoot()
+  const ctx = officialCtx()
+  const started = await startServer(ctx, writable({
+    workspaceRoots: [real], allowCreateSession: true, allowCreateWorkspace: true,
+  }))
+  t.after(() => close(started.server))
+  const body = { path: real, create_workspace: true, agent_preset: 'missing' }
+  const send = () => call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal((await send()).body.reason, 'agent-preset/not-found')
+  ctx.agentPresets.resolve = async () => ({ id: 'missing', broken: 'diagnostic' })
+  assert.equal((await send()).body.reason, 'agent-preset/invalid')
+  delete ctx.agentPresets
+  assert.equal((await send()).body.reason, 'preset_creation_unavailable')
+  const health = await call(started.port, 'GET', '/v1/health')
+  assert.equal(health.body.preset_create_verified, false)
+  assert.equal(ctx.state.createdWorkspaces, undefined)
+  assert.equal(ctx.state.createCalls, undefined)
+  assert.equal(started.store.snapshot().sessionAllowlist.length, 1)
+})
+
+test('a mismatched create receipt or unverified projection leaves the new Session ungranted', async (t) => {
+  const { real } = tempRoot()
+  const ctx = officialCtx()
+  const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'project-')))
+  const started = await startServer(ctx, writable({ workspaceRoots: [real], allowCreateSession: true }))
+  t.after(() => close(started.server))
+  const create = ctx.sessionController.create.bind(ctx.sessionController)
+  for (const [returned, projection] of [
+    ['standard', { kind: 'sequenced', values: { agentPreset: 'master-control' } }],
+    ['master-control', { kind: 'sequenced', values: { agentPreset: 'standard' } }],
+    ['master-control', { kind: 'migration-required', values: { agentPreset: 'master-control' } }],
+    ['master-control', null],
+  ]) {
+    ctx.sessionController.create = async (request) => ({ ...await create(request), agentPreset: returned })
+    ctx.sessionController.projections = async () => projection
+    const result = await call(started.port, 'POST', '/v1/sessions', {
+      workspace_id: ws.id, access: 'write', agent_preset: 'master-control',
+    })
+    assert.equal(result.status, 409)
+    assert.equal(result.body.reason, 'agent_preset_unverified')
+    assert.equal(result.body.workspace_id, ws.id)
+    assert.ok(ws.sessionIds.includes(result.body.session_id))
+    assert.equal(result.body.started_task, false)
+    assert.equal(result.body.saved, false)
+  }
+  assert.equal(started.store.snapshot().sessionAllowlist.length, 1)
+  assert.equal(ctx.state.prompts, 0)
+})
+
+test('preset creation rejects caller IDs and preserves the identity of a partially created Session', async (t) => {
+  const { real } = tempRoot()
+  const ctx = officialCtx()
+  const ws = await ctx.workspaceRegistry.create(fs.mkdtempSync(path.join(real, 'project-')))
+  const started = await startServer(ctx, writable({ workspaceRoots: [real], allowCreateSession: true }))
+  t.after(() => close(started.server))
+  const body = { workspace_id: ws.id, agent_preset: 'master-control', access: 'write' }
+  const create = () => call(started.port, 'POST', '/v1/sessions', body)
+  const reused = await call(started.port, 'POST', '/v1/sessions', { ...body, session_id: 'session-demo' })
+  assert.equal(reused.status, 400)
+  assert.equal(reused.body.reason, 'omit_session_id_for_preset_create')
+  assert.equal(ctx.state.createCalls, undefined)
+  assert.equal(started.store.snapshot().sessionAllowlist.length, 1)
+  ctx.sessionController.create = async () => {
+    throw Object.assign(new Error('attach failed'), {
+      code: 'session/workspace-attach-failed', details: { sessionId: 'minted', workspaceId: ws.id },
+    })
+  }
+  const partial = await create()
+  assert.equal(partial.body.reason, 'session/workspace-attach-failed')
+  assert.equal(partial.body.session_id, 'minted')
+  assert.equal(partial.body.manual_reconcile, true)
+  ctx.sessionController.create = async () => { throw Object.assign(new Error(), { code: 'gateway/internal' }) }
+  const unknown = await create()
+  assert.equal(unknown.status, 502)
+  assert.equal(unknown.body.manual_reconcile, true)
+  ctx.sessionController.create = async () => ({ agentPreset: 'master-control' })
+  const missing = await create()
+  assert.equal(missing.body.reason, 'create_returned_no_session_id')
+  assert.equal(missing.body.manual_reconcile, true)
+  assert.equal(started.store.snapshot().sessionAllowlist.length, 1)
+  assert.equal(ctx.state.prompts, 0)
+})
+
 test('a created session and its grant survive a Host restart', async () => {
   const { root, real } = tempRoot()
   const project = fs.mkdtempSync(path.join(root, 'project-'))

@@ -17,16 +17,42 @@ Examples use `desktop.py` from `scripts/`. Use `--data` with a UTF-8 JSON file o
 | `model-catalog`, `outbox` | Optional `limit` for `outbox` | 0.2.0 |
 | `events`, `wait`, `stream` | `--request-id ID`, optional `timeout_ms` for `events` and `wait`, `after_seq` for `events`, `--last-event-id N` for `stream` | 0.2.0 |
 | `create-workspace` | `path`, optional `title`, `create_directory` | 0.2.0 |
-| `create-session` | `workspace_id`, optional `session_id`, `title`, `access`, `model` | 0.2.0 |
+| `create-session` | `workspace_id`, optional `title`, `access`, `model`, `agent_preset`. Harness assigns a fresh session ID. | 0.2.1 with verified preset creation |
 | `open` | `path`, optional `action` (`reveal`) | 0.2.0 |
 
 ```powershell
-python desktop.py history --param session_id=SESSION --param limit=5
+python desktop.py discover --param workspace_id=WORKSPACE --param kind=top --param limit=25
+python desktop.py granted
+python desktop.py history --param session_id=SESSION --param offset=0 --param limit=5
 python desktop.py resume --data task.json
 python desktop.py request --param session_id=SESSION --param request_id=REQUEST
 python desktop.py wait --request-id REQUEST --param timeout_ms=20000
 python desktop.py stream --request-id REQUEST --last-event-id 0
 ```
+
+The uppercase IDs stand for values returned by your Host. For a continuation, match the task against the authorized history, check that the session belongs to the intended workspace, is idle and grants `write`, then use the **same session ID** in `task.json`. Use a fresh request ID and the authorized task text for that turn. If history reading failed, resolve the grant or service error before drawing a conclusion about prior work.
+
+## New work in master-control mode
+
+The preset is a Harness profile dependency shared by that profile's workspaces. In the same Harness profile, open **Plugins → Add plugin** and install your trusted local preset bundle. When the plugin manager tools are available, you can also use `install_bundle` and check `list_plugins`. Open a blank session in the target workspace and verify **主控模式** appears in its preset picker. The bundle must register `master-control` as the preset ID. Installing the Codex skill supplies its bridge commands. The preset's persona and tool permissions come from the Harness installation.
+
+The Codex helper adds `agent_preset: "master-control"` even if its `create-session` input contains only `workspace_id`, and verifies the resulting session. Direct callers of the Host's HTTP `POST /v1/sessions` retain its existing behavior when they omit `agent_preset`. Use the helper for the Codex workflow.
+
+1. Check `health` for `preset_create_verified: true` (Host 0.2.1+). The Host also needs `allowCreateSession` and a `workspaceRoots` entry containing the target workspace as a subdirectory. An older Host can still handle authorized continuations. To automate verified preset creation, install a Host build advertising that capability.
+2. Create a UTF-8 `new-session.json` locally with the body below. Replace `WORKSPACE` with the confirmed workspace ID. Choose `write` when you intend to submit a task. Omitted access defaults to `read`.
+
+   ```json
+   {"workspace_id":"WORKSPACE","access":"write","agent_preset":"master-control"}
+   ```
+
+3. Run `python desktop.py create-session --data new-session.json`. Keep the returned `session_id`. Require a successful response with the intended `workspace_id`, `agent_preset: "master-control"` and `agent_preset_source: "session_projection"`. This verifies the selected preset recorded by Harness. Creation itself does not submit the task.
+4. If creation reports a missing preset, an unavailable capability, a mismatched selection, or an uncertain outcome, stop before sending a prompt. If a session ID was returned, retain it and reconcile it with the workspace and grants before any retry. After verified creation, use that ID, the authorized task and a new request ID in `task.json`:
+
+   ```json
+   {"session_id":"SESSION","request_id":"NEW-REQUEST-ID","text":"Summarize the repository layout."}
+   ```
+
+**Manual option for older Hosts.** In Harness Desktop, create a blank session in the intended workspace and select **主控模式** in that session's preset picker. Reopen the same session and verify the preset label beside its title displays **主控模式** or `master-control`. Pair that exact session and confirm its ID and write grant before using the existing-session `resume` flow. This route requires observed Desktop confirmation. An installation default or the unconfirmed selection in the picker cannot verify the individual session.
 
 On 0.1.6 `resume` may block until the bridge's wait expires. Keep the command running in the background while checking the same request. For 0.2.0 SSE the helper emits one JSON object per frame with `event`, `id`, and `data`. Keep the last nonempty `id` to reconnect. After a stream ends, read `request` for the official outcome and full result. `stop-wait` affects bridge observation only. `cancel` is for the exact owned active request and final cancellation still requires an official terminal record.
 
