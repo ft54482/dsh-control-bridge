@@ -67,7 +67,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 
-兼容目标是带 0.2.2 session controller 的 Desktop（操作者看到的 CLI 是 0.2.2-rc.5）。插件 0.1.5 在一台 Windows Desktop 上完成过一次已授权既有会话的 resume。那次记录和仍未验证的项目写在 [verified-scope.md](verified-scope.md)。Web 上能加载不等于 Desktop 已验收。同名可执行文件加上 `--profile superagent --no-open` 不是 Desktop；`desktop_install` 只在外壳、desktop profile 或读不到命令行时阻断安装，并且不结束进程。
+兼容目标是带 0.2.2 session controller 的 Desktop（操作者看到的 CLI 是 0.2.2-rc.5）。插件 0.1.5 在一台 Windows Desktop 上完成过一次已授权既有会话的 resume。0.1.6 的请求查询和官方取消只在夹具里验证过，步骤见 [request-lifecycle.md](request-lifecycle.md)。那次记录和仍未验证的项目写在 [verified-scope.md](verified-scope.md)。Web 上能加载不等于 Desktop 已验收。同名可执行文件加上 `--profile superagent --no-open` 不是 Desktop；`desktop_install` 只在外壳、desktop profile 或读不到命令行时阻断安装，并且不结束进程。
 
 ## 本环境没有做的 Windows 实测
 

@@ -346,14 +346,16 @@ test('a turn that never finishes reports a timeout and is not retried', async ()
   assert.equal(result.status, 200)
   assert.equal(result.body.accepted, true)
   assert.equal(result.body.completed, false)
-  assert.equal(result.body.final.reason.kind, 'timeout')
+  assert.equal(result.body.final.reason.kind, 'bridge_timeout')
+  assert.equal(result.body.model_timeout, false)
+  assert.equal(result.body.terminal_scope, 'bridge_wait')
   assert.equal(result.body.timeout_ms, 1_000)
   assert.equal(ctx.state.prompts, 1)
   // a repeated request id replays the terminal answer instead of prompting again
   const replay = await call(started.port, 'POST', '/v1/resume', {
     workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-timeout', text: 'go',
   })
-  assert.equal(replay.body.final.reason.kind, 'timeout')
+  assert.equal(replay.body.final.reason.kind, 'bridge_timeout')
   assert.equal(ctx.state.prompts, 1)
   await close(started.server)
 })
@@ -455,7 +457,8 @@ test('a second request on the same session is refused while one is waiting', asy
   assert.equal(second.status, 409)
   assert.equal(second.body.reason, 'bridge_request_in_flight')
   const firstResult = await first
-  assert.equal(firstResult.body.final.reason.kind, 'timeout')
+  assert.equal(firstResult.body.final.reason.kind, 'bridge_timeout')
+  assert.equal(firstResult.body.model_timeout, false)
   assert.equal(ctx.state.prompts, 1)
   await close(started.server)
 })

@@ -1,5 +1,7 @@
 import fs from 'node:fs'
+import path from 'node:path'
 import { createGrantStore, loadAllowlistFile } from './grants.js'
+import { loadRequestFile } from './requests.js'
 import { decideListen } from './policy.js'
 import { createHostServer } from './server.js'
 
@@ -48,6 +50,16 @@ export function apply(ctx, config = {}) {
     : loaded.state
   // One authority for memory and disk; pairing, access changes, and revocation
   // all go through it, and a failed save never changes the in-memory grants.
+  const requestsFile = config.requestsFile || (config.allowlistFile ? path.join(path.dirname(config.allowlistFile), 'requests.json') : '')
+  const requestsLoaded = loadRequestFile(requestsFile)
+  if (requestsLoaded.status === 'invalid') {
+    return {
+      listening: false,
+      reason: 'requests_unreadable',
+      outbound: false,
+      detail: requestsLoaded.detail,
+    }
+  }
   const grants = createGrantStore({ file: config.allowlistFile, initial })
   const snapshot = grants.snapshot()
   const count = snapshot.workspaceAllowlist.length + snapshot.sessionAllowlist.length
@@ -77,6 +89,7 @@ export function apply(ctx, config = {}) {
   const server = createHostServer(ctx, {
     ...config,
     grants,
+    requestsFile,
     globalDefault,
     busyPolicy: config.busyPolicy || 'refuse',
     consumeBootstrap() {

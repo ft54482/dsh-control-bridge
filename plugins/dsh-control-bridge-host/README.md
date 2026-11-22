@@ -76,11 +76,11 @@ Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-c
 Quit Desktop from the tray first. The bridge does not quit it. The tray's **Quit DeepSeek Harness** asks the Host about unfinished work before exiting; there is no supported external quit command, so the tray is the only path.
 
 ```text
-dsh plugin --profile desktop add dsh-control-bridge-host-0.1.5.tgz
+dsh plugin --profile desktop add dsh-control-bridge-host-0.1.6.tgz
 ```
 
 `Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable. An empty allowlist with no armed bootstrap does not open the port. After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy.
 
-Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. The machine-verified package is 0.1.5. A documentation commit does not replace that package.
+Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. The machine-verified package is still 0.1.5. Host 0.1.6 adds the request ledger, query, and owned-turn cancel described in `docs/request-lifecycle.md`. Those paths are fixture-tested only.
 
 The listener is `127.0.0.1` only. It has no outbound call.

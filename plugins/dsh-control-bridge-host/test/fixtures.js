@@ -143,6 +143,19 @@ export function officialCtx(overrides = {}) {
           error.name = 'AbortError'
           throw error
         }
+        if (state.holdTurn) {
+          const start = ++state.seq
+          state.events.push({ seq: start, type: 'turn/start', time: Date.now(), data: { turn: 7 } })
+          state.events.push({
+            seq: ++state.seq,
+            type: 'user/message',
+            time: Date.now(),
+            data: { content: body.content || [], source: { kind: 'user', rpcId: body.requestId } },
+          })
+          const row = state.sessions.find((item) => item.sessionId === body.sessionId)
+          if (row) row.running = true
+          return { accepted: true }
+        }
         if (state.autoComplete) {
           const text = (body.content || []).map((part) => part.text).join(' ')
           const start = ++state.seq
@@ -170,8 +183,26 @@ export function officialCtx(overrides = {}) {
         // The official value carries no text, no session id, and no final.
         return { accepted: true }
       },
-      cancel() {
+      cancel(request) {
+        if (!request || typeof request.sessionId !== 'string') {
+          state.cancelRejected = (state.cancelRejected || 0) + 1
+          return { accepted: false }
+        }
+        state.cancelCalls = state.cancelCalls || []
+        state.cancelCalls.push({ sessionId: request.sessionId })
         state.cancelled += 1
+        const open = [...state.events].reverse().find((event) => event.type === 'turn/start')
+        const closed = open && state.events.some((event) => event.type === 'turn/end' && event.seq > open.seq)
+        if (open && !closed) {
+          state.events.push({
+            seq: ++state.seq,
+            type: 'turn/end',
+            time: Date.now(),
+            data: { turn: open.data && open.data.turn, reason: { kind: 'aborted' } },
+          })
+        }
+        const row = state.sessions.find((item) => item.sessionId === request.sessionId)
+        if (row) row.running = false
         return { accepted: true }
       },
     },
@@ -242,6 +273,7 @@ export async function startServer(ctx, options = {}) {
   const { store, file, dir } = options.store
     ? { store: options.store, file: options.file || '', dir: options.dir || '' }
     : makeStore(options.initial)
+  const requestsFile = options.requestsFile || (dir ? path.join(dir, 'requests.json') : '')
   const server = createHostServer(ctx, {
     grants: store,
     busyPolicy: 'refuse',
@@ -249,10 +281,12 @@ export async function startServer(ctx, options = {}) {
       || (() => ({ provider: 'example-provider', model: 'example-model' })),
     resumeTimeoutMs: options.resumeTimeoutMs,
     pollIntervalMs: options.pollIntervalMs || 10,
+    requestsFile,
+    ledger: options.ledger,
   }, options.secret || SECRET)
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
-  return { server, port: server.address().port, store, file, dir }
+  return { server, port: server.address().port, store, file, dir, requestsFile }
 }
 
 export async function call(port, method, pathname, body, secret = SECRET) {

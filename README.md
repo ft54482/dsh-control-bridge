@@ -286,6 +286,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 | 本地自检、diagnose、preflight | 已实现 |
 | 通知出站：默认关闭；失败状态可查询 | 已实现 |
 | Desktop 上一条已授权既有会话的一次 resume | 插件 0.1.5 在 Windows Desktop 0.2.2-rc.5 上有一次匿名记录，见 [docs/verified-scope.md](docs/verified-scope.md)。这不是对全部 Harness 功能的控制 |
+| Host 0.1.6 的请求查询和官方取消 | 只在夹具中验证，见 [docs/request-lifecycle.md](docs/request-lifecycle.md)。还没有真机验收 |
 | 冷会话改模型、取消/超时的完整生命周期、跨工作区闭环 | 未在真机验证。模拟测试不能写成已经通过 |
 | SuperAgent 派工 | 未实现 |
 | 看板、托管网关、A2A 协议、商业 Harness CI 插件 | 不在本仓库 |

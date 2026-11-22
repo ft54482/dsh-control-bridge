@@ -8,6 +8,7 @@ import {
   authorizeSession, authorizeWorkspace, checkAuth, decideResume, loopbackPeer, pageHistory,
   promptBody, redactText, rejectBrowser, selectGrant, terminalKind, visibleSessions, visibleWorkspaces,
 } from './policy.js'
+import { classifyOwnedTurn, contentHash, createRequestLedger } from './requests.js'
 
 const DEFAULT_RESUME_TIMEOUT_MS = 120_000
 const DEFAULT_POLL_INTERVAL_MS = 500
@@ -93,6 +94,8 @@ export function createHostServer(ctx, config, secret) {
   const seen = new Map()
   const live = new Map()
   const inflight = new Map()
+  const waiters = new Map()
+  const ledger = config.ledger || createRequestLedger({ file: config.requestsFile || '' })
   const resumeTimeoutMs = Math.min(
     DEFAULT_RESUME_TIMEOUT_MS,
     Math.max(1_000, Number(config.resumeTimeoutMs) || DEFAULT_RESUME_TIMEOUT_MS),
@@ -105,6 +108,126 @@ export function createHostServer(ctx, config, secret) {
     if (!grants) throw new Error('grant store is not configured')
     grants.refresh()
     return grants.snapshot()
+  }
+
+  async function recoverStored(sessionId, requestId, record) {
+    if (record && record.response && record.phase === 'terminal') {
+      return { status: record.http_status || 200, body: record.response }
+    }
+    let snap
+    try {
+      snap = await readSnapshot(ctx.sessionQuery, sessionId)
+    } catch (error) {
+      return {
+        status: 502,
+        body: {
+          accepted: record.accepted === true,
+          completed: false,
+          reason: 'session_read_failed',
+          session_id: sessionId,
+          request_id: requestId,
+          started_task: record.started_task === true,
+          exactly_once: false,
+          detail: safeError(error, 'sessionQuery.readSession'),
+        },
+      }
+    }
+    const owned = classifyOwnedTurn(snap.events, requestId)
+    if (owned.turn && owned.turn.attribution === 'request_id' && owned.ended) {
+      const built = describeTurn(sessionId, requestId, record, snap, owned.turn)
+      try {
+        await ledger.update(requestId, {
+          phase: 'terminal',
+          crash_window: false,
+          manual_reconcile: false,
+          accepted: true,
+          started_task: true,
+          terminal_scope: 'official',
+          response: built,
+        })
+      } catch {
+        return { status: 500, body: { ...built, completed: false, reason: 'request_persist_failed', exactly_once: false } }
+      }
+      return { status: 200, body: built }
+    }
+    if (record.phase === 'accepted' && owned.owned) {
+      return {
+        status: 200,
+        body: {
+          accepted: true,
+          completed: false,
+          phase: 'running',
+          terminal: null,
+          session_id: sessionId,
+          request_id: requestId,
+          started_task: true,
+          exactly_once: false,
+          requested_model: record.requested_model,
+          confirmed_selection: record.confirmed_selection,
+          note: 'the prompt was accepted; this read does not send it again',
+        },
+      }
+    }
+    if (record.terminal_scope === 'bridge_wait' && record.response) {
+      return { status: 200, body: record.response }
+    }
+    try {
+      await ledger.update(requestId, { phase: 'unknown', manual_reconcile: true, crash_window: true })
+    } catch {
+      return {
+        status: 500,
+        body: { accepted: null, completed: false, reason: 'request_persist_failed', session_id: sessionId, request_id: requestId, started_task: false, exactly_once: false },
+      }
+    }
+    return {
+      status: 409,
+      body: {
+        accepted: record.accepted,
+        completed: false,
+        reason: 'manual_reconcile',
+        session_id: sessionId,
+        request_id: requestId,
+        phase: 'unknown',
+        started_task: record.prompt_attempted === true,
+        exactly_once: false,
+        resend: false,
+        detail: 'the bridge cannot prove whether the official prompt was admitted; it will not send the prompt again',
+      },
+    }
+  }
+
+  function describeTurn(sessionId, requestId, record, snap, turn) {
+    const answer = turnAnswer(snap.events, turn)
+    const execution = executionModelForTurn(snap.events, turn)
+    const confirmedSelection = record.confirmed_selection
+    const modelMatch = execution ? sameRoute(execution, confirmedSelection) : null
+    let terminal = terminalKind(answer.reason)
+    let finalReason = answer.reason || { kind: terminal }
+    if (modelMatch === false) {
+      terminal = 'model_mismatch'
+      finalReason = { kind: 'model_mismatch', requested: confirmedSelection, execution }
+    }
+    return {
+      accepted: true,
+      completed: terminal === 'completed',
+      phase: 'terminal',
+      terminal_scope: 'official',
+      session_id: sessionId,
+      request_id: requestId,
+      model_selection: record.explicit_model ? 'session_selected_by_bridge' : 'session_recorded_not_overridden',
+      requested_model: record.requested_model,
+      confirmed_selection: confirmedSelection,
+      execution_model: execution,
+      execution_model_source: execution ? 'request_header' : 'unknown',
+      model_match: modelMatch,
+      text: redactText(answer.texts.join('\n\n')),
+      final: { reason: finalReason },
+      terminal,
+      turn: turn.number,
+      attribution: turn.attribution,
+      started_task: true,
+      exactly_once: false,
+    }
   }
 
   /** The deployment default, reported separately and never as a Session model. */
@@ -432,7 +555,10 @@ export function createHostServer(ctx, config, secret) {
         const body = await readJson(req)
         const requestId = typeof body.request_id === 'string' ? body.request_id : ''
         const sessionId = typeof body.session_id === 'string' ? body.session_id : ''
-        if (seen.has(requestId)) return send(res, 200, seen.get(requestId))
+        if (waiters.has(requestId)) {
+          const shared = await waiters.get(requestId)
+          return send(res, shared.status, shared.body)
+        }
         if (typeof body.text !== 'string' || body.text.trim().length === 0) {
           return send(res, 400, { accepted: false, reason: 'empty_text', session_id: sessionId, started_task: false })
         }
@@ -554,6 +680,61 @@ export function createHostServer(ctx, config, secret) {
             started_task: false,
           })
         }
+        const hash = contentHash({ sessionId, text: body.text, model: requested })
+        let claim
+        try {
+          claim = await ledger.claim({
+            requestId,
+            sessionId,
+            workspaceId: body.workspace_id || view.workspaceId,
+            contentHash: hash,
+            requestedModel: requested,
+            confirmedSelection: confirmed,
+            explicitModel,
+          })
+        } catch {
+          return send(res, 500, {
+            accepted: false, completed: false, reason: 'request_persist_failed',
+            session_id: sessionId, request_id: requestId, started_task: false, exactly_once: false,
+          })
+        }
+        if (claim.conflict) {
+          return send(res, 409, {
+            accepted: false, completed: false, reason: 'idempotency_conflict',
+            session_id: sessionId, request_id: requestId, started_task: false,
+            detail: 'this request id is already bound to different content or a different session',
+          })
+        }
+        if (!claim.created) {
+          if (waiters.has(requestId)) {
+            const shared = await waiters.get(requestId)
+            return send(res, shared.status, shared.body)
+          }
+          const reused = await recoverStored(sessionId, requestId, claim.record)
+          return send(res, reused.status, reused.body)
+        }
+        let settleWait
+        const pendingResult = new Promise((resolve) => { settleWait = resolve })
+        waiters.set(requestId, pendingResult)
+        const publish = async (status, payload, patch) => {
+          let nextStatus = status
+          let nextBody = payload
+          try {
+            await ledger.update(requestId, patch)
+          } catch {
+            nextStatus = 500
+            nextBody = {
+              ...payload,
+              completed: false,
+              reason: 'request_persist_failed',
+              exactly_once: false,
+              started_task: payload.started_task === true,
+            }
+          }
+          settleWait({ status: nextStatus, body: nextBody })
+          waiters.delete(requestId)
+          return send(res, nextStatus, nextBody)
+        }
         const controller = new AbortController()
         live.set(requestId, controller)
         inflight.set(sessionId, requestId)
@@ -566,14 +747,16 @@ export function createHostServer(ctx, config, secret) {
           } catch (error) {
             const detail = safeError(error, 'sessionQuery.readSession')
             note(config, [detail])
-            return send(res, 502, { accepted: false, reason: detail.code, session_id: sessionId, started_task: false, detail })
+            return publish(502, { accepted: false, reason: detail.code, session_id: sessionId, started_task: false, detail, exactly_once: false }, {
+              phase: 'unknown', manual_reconcile: true, crash_window: true,
+            })
           }
           const lastSeq = lastSeqOf(before)
           // The selection must still be the one confirmed above, and the adapter
           // must still be registered: both can change between preflight and send.
           const liveBeforeSend = agentSelection(liveAgent(ctx, sessionId))
           if (liveBeforeSend && !sameRoute(liveBeforeSend, confirmed)) {
-            return send(res, 409, {
+            return publish(409, {
               accepted: false,
               completed: false,
               reason: 'model_changed_before_send',
@@ -582,11 +765,11 @@ export function createHostServer(ctx, config, secret) {
               current_selection: liveBeforeSend,
               detail: 'the selection changed after the preflight; nothing was sent',
               started_task: false,
-            })
+            }, { phase: 'unknown', manual_reconcile: true, crash_window: true })
           }
           const availableBeforeSend = await checkSelection(ctx, liveBeforeSend || confirmed)
           if (!availableBeforeSend.available) {
-            return send(res, 409, {
+            return publish(409, {
               accepted: false,
               completed: false,
               reason: availableBeforeSend.reason,
@@ -594,9 +777,17 @@ export function createHostServer(ctx, config, secret) {
               requested_model: requested,
               confirmed_selection: confirmed,
               started_task: false,
-            })
+            }, { phase: 'unknown', manual_reconcile: true, crash_window: true })
           }
           let accepted
+          try {
+            await ledger.update(requestId, { prompt_attempted: true })
+          } catch {
+            return publish(500, {
+              accepted: false, completed: false, reason: 'request_persist_failed',
+              session_id: sessionId, request_id: requestId, started_task: false, exactly_once: false,
+            }, { prompt_attempted: false })
+          }
           try {
             accepted = await ctx.sessionController.prompt(promptBody({
               sessionId,
@@ -605,30 +796,45 @@ export function createHostServer(ctx, config, secret) {
             }), controller.signal)
           } catch (error) {
             if (error && error.name === 'AbortError') {
-              return send(res, 409, {
-                accepted: false,
-                reason: 'cancelled',
+              return publish(409, {
+                accepted: null,
+                completed: false,
+                reason: 'manual_reconcile',
+                scope: 'unreconciled',
+                desktop_cancel_called: false,
                 session_id: sessionId,
-                scope: 'bridge_request',
-                desktop_turn_kept: null,
-                detail: 'the wait was aborted before an acknowledgement arrived; acceptance is unknown',
+                request_id: requestId,
+                detail: 'the wait stopped before an acknowledgement; the bridge will not send this prompt again',
                 started_task: false,
-              })
+                exactly_once: false,
+                resend: false,
+              }, { phase: 'unknown', manual_reconcile: true, crash_window: true, prompt_attempted: true })
             }
             const detail = safeError(error, 'sessionController.prompt')
             note(config, [detail])
-            return send(res, 502, { accepted: false, reason: 'host_error', session_id: sessionId, started_task: false, detail })
+            return publish(502, {
+              accepted: null, completed: false, reason: 'manual_reconcile', session_id: sessionId,
+              request_id: requestId, started_task: false, exactly_once: false, resend: false, detail,
+            }, { phase: 'unknown', manual_reconcile: true, crash_window: true, prompt_attempted: true })
           }
           if (!accepted || accepted.accepted !== true) {
-            return send(res, 502, {
+            const rejected = {
               accepted: false,
+              completed: false,
               reason: 'prompt_not_accepted',
               session_id: sessionId,
+              request_id: requestId,
               started_task: false,
+              exactly_once: false,
               detail: 'the host did not acknowledge the prompt',
+            }
+            return publish(502, rejected, {
+              phase: 'terminal', terminal_scope: 'admission', crash_window: false,
+              accepted: false, started_task: false, response: rejected, http_status: 502,
             })
           }
           acceptedOnce = true
+          await ledger.update(requestId, { phase: 'accepted', accepted: true, started_task: true, crash_window: true })
           const deadline = startedAt + resumeTimeoutMs
           let turn = null
           let lastSnapshot = before
@@ -639,16 +845,19 @@ export function createHostServer(ctx, config, secret) {
             const current = state()
             const still = authorizeSession(current, view, { workspaceId: view.workspaceId, need: 'write' })
             if (!still.ok) {
-              return send(res, 409, {
-                // The prompt was accepted before the grant changed; saying
-                // "not accepted" would invite a duplicate send.
+              const revoked = {
                 accepted: true,
                 completed: false,
                 reason: 'revoked_during_wait',
                 session_id: sessionId,
+                request_id: requestId,
                 started_task: true,
                 queued_prompt_kept: true,
+                exactly_once: false,
                 detail: 'the grant changed while this request was waiting; the queued prompt is not withdrawn',
+              }
+              return publish(409, revoked, {
+                phase: 'accepted', accepted: true, started_task: true, response: null,
               })
             }
             if (Date.now() >= deadline) break
@@ -688,8 +897,10 @@ export function createHostServer(ctx, config, secret) {
                 started_task: true,
                 note: 'more than one new turn appeared; no text was attributed and no retry was sent',
               }
-              seen.set(requestId, ambiguous)
-              return send(res, 200, ambiguous)
+              return publish(200, ambiguous, {
+                phase: 'terminal', terminal_scope: 'official', crash_window: false,
+                accepted: true, started_task: true, response: ambiguous,
+              })
             }
             if (turn && turn.end) break
           }
@@ -706,7 +917,10 @@ export function createHostServer(ctx, config, secret) {
               execution_model_source: executionModelForTurn(lastSnapshot.events, turn) ? 'request_header' : 'unknown',
               model_match: null,
               text: '',
-              final: { reason: { kind: 'timeout' } },
+              final: { reason: { kind: 'bridge_timeout' } },
+              terminal: 'bridge_timeout',
+              terminal_scope: 'bridge_wait',
+              model_timeout: false,
               turn: turn && turn.number !== null ? turn.number : null,
               last_seq: lastSeqOf(lastSnapshot),
               timeout_ms: resumeTimeoutMs,
@@ -716,8 +930,10 @@ export function createHostServer(ctx, config, secret) {
               started_task: true,
               note: 'the prompt was accepted but the turn did not finish before the timeout; no retry was sent',
             }
-            seen.set(requestId, timedOut)
-            return send(res, 200, timedOut)
+            return publish(200, timedOut, {
+              phase: 'accepted', terminal_scope: 'bridge_wait', crash_window: false,
+              accepted: true, started_task: true, response: timedOut,
+            })
           }
           const answer = turnAnswer(lastSnapshot.events, turn)
           // A turn that ended is not the same as a turn that succeeded: only a
@@ -757,28 +973,40 @@ export function createHostServer(ctx, config, secret) {
             elapsed_ms: Date.now() - startedAt,
             started_task: true,
           }
-          seen.set(requestId, result)
-          return send(res, 200, result)
+          return publish(200, result, {
+            phase: 'terminal', terminal_scope: 'official', crash_window: false,
+            accepted: true, started_task: true, manual_reconcile: false, response: result,
+          })
         } catch (error) {
           if (error && error.name === 'AbortError') {
-            return send(res, 409, {
-              // Whether the prompt had been accepted decides what the caller
-              // may do next: never invite a resend once it was accepted.
+            const stopped = {
               accepted: acceptedOnce,
               completed: false,
-              reason: 'cancelled',
+              reason: 'bridge_wait_stopped',
+              scope: 'bridge_wait',
+              desktop_cancel_called: false,
+              killed_desktop: false,
+              desktop_turn_kept: true,
               session_id: sessionId,
-              scope: 'bridge_request',
-              desktop_turn_kept: acceptedOnce ? true : null,
-              detail: acceptedOnce
-                ? 'the prompt was already accepted by the host; this only stops waiting'
-                : 'the wait was aborted before an acknowledgement arrived; acceptance is unknown',
+              request_id: requestId,
+              detail: 'this only stops the bridge wait; the desktop turn is unchanged',
+              started_task: acceptedOnce,
+              exactly_once: false,
+            }
+            return publish(409, stopped, {
+              phase: acceptedOnce ? 'accepted' : 'unknown',
+              manual_reconcile: !acceptedOnce,
+              crash_window: !acceptedOnce,
+              accepted: acceptedOnce ? true : null,
               started_task: acceptedOnce,
             })
           }
           const detail = safeError(error, 'resume')
           note(config, [detail])
-          return send(res, 500, { accepted: acceptedOnce, completed: false, reason: detail.code || 'request_failed', session_id: sessionId, started_task: acceptedOnce, detail })
+          return publish(500, {
+            accepted: acceptedOnce, completed: false, reason: detail.code || 'request_failed',
+            session_id: sessionId, request_id: requestId, started_task: acceptedOnce, detail, exactly_once: false,
+          }, { phase: acceptedOnce ? 'accepted' : 'unknown', manual_reconcile: !acceptedOnce, crash_window: !acceptedOnce })
         } finally {
           live.delete(requestId)
           inflight.delete(sessionId)
@@ -849,17 +1077,168 @@ export function createHostServer(ctx, config, secret) {
           remaining: after.sessionAllowlist.length,
         })
       }
-      if (req.method === 'POST' && url.pathname === '/v1/cancel') {
+      if (req.method === 'GET' && url.pathname === '/v1/requests') {
+        const requestId = url.searchParams.get('request_id') || ''
+        const sessionId = url.searchParams.get('session_id') || ''
+        const record = ledger.get(requestId)
+        if (!record || record.session_id !== sessionId) {
+          return send(res, 404, { ok: false, reason: 'unknown_request', started_task: false })
+        }
+        const grantsNow = state()
+        const found = await findSessionRow(sessionId)
+        if (found.status === 'read_failed') {
+          return send(res, 502, { ok: false, reason: 'session_list_read_failed', started_task: false })
+        }
+        if (found.status !== 'ok') return send(res, 404, { ok: false, reason: 'missing_session', started_task: false })
+        const view = adapterSession(found.row)
+        const auth = authorizeSession(grantsNow, view, { workspaceId: record.workspace_id || view.workspaceId, need: 'read' })
+        if (!auth.ok) return send(res, 403, { ok: false, reason: auth.reason, started_task: false })
+        const reused = await recoverStored(sessionId, requestId, ledger.get(requestId))
+        return send(res, reused.status === 409 ? 200 : reused.status, {
+          ...reused.body,
+          query: true,
+          acceptance: reused.body.completed === true ? 'completed' : 'not_completed',
+        })
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/wait/stop') {
         const body = await readJson(req)
         const controller = live.get(body.request_id)
-        if (!controller) return send(res, 200, { confirmed: false, reason: 'no_bridge_request', killed_desktop: false })
+        if (!controller) {
+          return send(res, 200, {
+            confirmed: false, scope: 'bridge_wait', reason: 'no_bridge_wait',
+            desktop_cancel_called: false, killed_desktop: false,
+          })
+        }
         controller.abort()
         return send(res, 200, {
           confirmed: true,
-          reason: 'aborted_bridge_request',
+          scope: 'bridge_wait',
+          reason: 'bridge_wait_stopped',
+          desktop_cancel_called: false,
           killed_desktop: false,
           desktop_turn_kept: true,
-          note: 'the prompt was already accepted by the host; cancelling stops this wait only and does not cancel the desktop turn',
+          note: 'this only stops the bridge wait and does not cancel the desktop turn',
+        })
+      }
+      if (req.method === 'POST' && url.pathname === '/v1/cancel') {
+        const body = await readJson(req)
+        const requestId = typeof body.request_id === 'string' ? body.request_id : ''
+        const sessionId = typeof body.session_id === 'string' ? body.session_id : ''
+        const record = ledger.get(requestId)
+        if (!record || record.session_id !== sessionId) {
+          return send(res, 404, { cancel_accepted: false, desktop_cancel_called: false, reason: 'unknown_request', started_task: false })
+        }
+        const grantsNow = state()
+        const found = await findSessionRow(sessionId)
+        if (found.status === 'read_failed') {
+          return send(res, 502, { cancel_accepted: false, desktop_cancel_called: false, reason: 'session_list_read_failed', started_task: false })
+        }
+        if (found.status !== 'ok') {
+          return send(res, 404, { cancel_accepted: false, desktop_cancel_called: false, reason: 'missing_session', started_task: false })
+        }
+        const view = adapterSession(found.row)
+        const auth = authorizeSession(grantsNow, view, { workspaceId: record.workspace_id || view.workspaceId, need: 'write' })
+        if (!auth.ok) {
+          return send(res, 403, { cancel_accepted: false, desktop_cancel_called: false, reason: auth.reason, started_task: false })
+        }
+        let snap
+        try {
+          snap = await readSnapshot(ctx.sessionQuery, sessionId)
+        } catch (error) {
+          return send(res, 502, {
+            cancel_accepted: false, desktop_cancel_called: false, reason: 'session_read_failed',
+            started_task: false, detail: safeError(error, 'sessionQuery.readSession'),
+          })
+        }
+        const owned = classifyOwnedTurn(snap.events, requestId)
+        if (owned.ended && owned.turn && owned.turn.attribution === 'request_id') {
+          const described = describeTurn(sessionId, requestId, record, snap, owned.turn)
+          return send(res, 200, {
+            ...described,
+            cancel_accepted: false,
+            desktop_cancel_called: false,
+            reason: 'already_terminal',
+            detail: 'the official turn already ended; it was not rewritten',
+          })
+        }
+        if (!owned.owned) {
+          return send(res, 409, {
+            cancel_accepted: false,
+            desktop_cancel_called: false,
+            killed_desktop: false,
+            reason: owned.reason,
+            session_id: sessionId,
+            request_id: requestId,
+            started_task: false,
+            detail: 'the active desktop turn is not this bridge request, so cancel was not called',
+          })
+        }
+        if (typeof ctx.sessionController.cancel !== 'function') {
+          return send(res, 501, {
+            cancel_accepted: false, desktop_cancel_called: false, reason: 'cancel_unavailable',
+            session_id: sessionId, request_id: requestId, started_task: false,
+          })
+        }
+        let receipt
+        try {
+          receipt = await ctx.sessionController.cancel({ sessionId })
+        } catch (error) {
+          return send(res, 502, {
+            cancel_accepted: false, desktop_cancel_called: true, reason: 'cancel_failed',
+            session_id: sessionId, request_id: requestId, started_task: true,
+            detail: safeError(error, 'sessionController.cancel'),
+          })
+        }
+        if (!receipt || receipt.accepted !== true) {
+          return send(res, 502, {
+            cancel_accepted: false, desktop_cancel_called: true, reason: 'cancel_not_accepted',
+            session_id: sessionId, request_id: requestId, started_task: true,
+          })
+        }
+        const deadline = Date.now() + resumeTimeoutMs
+        let finalSnap = snap
+        let finalOwned = owned
+        while (Date.now() < deadline) {
+          await sleep(pollIntervalMs)
+          try {
+            finalSnap = await readSnapshot(ctx.sessionQuery, sessionId)
+          } catch {
+            continue
+          }
+          finalOwned = classifyOwnedTurn(finalSnap.events, requestId)
+          if (finalOwned.ended) break
+        }
+        if (!finalOwned.ended || !finalOwned.turn) {
+          return send(res, 200, {
+            cancel_accepted: true,
+            desktop_cancel_called: true,
+            killed_desktop: false,
+            completed: false,
+            terminal: null,
+            phase: 'running',
+            session_id: sessionId,
+            request_id: requestId,
+            started_task: true,
+            exactly_once: false,
+            detail: 'cancellation was admitted but the official turn has not ended yet',
+          })
+        }
+        const described = describeTurn(sessionId, requestId, record, finalSnap, finalOwned.turn)
+        try {
+          await ledger.update(requestId, {
+            phase: 'terminal', terminal_scope: 'official', crash_window: false,
+            accepted: true, started_task: true, response: described,
+          })
+        } catch {
+          described.reason = 'request_persist_failed'
+        }
+        return send(res, 200, {
+          ...described,
+          cancel_accepted: true,
+          desktop_cancel_called: true,
+          killed_desktop: false,
+          reason: 'official_terminal',
+          detail: 'cancel admission and the official turn end are separate',
         })
       }
       return send(res, 404, { ok: false, reason: 'not_found' })
