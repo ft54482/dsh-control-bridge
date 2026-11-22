@@ -61,13 +61,13 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 写入要另一步：发现口令作废后，用持久口令 `python -m dsh_control_bridge.pair_desktop --grant-write --host-secret-file desktop-host-local\host.secret --index 编号`。忙会话拒绝写入。
 
-安装后先保存 `GET /v1/guard/membership` 指纹，升级后再比对。缺了工作区或会话、或者子会话被抬到根上，比对失败并停止。不要用旧的 profile 备份覆盖用户后来的修改。插件不改 workspace 登记。目录只列出当前工作区 `sessionIds` 里的顶层会话。标题来自 list 投影的 `title`，没有投影时用工作区名并标明来源，不读会话正文。子会话按 list 行的 `origin: "subagent"` 分类；`origin` 缺失但带 `parentSessionId` 时保守地留在父会话下，不抬到根列表。模型来自投影里的 `modelSelection` **wire 形状** `{ lastUsed, next }`（`next` 即 `pending ?? lastUsed`），磁盘投影缓存里的 `rows[key].val` 是 state 形状、`val` 层不能再套一次。没有记录时回退 `agentDefaultModel.currentSelection()` 并标 `model_source: "agent_default"`；两者都没有就是 `null` + `model_source: "unresolved"`，不假装已解析。
+安装后先保存 `GET /v1/guard/membership` 指纹，升级后再比对。缺了工作区或会话、或者子会话被抬到根上，比对失败并停止。不要用旧的 profile 备份覆盖用户后来的修改。插件不改 workspace 登记。目录只列出当前工作区 `sessionIds` 里的顶层会话。标题来自 list 投影的 `title`，没有投影时用工作区名并标明来源，不读会话正文。子会话按 list 行的 `origin: "subagent"` 分类；`origin` 缺失但带 `parentSessionId` 时保守地留在父会话下，不抬到根列表。会话模型只来自这条会话自己的记录：最后一次 `request/header` 是已经执行过的选择，其后的 `model/selection` 是尚未使用的 pending，`next` 是 `pending ?? lastUsed`。部署默认值单独叫 `global_default`，不会填进会话模型。没有记录时是 `null` 和 `model_source: "unknown"`。`POST /v1/model` 需要写授权、空闲会话和已挂上的 Agent；没有 Agent 时返回 `needs_ui` 且不改任何东西。这条冷会话路径还没有在真机上验证。
 
 `profile` 不是官方 `SessionSummary` 字段。插件只在 desktop profile 挂载，所以 `profile: "desktop"` 是安装前提，行里带 `profile_source: "plugin_profile_assumption"`。忙只看 `running`，`agentAvailable` 表示"有活 Agent 占用"，不算忙。
 
 安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 
-兼容目标是带 0.2.2 session controller 的 Desktop（操作者看到的 CLI 是 0.2.2-rc.5）。这里没有连上真实 Desktop。Web 上能加载不等于 Desktop 已验收。
+兼容目标是带 0.2.2 session controller 的 Desktop（操作者看到的 CLI 是 0.2.2-rc.5）。插件 0.1.5 在一台 Windows Desktop 上完成过一次已授权既有会话的 resume。那次记录和仍未验证的项目写在 [verified-scope.md](verified-scope.md)。Web 上能加载不等于 Desktop 已验收。同名可执行文件加上 `--profile superagent --no-open` 不是 Desktop；`desktop_install` 只在外壳、desktop profile 或读不到命令行时阻断安装，并且不结束进程。
 
 ## 本环境没有做的 Windows 实测
 

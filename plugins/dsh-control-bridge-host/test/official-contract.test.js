@@ -577,10 +577,10 @@ function selectionEvent(seq, provider, model) {
   return { seq, type: 'model/selection', time: 1_700_000_000_000 + seq, data: { provider, model } }
 }
 
-test('a recorded chengzi session is not shown or sent as the example-provider default', async () => {
+test('a recorded alternate session is not shown or sent as the deployment default', async () => {
   const ctx = officialCtx()
-  ctx.state.events.push(headerEvent(40, 'chengzi-platform', 'z-ai/glm-5.3-free'))
-  ctx.state.selection = { provider: 'chengzi-platform', model: 'z-ai/glm-5.3-free' }
+  ctx.state.events.push(headerEvent(40, 'alternate-provider', 'alternate-model'))
+  ctx.state.selection = { provider: 'alternate-provider', model: 'alternate-model' }
   const started = await startServer(ctx, {
     initial: WRITE_DEMO,
     globalDefault: () => ({ provider: 'example-provider', model: 'example-model' }),
@@ -588,13 +588,13 @@ test('a recorded chengzi session is not shown or sent as the example-provider de
 
   const granted = await call(started.port, 'GET', '/v1/granted')
   const row = granted.body.sessions[0]
-  assert.equal(row.provider, 'chengzi-platform')
-  assert.equal(row.model, 'z-ai/glm-5.3-free')
+  assert.equal(row.provider, 'alternate-provider')
+  assert.equal(row.model, 'alternate-model')
   assert.equal(row.model_source, 'session_log')
   assert.deepEqual(granted.body.global_default, { provider: 'example-provider', model: 'example-model' })
 
   const resume = await call(started.port, 'POST', '/v1/resume', {
-    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-chengzi', text: 'go',
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-alternate', text: 'go',
   })
   assert.equal(resume.status, 409)
   assert.equal(resume.body.reason, 'no_adapter')
@@ -605,7 +605,7 @@ test('a recorded chengzi session is not shown or sent as the example-provider de
 
 test('a pending selection is adopted by the next request and reported as executed', async () => {
   const ctx = officialCtx()
-  ctx.state.events.push(headerEvent(40, 'chengzi-platform', 'z-ai/glm-5.3-free'))
+  ctx.state.events.push(headerEvent(40, 'alternate-provider', 'alternate-model'))
   ctx.state.events.push(selectionEvent(41, 'example-provider', 'example-model'))
   ctx.state.seq = 41
   ctx.state.selection = { provider: 'example-provider', model: 'example-model' }
@@ -713,10 +713,10 @@ test('a selection that changes after the preflight is refused before sending', a
   let reads = 0
   ctx.sessionQuery.readSession = async (sessionId) => {
     reads += 1
-    if (reads === 2) ctx.state.selection = { provider: 'chengzi-platform', model: 'z-ai/glm-5.3-free' }
+    if (reads === 2) ctx.state.selection = { provider: 'alternate-provider', model: 'alternate-model' }
     return originalRead(sessionId)
   }
-  ctx.state.providers = ['example-provider', 'chengzi-platform']
+  ctx.state.providers = ['example-provider', 'alternate-provider']
   const started = await startServer(ctx, { initial: WRITE_DEMO })
   const resume = await call(started.port, 'POST', '/v1/resume', {
     workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-change', text: 'go',
@@ -749,9 +749,9 @@ test('a turn without a request header reports execution as unknown', async () =>
 
 test('an explicit model on the write request is set, confirmed and executed', async () => {
   const ctx = officialCtx()
-  ctx.state.selection = { provider: 'chengzi-platform', model: 'z-ai/glm-5.3-free' }
-  ctx.state.providers = ['example-provider', 'chengzi-platform']
-  ctx.state.providerModels['chengzi-platform'] = ['z-ai/glm-5.3-free']
+  ctx.state.selection = { provider: 'alternate-provider', model: 'alternate-model' }
+  ctx.state.providers = ['example-provider', 'alternate-provider']
+  ctx.state.providerModels['alternate-provider'] = ['alternate-model']
   const started = await startServer(ctx, { initial: WRITE_DEMO })
   const resume = await call(started.port, 'POST', '/v1/resume', {
     workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-explicit', text: 'go',

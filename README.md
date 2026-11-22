@@ -238,7 +238,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Test-FakeDsh.ps1 -Pyt
 powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1 -Destination . -PythonExe D:\Python312\python.exe
 ```
 
-`Install-DshBridge.ps1` 的 `-Destination` 必须就是这次解压目录。它不创建虚拟环境，不访问网络。自检只启动包内的 `fake-dsh.cmd`。`success` 才是业务成功；没有 final、坏退出、超时和主动取消都必须显示为拒绝。步骤和尚未在 Windows 上重跑的项目见 [docs/windows-delivery.md](docs/windows-delivery.md)。
+`Install-DshBridge.ps1` 的 `-Destination` 必须就是这次解压目录。它不创建虚拟环境，不访问网络。自检只启动包内的 `fake-dsh.cmd`。`success` 才是业务成功；没有 final、坏退出、超时和主动取消都必须显示为拒绝。步骤和尚未在 Windows 上重跑的项目见 [docs/windows-delivery.md](docs/windows-delivery.md)。一台 Desktop 上已经看到的范围，以及还不能写成已验证的项目，见 [docs/verified-scope.md](docs/verified-scope.md)。
 
 `Start-DshBridge.ps1 -PythonExe D:\Python312\python.exe` 只做本机 `diagnose`。加上 `-Serve` 才在 `127.0.0.1:8787` 监听。它不启动 desktop，也不启动真实 `dsh`。
 
@@ -285,7 +285,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Install-DshBridge.ps1
 | CLI，以及 stdio MCP（`dsh-bridge mcp`） | 已实现 |
 | 本地自检、diagnose、preflight | 已实现 |
 | 通知出站：默认关闭；失败状态可查询 | 已实现 |
-| DeepSeek Harness 的真实创建、续跑和取消 | 未实现。管理面事实已记录，普通会话证据仍缺 |
+| Desktop 上一条已授权既有会话的一次 resume | 插件 0.1.5 在 Windows Desktop 0.2.2-rc.5 上有一次匿名记录，见 [docs/verified-scope.md](docs/verified-scope.md)。这不是对全部 Harness 功能的控制 |
+| 冷会话改模型、取消/超时的完整生命周期、跨工作区闭环 | 未在真机验证。模拟测试不能写成已经通过 |
+| SuperAgent 派工 | 未实现 |
 | 看板、托管网关、A2A 协议、商业 Harness CI 插件 | 不在本仓库 |
 
 细节在 [docs/headless-cli.md](docs/headless-cli.md) 和 [docs/connector-contract.md](docs/connector-contract.md)。`connected_to_harness` 仍是 false：headless 进程默认不启动，SuperAgent 长任务继续拒绝。
