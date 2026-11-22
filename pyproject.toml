@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dsh-control-bridge"
+version = "0.1.0"
+description = "Control-plane bridge between a coordinating agent and DeepSeek Harness instances."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "dsh-control-bridge contributors" }]
+keywords = ["deepseek", "harness", "agent", "control-plane"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0"]
+
+[project.scripts]
+dsh-bridge = "dsh_control_bridge.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ft54482/dsh-control-bridge"
+Documentation = "https://github.com/ft54482/dsh-control-bridge/blob/main/README.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

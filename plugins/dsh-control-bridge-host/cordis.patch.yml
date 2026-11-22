@@ -1,0 +1,16 @@
+# Inserted when this bundle is installed into a profile.
+# An empty allowlist denies every workspace. Replace this row from the
+# profile cordis.patch.yml after install; a patch replaces the whole config.
+- insert:
+  - id: dsh-control-bridge-host
+    name: dsh-control-bridge-host
+    config:
+      bind: 127.0.0.1
+      port: 8765
+      secretFile: ""
+      bootstrapFile: ""
+      bootstrapSecretFile: ""
+      allowlistFile: ""
+      busyPolicy: refuse
+      workspaceAllowlist: []
+      sessionAllowlist: []

@@ -1,0 +1,44 @@
+# 多实例配置样例。
+# 端点是文档占位，fake 适配器不会连接它们。
+# 不要把真实内网地址、令牌或客户路径写进这个文件。
+# 每个实例使用自己的事件密钥环境变量。绝对安装路径留在本机，不要提交。
+
+[bridge]
+signature_window_seconds = 300
+allow_unsigned = false
+
+[notify]
+mode = "off"
+
+# 本机 Desktop 与远程 Harness 必须分成两个实例，即使工作区名字相同。
+# 不要把 profile 名字写进这里来猜测工作区归属。
+
+[[instances]]
+id = "local-desktop"
+label = "本机 DeepSeek Harness Desktop"
+kind = "desktop"
+adapter = "fake"
+base_url = "http://127.0.0.1:9"
+auth_env = "DSH_LOCAL_DESKTOP_TOKEN"
+event_secret_env = "DSH_LOCAL_DESKTOP_EVENT_SECRET"
+
+[[instances.workspaces]]
+name = "broadcast-cs"
+description = "示例工作区名称，不代表真实路径或客户系统"
+
+[[instances.workspaces]]
+name = "auto-video"
+description = "另一个示例工作区。不能用它授权 broadcast-cs 里的任务"
+
+[[instances]]
+id = "lab-server"
+label = "实验室远程 Harness（与本机实例分开）"
+kind = "remote"
+adapter = "fake"
+base_url = "http://127.0.0.1:10"
+auth_env = "DSH_LAB_SERVER_TOKEN"
+event_secret_env = "DSH_LAB_SERVER_EVENT_SECRET"
+
+[[instances.workspaces]]
+name = "broadcast-cs"
+description = "与本机同名，但是另一套实例上的工作区，不会自动打通"
