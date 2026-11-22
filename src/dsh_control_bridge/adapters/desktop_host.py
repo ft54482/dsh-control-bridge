@@ -21,6 +21,18 @@ from dsh_control_bridge.redact import Redactor
 _PROFILE = "desktop"
 
 
+def _same_path(left: str, right: str) -> bool:
+    """Compare two configured directories the way the filesystem would.
+
+    A grant path is validated through ``validate_configured_path`` (absolute,
+    platform separators) while a workspace path keeps whatever the operator
+    wrote, so a raw string comparison rejects the same directory on Windows.
+    """
+    if not left or not right:
+        return False
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(os.path.normpath(right))
+
+
 class DesktopHostAdapter:
     supports_send = True
     probe_items = ()
@@ -46,7 +58,7 @@ class DesktopHostAdapter:
         if grant.occupancy != "operator_confirmed_idle":
             raise AdapterError("external occupancy is not confirmed; refusing to write")
         workspace = self.instance.workspaces[request.workspace]
-        if grant.cwd != workspace.cwd:
+        if not _same_path(grant.cwd, workspace.cwd):
             raise AdapterError("session cwd does not match the authorized workspace")
         self._request_id = f"bridge-{request.task_id}"
         payload = {

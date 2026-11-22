@@ -20,6 +20,9 @@ SECRET = "0123456789abcdef0123456789abcdef"
 
 
 def _toml(cwd: str) -> str:
+    # A Windows path in a TOML basic string would be read as escape sequences
+    # (\U, \t, ...), so the fixture writes forward slashes.
+    cwd = cwd.replace("\\", "/")
     return f"""
 [bridge]
 signature_window_seconds = 300
@@ -74,11 +77,17 @@ def plugin_server(tmp_path: Path):
             "FIXTURE_SESSIONS": json.dumps(
                 [
                     {
-                        "id": "session-demo",
-                        "workspaceId": "ws-demo",
-                        "cwd": cwd,
-                        "profile": "desktop",
+                        "sessionId": "session-demo",
+                        "updatedAt": 1700000000004,
                         "running": False,
+                        "blank": False,
+                        "agentAvailable": True,
+                        "cwd": cwd,
+                        "projections": {
+                            "kind": "cached",
+                            "asOfSeq": 4,
+                            "values": {"title": "demo"},
+                        },
                     }
                 ]
             ),
@@ -97,7 +106,7 @@ def plugin_server(tmp_path: Path):
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
     )
     line = process.stdout.readline()
     port = json.loads(line)["port"]
@@ -137,7 +146,7 @@ def test_desktop_resume_reviews_the_same_session_and_survives_restart(tmp_path, 
         session_id="session-demo",
     )
     assert task.session_id == "session-demo"
-    assert task.status == "awaiting_review"
+    assert task.status == "awaiting_review", task.last_error
     assert "sk-" not in json.dumps(task.to_dict())
     again = bridge.record_host_completion(
         task.task_id,
@@ -198,7 +207,7 @@ def test_node_plugin_contract():
         ["node", "--test", "plugins/dsh-control-bridge-host/test/host.test.js"],
         cwd=ROOT,
         check=False,
-        text=True,
+        text=True, encoding="utf-8", errors="replace",
         capture_output=True,
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr

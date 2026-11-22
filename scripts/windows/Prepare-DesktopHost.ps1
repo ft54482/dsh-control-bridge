@@ -1,7 +1,7 @@
 # Prepares local secrets and a profile snippet. It does not quit Desktop, set a
 # machine environment variable, or install the plugin.
 param(
-  [string]$Package = "dsh-control-bridge-host-0.1.3.tgz"
+  [string]$Package = "dsh-control-bridge-host-0.1.4.tgz"
 )
 $ErrorActionPreference = "Stop"
 $root = [System.IO.Path]::GetFullPath((Split-Path (Split-Path $PSScriptRoot -Parent) -Parent))

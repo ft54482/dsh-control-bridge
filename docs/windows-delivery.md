@@ -51,7 +51,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 官方 Desktop 是 Electron 里的 Web Host。外部客户端拿不到每次启动的 desktop 凭据。受支持的做法是在 **desktop profile** 里安装 bundle，由插件在 Host 进程内调用已经挂载的 `workspaceRegistry`、`sessionController` 和 `sessionQuery`。headless 不挂 `sessionController`；插件发现服务不在就不监听，也不把这种情况说成 Desktop 已验证。
 
-插件包是 `dsh-control-bridge-host`。它只听 `127.0.0.1`，不改 Electron，不读启动 token，不读 `.credentials.yaml`，不调用 `selectModel`。续接用原来的 session id 和 `prompt(..., mode=queue)`，所以会话自己记下的 example-provider / example-model 仍由 Host 使用。忙或写锁被占时拒绝，不取消现有回合。
+插件包是 `dsh-control-bridge-host`。它只听 `127.0.0.1`，不改 Electron，不读启动 token，不读 `.credentials.yaml`，不调用 `selectModel`。续接用原来的 session id 和 `prompt(..., mode=queue)`，所以会话自己记下的模型选择仍由 Host 使用。
+
+0.1.4 起，`prompt()` 的返回值按官方语义只当"受理"（`{accepted:true}`），回答从会话事件里按 `source.rpcId` 找到本请求所在回合后回收；`/v1/resume` 的超时上限 120 秒，超时返回 `completed:false` 且不重发。授权改成内存/磁盘同源：配对立即生效、撤销立即生效、保存失败不改内存。
 
 官方源码和 0.2.1 以后的问题记录都没有 `dsh desktop quit`。关窗口只会进托盘。托盘菜单 **Quit DeepSeek Harness** 会先问 Host 有没有未完成任务，确认后才退出。没有正规外部退出命令，所以这一次托盘退出不能省，也不能改成 taskkill。允许重启不等于可以丢掉还没写完的任务。
 
@@ -59,7 +61,9 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Prepare-HeadlessReuse
 
 写入要另一步：发现口令作废后，用持久口令 `python -m dsh_control_bridge.pair_desktop --grant-write --host-secret-file desktop-host-local\host.secret --index 编号`。忙会话拒绝写入。
 
-安装后先保存 `GET /v1/guard/membership` 指纹，升级后再比对。缺了工作区或会话、或者子会话被抬到根上，比对失败并停止。不要用旧的 profile 备份覆盖用户后来的修改。插件不改 workspace 登记。目录只列出当前工作区 `sessionIds` 里的顶层会话。标题来自 list 投影的 `title`，没有投影时用工作区名并标明来源，不读会话正文。模型来自投影里的 `modelSelection`。已移出侧栏的目录不会进默认配对列表。
+安装后先保存 `GET /v1/guard/membership` 指纹，升级后再比对。缺了工作区或会话、或者子会话被抬到根上，比对失败并停止。不要用旧的 profile 备份覆盖用户后来的修改。插件不改 workspace 登记。目录只列出当前工作区 `sessionIds` 里的顶层会话。标题来自 list 投影的 `title`，没有投影时用工作区名并标明来源，不读会话正文。子会话按 list 行的 `origin: "subagent"` 分类；`origin` 缺失但带 `parentSessionId` 时保守地留在父会话下，不抬到根列表。模型来自投影里的 `modelSelection` **wire 形状** `{ lastUsed, next }`（`next` 即 `pending ?? lastUsed`），磁盘投影缓存里的 `rows[key].val` 是 state 形状、`val` 层不能再套一次。没有记录时回退 `agentDefaultModel.currentSelection()` 并标 `model_source: "agent_default"`；两者都没有就是 `null` + `model_source: "unresolved"`，不假装已解析。
+
+`profile` 不是官方 `SessionSummary` 字段。插件只在 desktop profile 挂载，所以 `profile: "desktop"` 是安装前提，行里带 `profile_source: "plugin_profile_assumption"`。忙只看 `running`，`agentAvailable` 表示"有活 Agent 占用"，不算忙。
 
 安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
 

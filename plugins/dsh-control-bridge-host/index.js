@@ -1,4 +1,5 @@
 import fs from 'node:fs'
+import { createGrantStore } from './grants.js'
 import { decideListen } from './policy.js'
 import { createHostServer } from './server.js'
 
@@ -25,8 +26,16 @@ function readSecret(path) {
 
 export function apply(ctx, config = {}) {
   const services = Boolean(ctx.sessionController && ctx.workspaceRegistry && ctx.sessionQuery)
-  const allowlist = readJson(config.allowlistFile) || {}
-  const count = Array.isArray(allowlist.sessionAllowlist) ? allowlist.sessionAllowlist.length : (config.sessionAllowlist || []).length
+  const initial = readJson(config.allowlistFile) || {
+    version: 1,
+    workspaceAllowlist: Array.isArray(config.workspaceAllowlist) ? config.workspaceAllowlist : [],
+    sessionAllowlist: Array.isArray(config.sessionAllowlist) ? config.sessionAllowlist : [],
+  }
+  // One authority for memory and disk; pairing, access changes, and revocation
+  // all go through it, and a failed save never changes the in-memory grants.
+  const grants = createGrantStore({ file: config.allowlistFile, initial })
+  const loaded = grants.snapshot()
+  const count = loaded.workspaceAllowlist.length + loaded.sessionAllowlist.length
   const hostSecret = readSecret(config.secretFile) || process.env[config.secretEnv || ''] || ''
   const bootstrapFile = readJson(config.bootstrapFile) || {}
   const decision = decideListen({
@@ -41,14 +50,20 @@ export function apply(ctx, config = {}) {
     },
   })
   if (!decision.listening) return decision
+  const defaultSelection = () => {
+    try {
+      const service = typeof ctx.get === 'function' ? ctx.get('agentDefaultModel') : null
+      if (!service || typeof service.currentSelection !== 'function') return null
+      return service.currentSelection()
+    } catch {
+      return null
+    }
+  }
   const server = createHostServer(ctx, {
     ...config,
-    ...allowlist,
+    grants,
+    defaultSelection,
     busyPolicy: config.busyPolicy || 'refuse',
-    saveAllowlist(next) {
-      if (!config.allowlistFile) return
-      fs.writeFileSync(config.allowlistFile, JSON.stringify(next, null, 2), { mode: 0o600 })
-    },
     consumeBootstrap() {
       if (!config.bootstrapFile) return
       const current = readJson(config.bootstrapFile) || {}
@@ -63,5 +78,13 @@ export function apply(ctx, config = {}) {
     consumed: Boolean(bootstrapFile.consumed),
   })
   server.listen(config.port || 8765, '127.0.0.1')
-  return { listening: true, bind: '127.0.0.1', port: config.port || 8765, outbound: false, bootstrap: decision.bootstrap }
+  return {
+    listening: true,
+    bind: '127.0.0.1',
+    port: config.port || 8765,
+    outbound: false,
+    bootstrap: decision.bootstrap,
+    grants: count,
+    allowlist_file: Boolean(config.allowlistFile),
+  }
 }
