@@ -140,6 +140,7 @@ export function createHostServer(ctx, config, secret) {
           allowlist_loaded: grantsNow.loaded,
           grants_revision: grantsNow.revision,
           grants_count: grantsNow.workspaceAllowlist.length + grantsNow.sessionAllowlist.length,
+          allowlist_warnings: grantsNow.warnings,
           resume_timeout_ms: resumeTimeoutMs,
         })
       }
@@ -214,6 +215,12 @@ export function createHostServer(ctx, config, secret) {
           catalog_status: catalogOk ? loaded.catalog.session_status : 'read_failed',
           sessions: (grantsNow.sessionAllowlist || []).map((item) => {
             const row = byId.get(item.sessionId)
+            // Model fields and model_source must come from the same place. The
+            // pairing-time snapshot is only a grant record, never evidence of
+            // the session's current selection.
+            const model = row ? (row.model ?? null) : null
+            const provider = row ? (row.provider ?? null) : null
+            const modelSource = row ? (row.model_source || 'unresolved') : 'unresolved'
             return {
               session_id: item.sessionId,
               workspace_id: item.workspaceId,
@@ -222,12 +229,13 @@ export function createHostServer(ctx, config, secret) {
               cwd: (row && row.cwd) || item.cwd || '',
               access: item.access,
               profile: (row && row.profile) || item.profile || 'unknown',
-              model: (row && row.model) || item.model || null,
-              provider: (row && row.provider) || item.provider || null,
-              model_source: row ? row.model_source : 'unresolved',
+              model,
+              provider,
+              model_source: modelSource,
               running: Boolean(row && row.busy),
               busy: Boolean(row && row.busy),
               agent_available: Boolean(row && row.agent_available),
+              catalog_row: Boolean(row),
             }
           }),
         })

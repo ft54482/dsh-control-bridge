@@ -127,9 +127,7 @@ def verify_tgz(target: Path) -> list[str]:
             if not same:
                 problems.append(f"tgz entry differs from source: {relative}")
             checked += 1
-    summary = f"{checked} entries compared"
-    if normalized:
-        summary += f" ({normalized} JSON-normalized: package.json)"
+    summary = f"{checked - normalized} byte-identical, {normalized} JSON-equal (package.json)"
     return [summary, *problems]
 
 

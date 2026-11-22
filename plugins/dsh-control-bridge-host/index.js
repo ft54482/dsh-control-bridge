@@ -1,5 +1,5 @@
 import fs from 'node:fs'
-import { createGrantStore } from './grants.js'
+import { createGrantStore, loadAllowlistFile } from './grants.js'
 import { decideListen } from './policy.js'
 import { createHostServer } from './server.js'
 
@@ -26,16 +26,31 @@ function readSecret(path) {
 
 export function apply(ctx, config = {}) {
   const services = Boolean(ctx.sessionController && ctx.workspaceRegistry && ctx.sessionQuery)
-  const initial = readJson(config.allowlistFile) || {
-    version: 1,
-    workspaceAllowlist: Array.isArray(config.workspaceAllowlist) ? config.workspaceAllowlist : [],
-    sessionAllowlist: Array.isArray(config.sessionAllowlist) ? config.sessionAllowlist : [],
+  const loaded = loadAllowlistFile(config.allowlistFile)
+  // Fail closed: a file that exists but cannot be read or parsed is not an
+  // empty allowlist. Starting with empty grants would let the next write
+  // overwrite the file and lose the authorizations it still holds.
+  if (loaded.status === 'unreadable' || loaded.status === 'invalid_entries') {
+    return {
+      listening: false,
+      reason: 'allowlist_unreadable',
+      allowlist_status: loaded.status,
+      detail: loaded.detail,
+      outbound: false,
+    }
   }
+  const initial = loaded.status === 'unconfigured'
+    ? {
+      version: 1,
+      workspaceAllowlist: Array.isArray(config.workspaceAllowlist) ? config.workspaceAllowlist : [],
+      sessionAllowlist: Array.isArray(config.sessionAllowlist) ? config.sessionAllowlist : [],
+    }
+    : loaded.state
   // One authority for memory and disk; pairing, access changes, and revocation
   // all go through it, and a failed save never changes the in-memory grants.
   const grants = createGrantStore({ file: config.allowlistFile, initial })
-  const loaded = grants.snapshot()
-  const count = loaded.workspaceAllowlist.length + loaded.sessionAllowlist.length
+  const snapshot = grants.snapshot()
+  const count = snapshot.workspaceAllowlist.length + snapshot.sessionAllowlist.length
   const hostSecret = readSecret(config.secretFile) || process.env[config.secretEnv || ''] || ''
   const bootstrapFile = readJson(config.bootstrapFile) || {}
   const decision = decideListen({

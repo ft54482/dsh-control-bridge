@@ -108,6 +108,40 @@ function readFileState(file) {
   return normalizeState(raw)
 }
 
+/**
+ * Classify the allowlist file at startup.
+ *
+ * A missing file is the first run. A file that exists but cannot be parsed, or
+ * whose entries are structurally invalid, is NOT an empty allowlist: treating
+ * it as empty would silently drop the grants it holds on the next write.
+ * @returns `{ state, status, dropped, detail }` where status is
+ *   `unconfigured | missing | ok | unreadable | invalid_entries`.
+ */
+export function loadAllowlistFile(file) {
+  if (!file) return { state: emptyState(), status: 'unconfigured', dropped: 0, detail: '' }
+  let raw
+  try {
+    raw = fs.readFileSync(file, 'utf8')
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return { state: emptyState(), status: 'missing', dropped: 0, detail: '' }
+    return { state: emptyState(), status: 'unreadable', dropped: 0, detail: `read failed: ${error && error.code ? error.code : 'error'}` }
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return { state: emptyState(), status: 'unreadable', dropped: 0, detail: 'invalid JSON' }
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { state: emptyState(), status: 'unreadable', dropped: 0, detail: 'top-level value is not an object' }
+  }
+  const { state, dropped } = normalizeState(parsed)
+  if (dropped > 0) {
+    return { state, status: 'invalid_entries', dropped, detail: `${dropped} invalid allowlist entries` }
+  }
+  return { state, status: 'ok', dropped: 0, detail: '' }
+}
+
 function writeAtomic(file, payload) {
   const directory = path.dirname(file)
   fs.mkdirSync(directory, { recursive: true })
@@ -169,10 +203,16 @@ export function createGrantStore({ file, initial, now = () => Date.now() } = {})
     if (!file) return false
     const next = stampOf(file)
     if (next === stamp) return false
+    const previous = stamp
     stamp = next
     if (next === null) {
-      warnings = ['allowlist file is missing; keeping the grants already loaded']
-      return false
+      if (previous === null) return false
+      // The file was removed while running. Removing the allowlist is the
+      // plainest "revoke everything", so it must take effect immediately.
+      state = emptyState()
+      revision += 1
+      warnings = ['allowlist file was removed; every grant was revoked']
+      return true
     }
     try {
       const parsed = readFileState(file)

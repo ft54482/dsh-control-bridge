@@ -11,8 +11,9 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
-import { createGrantStore } from '../grants.js'
+import { createGrantStore, loadAllowlistFile } from '../grants.js'
 import { readSnapshot } from '../host_read.js'
+import { apply } from '../index.js'
 import { BOOTSTRAP, SECRET, WORKSPACE, call, close, officialCtx, readGrantFile, startServer } from './fixtures.js'
 
 function bootstrapSecret() {
@@ -402,4 +403,108 @@ test('a second request on the same session is refused while one is waiting', asy
   assert.equal(firstResult.body.final.reason.kind, 'timeout')
   assert.equal(ctx.state.prompts, 1)
   await close(started.server)
+})
+
+test('an unreadable allowlist file fails closed even with an armed bootstrap', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dsh-broken-'))
+  const allowlistFile = path.join(dir, 'allowlist.json')
+  const secretFile = path.join(dir, 'host.secret')
+  const bootstrapSecretFile = path.join(dir, 'bootstrap.secret')
+  const bootstrapFile = path.join(dir, 'bootstrap.json')
+  fs.writeFileSync(secretFile, SECRET)
+  fs.writeFileSync(bootstrapSecretFile, BOOTSTRAP)
+  fs.writeFileSync(bootstrapFile, JSON.stringify({ secret: BOOTSTRAP, expiresAt: Date.now() + 60_000, consumed: false }))
+  fs.writeFileSync(allowlistFile, '{"workspaceAllowlist": [ {"id": "ws-demo"')
+  const before = fs.readFileSync(allowlistFile)
+  const ctx = { sessionController: {}, workspaceRegistry: {}, sessionQuery: {} }
+  const result = apply(ctx, {
+    allowlistFile,
+    secretFile,
+    bootstrapSecretFile,
+    bootstrapFile,
+    bind: '127.0.0.1',
+    port: 18_765,
+    workspaceAllowlist: [],
+    sessionAllowlist: [],
+  })
+  assert.equal(result.listening, false)
+  assert.equal(result.reason, 'allowlist_unreadable')
+  assert.equal(result.allowlist_status, 'unreadable')
+  // The unreadable file is left exactly as it was: no write, no truncation.
+  assert.deepEqual(fs.readFileSync(allowlistFile), before)
+
+  // Structurally invalid entries are the same class of failure.
+  fs.writeFileSync(allowlistFile, JSON.stringify({ workspaceAllowlist: 'nope', sessionAllowlist: [] }))
+  const structural = apply(ctx, {
+    allowlistFile,
+    secretFile,
+    bootstrapSecretFile,
+    bootstrapFile,
+    bind: '127.0.0.1',
+    port: 18_765,
+  })
+  assert.equal(structural.listening, false)
+  assert.equal(structural.reason, 'allowlist_unreadable')
+  assert.equal(structural.allowlist_status, 'invalid_entries')
+
+  // A missing file is the first run, not a failure.
+  assert.equal(loadAllowlistFile(path.join(dir, 'absent.json')).status, 'missing')
+  assert.equal(loadAllowlistFile(allowlistFile).status, 'invalid_entries')
+})
+
+test('deleting the allowlist file at runtime revokes every grant', async () => {
+  const ctx = officialCtx()
+  const started = await startServer(ctx, { initial: WRITE_DEMO })
+  const before = await call(started.port, 'GET', '/v1/granted')
+  assert.equal(before.body.sessions.length, 1)
+  const revision = before.body.revision
+  fs.unlinkSync(started.file)
+
+  const after = await call(started.port, 'GET', '/v1/granted')
+  assert.equal(after.body.sessions.length, 0)
+  assert.equal(after.body.revision > revision, true)
+  const health = await call(started.port, 'GET', '/v1/health')
+  assert.equal(health.body.grants_count, 0)
+  assert.equal(health.body.allowlist_warnings.some((item) => item.includes('removed')), true)
+  const history = await call(started.port, 'GET', '/v1/history?session_id=session-demo')
+  assert.equal(history.status, 403)
+  const resume = await call(started.port, 'POST', '/v1/resume', {
+    workspace_id: WORKSPACE, session_id: 'session-demo', profile: 'desktop', request_id: 'req-after-delete', text: 'go',
+  })
+  assert.equal(resume.body.accepted, false)
+  assert.equal(ctx.state.prompts, 0)
+  await close(started.server)
+})
+
+test('granted model fields come from the current row, never the pairing snapshot', async () => {
+  const ctx = officialCtx()
+  const stale = {
+    version: 1,
+    workspaceAllowlist: [{ id: WORKSPACE, cwd: 'C:/work/demo', title: 'demo' }],
+    sessionAllowlist: [{
+      sessionId: 'session-plain',
+      workspaceId: WORKSPACE,
+      access: 'read',
+      cwd: 'C:/work/demo',
+      profile: 'desktop',
+      model: 'stale-model',
+      provider: 'stale-provider',
+      title: 'plain',
+    }],
+  }
+  const started = await startServer(ctx, { initial: stale })
+  const granted = await call(started.port, 'GET', '/v1/granted')
+  const row = granted.body.sessions[0]
+  assert.equal(row.model, null)
+  assert.equal(row.provider, null)
+  assert.equal(row.model_source, 'unresolved')
+  assert.equal(row.catalog_row, true)
+  await close(started.server)
+
+  const withRow = await startServer(officialCtx(), { initial: WRITE_DEMO })
+  const demo = (await call(withRow.port, 'GET', '/v1/granted')).body.sessions[0]
+  assert.equal(demo.model, 'example-model')
+  assert.equal(demo.provider, 'example-provider')
+  assert.equal(demo.model_source, 'session_recorded')
+  await close(withRow.server)
 })
