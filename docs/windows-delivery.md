@@ -1,8 +1,12 @@
 # Windows 安装与使用
 
+使用 Codex 操作会话，从下面的安装与配对开始。维护已有 Host 可直接跳到[升级与回滚](#host-install)。运行 Python 协调桥的假进程检查请从[便携包自检](#便携包与假进程自检)开始。[文档目录](README.md)
+
 <a id="codex-desktop-setup"></a>
 
 ## 连接 Codex 桌面端与 Harness Desktop
+
+本节使用默认 Host 端口 8765。自定义端口请配合[端口配置与排错](ports.md#desktop-host)阅读，尤其是首次配对和每次 skill 调用的参数。
 
 在运行 DeepSeek Harness Desktop 的同一台机器上，以本地执行环境打开 Codex。需要 Python 3.11+ 和一个已初始化的 Harness Desktop profile。技能脚本仅依赖 Python 标准库。
 
@@ -49,7 +53,7 @@ python $client --help
 
 2. 将便携源码 ZIP 解压到一个私有目录，进入其中包含 `scripts/windows` 的文件夹，后续安装和配对脚本在此运行。把同版本 Host TGZ 和校验清单保留在便于引用的位置。等待运行中的任务结束，从 Harness 托盘选择 **Quit DeepSeek Harness**。按下方[安装、升级和回滚](#host-install)命令安装刚核验的包，首次选择 `Install`，已有 Host 则选择 `Upgrade`。
 3. 首次安装时运行 `.\scripts\windows\Prepare-DesktopHost.ps1 -Package <包路径>`。备份 Desktop profile 的 `cordis.patch.yml`，把生成的 `desktop-host-local/cordis-snippet.yml` 应用到其中的 Host 配置项。保管该目录下的配对与凭据文件。若要允许新建会话，启用 `allowCreateSession: true`。使用已配对的工作区 ID。若该工作区位于 `workspaceRoots` 外，将其确切 ID 加入 `presetSessionWorkspaceIds`。创建可派工的会话还需要该工作区已有可写会话授权。[Host 配置示例](host-api.md)
-4. 重新打开 Harness Desktop，在已登记的工作区准备一条可供配对的空闲会话。运行 `.\scripts\windows\Pair-DesktopHost.ps1` 查看编号，再加 `-Index <编号>` 授予读取权限。要续接并发送任务还需该会话的 `write` 授权。配对窗口过期时运行 `.\scripts\windows\Rearm-DesktopHostBootstrap.ps1` 重新开启。
+4. 重新打开 Harness Desktop，在已登记的工作区准备一条可供配对的空闲会话。运行 `.\scripts\windows\Pair-DesktopHost.ps1` 查看编号，再加 `-Index <编号>` 授予读取权限。要续接并发送任务，配对时用 `-Index <编号> -Access write` 选择空闲会话。配对窗口过期时运行 `.\scripts\windows\Rearm-DesktopHostBootstrap.ps1` 重新开启。
 
 ### 检查 Codex 连接
 
@@ -68,7 +72,7 @@ python $client granted
 
 ## 便携包与假进程自检
 
-这些阶段按顺序进行。缺凭证不是代码已经结束，也还没有进入真实计费。这一包只补 Windows 假进程自检，不配置真实凭证，也不做 SuperAgent 绑定。
+本节适用于 Python 协调桥的 headless 路径。仅使用 Codex skill 与 Desktop Host 的用户可跳过本节。
 
 1. **放置桥。** 把 zip 解压到一个新建的空目录。不运行 pip，不创建虚拟环境，不把文件写进 `%LOCALAPPDATA%`。包只用 Python 标准库。默认 `spawn = false`。包内没有密钥，也不复制桌面凭证。
 2. **假进程自检。** 在解压目录执行下面的命令，`-PythonExe` 指向捆绑的 Python 3.12，或任何 3.11 及以上的 `python.exe`。这只改当前进程的 `PYTHONPATH`，不改用户或系统 PATH。
@@ -141,7 +145,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 
 `profile` 不是官方 `SessionSummary` 字段。插件只在 desktop profile 挂载，所以 `profile: "desktop"` 是安装前提，行里带 `profile_source: "plugin_profile_assumption"`。忙只看 `running`，`agentAvailable` 表示"有活 Agent 占用"，不算忙。
 
-安装和回滚说明见 `plugins/dsh-control-bridge-host/README.md`。
+插件参数见 [Host 插件说明](../plugins/dsh-control-bridge-host/README.md)。
 
 兼容目标是带 0.2.2 session controller 的 Desktop。使用 Desktop 随附的 CLI 可以避免与 PATH 上其他版本混用。Windows Desktop 0.2.2-rc.5 上的历史测试和 0.2.2 主控会话真机结果见 [验收记录](verified-scope.md)。`desktop_install` 在遇到外壳、desktop profile 或归属不明的进程时阻断安装，独立的 SuperAgent profile 可以继续运行。
 

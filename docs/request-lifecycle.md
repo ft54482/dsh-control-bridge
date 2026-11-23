@@ -1,5 +1,7 @@
 # 请求生命周期（Host 0.1.6）
 
+> 历史技术记录，以下结论对应文中标注的版本。当前接口见 [Host API](host-api.md)，部署结果见 [Windows 真机验收](verified-scope.md)。
+
 官方 Desktop 0.2.2 的 `sessionController.cancel` 只接受 `{ sessionId }`，返回 `{ accepted: true }`。它不点名 `requestId`，也不表示回合已经结束；没有活动回合时官方同样返回 `accepted`（对 idle Agent 是 no-op），所以这个回执不能证明“某个回合被收下”。`prompt` 把 `requestId` 写进 `user/message` 的 `source.rpcId`。终态只认其后的 `turn/end`。
 
 官方也没有 compare-and-cancel：桥只能在调用前用日志判断当前未结束回合属于自己。判断与真正调用之间仍有一个窗口，官方不保证这期间不会有别的客户端开始新回合；桥用“最近一个未结束的 `turn/start` 必须带有本请求的 `rpcId`”把窗口缩到最小，失败关闭而不是猜。

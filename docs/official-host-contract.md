@@ -1,5 +1,7 @@
 # 官方 Desktop Host 契约复核（Stage A）
 
+> 历史技术记录，以下结论对应文中标注的版本。当前接口见 [Host API](host-api.md)，部署结果见 [Windows 真机验收](verified-scope.md)。
+
 ## 目标与环境
 
 本文只复核官方 Host 契约，再与 `plugins/dsh-control-bridge-host` 的主张逐条对照。这是安装包源码审阅，不是真机通过：没有启动 Desktop，没有发送 prompt，也没有调用 cancel，不会写成真机结论。锚点写法是 `包名 src/文件:行`；仓库内文件用仓库相对路径。
