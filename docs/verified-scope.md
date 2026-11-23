@@ -42,7 +42,7 @@ Windows 上的 Desktop profile 从 Host 0.2.0 升级到 0.2.2 后，Codex 全程
 - 阶段 B：同一台运行中的 Host，在不重启进程的情况下重新布防 `bootstrap.json` / `bootstrap.secret`、单次使用、并发配对只成功一次、过期/超长/损坏 JSON 失败关闭、授权写盘失败不作废窗口、外部改写 `allowlist.json` 立即生效，由 `test/rearm.test.js` 覆盖；`tests/test_rearm_bootstrap.py` 只验证重新布防脚本不改长期 host secret 和授权文件。主机夹具模拟了官方 controller 的 `prompt` / `cancel` / `list` 形状，但它不是那台 Desktop。
 - `health` 的 `bootstrap_armed` 等字段、`agent_not_attached` 取消拒绝、取消回执与官方 `turn/end` 分开，也只在夹具里看过。
 
-这些都不能写成 0.1.6 已经在真机上通过。真机安装、真机取消、真机重新配对仍未做；见 [request-lifecycle.md](request-lifecycle.md) 的升级和回滚步骤，以及 [release-0.1.6.md](release-0.1.6.md) 的证据分级。
+这些都不能写成 0.1.6 已经在真机上通过。真机安装、真机取消、真机重新配对仍未做；见 [request-lifecycle.md](request-lifecycle.md) 的升级和回滚步骤，以及 [release-0.1.6.md](history/release-0.1.6.md) 的证据分级。
 
 ## 0.2.0 的夹具回归
 
@@ -70,7 +70,7 @@ Windows 上的 Desktop profile 从 Host 0.2.0 升级到 0.2.2 后，Codex 全程
 - 操作者同时在界面里改模型
 - 对运行中自有回合执行取消，以及超时后的完整生命周期
 - 跨工作区、多实例的实际工程闭环
-- 新 SuperAgent Assignment 与出站通知，见 [0.2.0 交付记录](release-0.2.0.md)。
+- 新 SuperAgent Assignment 与出站通知，见 [0.2.0 交付记录](history/release-0.2.0.md)。
 
 仓库里的 Node 和 Python 测试是模拟。模拟通过不等于上面这台 Desktop 已经复测了新提交。
 

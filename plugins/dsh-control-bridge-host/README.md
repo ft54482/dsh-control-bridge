@@ -4,6 +4,8 @@ MIT. A Desktop-profile bundle for `dsh-control-bridge`. It is not a DeepSeek pro
 
 The loopback bearer and the choice to call `sessionController` inside the Host, instead of the browser token, follow the MIT-licensed project [ft54482/dsh-agent-bridge](https://github.com/ft54482/dsh-agent-bridge). This package is a separate implementation and does not include that project's code.
 
+Installing this Host for Codex? Start with the [Windows setup and pairing guide](https://github.com/ft54482/dsh-control-bridge/blob/main/docs/windows-delivery.md#codex-desktop-setup). For a custom listener port, follow the [port configuration guide](https://github.com/ft54482/dsh-control-bridge/blob/main/docs/ports.md#desktop-host).
+
 ## What it calls
 
 Inside a Desktop Host that has already mounted the official services, the plugin uses:
