@@ -272,7 +272,24 @@ export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
   /** Append one entry. Returns `{ ok, error }`; callers must not fail the grant. */
   function append(entry) {
     if (!target) return { ok: false, error: 'no_record_file' }
-    const full = { at: now().toISOString(), ...entry }
+    // Every line carries the same key set, so a reader never has to guess
+    // whether a missing field means "not applicable" or "not written".
+    const full = {
+      at: now().toISOString(),
+      op: null,
+      workspace_id: null,
+      path: null,
+      task_id: null,
+      purpose: null,
+      session_id: null,
+      preset: null,
+      access: null,
+      client_request_key: null,
+      phase: null,
+      result: null,
+      reason: null,
+      ...entry,
+    }
     try {
       fs.mkdirSync(path.dirname(target), { recursive: true })
       fs.appendFileSync(target, `${JSON.stringify(full)}\n`, 'utf8')

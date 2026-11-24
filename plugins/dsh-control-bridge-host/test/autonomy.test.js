@@ -176,6 +176,12 @@ test('autonomy registers a directory outside every root and takes a task-scoped 
   assert.equal(lines[0].task_id, TASK.task_id)
   assert.equal(lines[0].purpose, TASK.purpose)
   assert.equal(lines[0].workspace_id, created.body.workspace_id)
+  // Every journal line carries the frozen key set, whether or not a field
+  // applies to this operation.
+  for (const key of ['at', 'op', 'workspace_id', 'path', 'task_id', 'purpose', 'session_id',
+    'preset', 'access', 'client_request_key', 'phase', 'result', 'reason']) {
+    assert.equal(Object.hasOwn(lines[0], key), true, key)
+  }
   assert.equal(JSON.stringify(lines[0]).includes(SECRET), false)
 
   assert.equal(ctx.state.prompts, 0)
