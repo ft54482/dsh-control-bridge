@@ -715,6 +715,188 @@ test('one key reused for different task, path, preset, access or model is refuse
   assert.equal(ctx.state.createCalls.length, variants.length)
 })
 
+// ---- R2 audit sequences: three combinations, not single steps --------------
+
+test('sequence 1: a confirmed key cannot resurrect a revoked workspace', async (t) => {
+  const { started, outside } = await harness(t)
+  const project = path.join(outside, 'seq1')
+  fs.mkdirSync(project)
+  // A owns the workspace.
+  const a = await call(started.port, 'POST', '/v1/workspaces', { path: project, ...TASK })
+  assert.equal(a.status, 200, JSON.stringify(a.body))
+  const workspaceId = a.body.workspace_id
+  // B confirms the workspace for another task, under key K.
+  const key = 'seq1-confirm-0001'
+  const beta = { task_id: 'task-beta', purpose: 'beta work' }
+  const b = await call(started.port, 'POST', '/v1/workspaces', {
+    path: project, ...beta, confirm_task: true, client_request_key: key,
+  })
+  assert.equal(b.status, 200, JSON.stringify(b.body))
+  assert.equal(b.body.task.confirmed, true)
+  // The confirmation evidence must not downgrade the key's binding.
+  const boundLine = journal(started.dir).filter((line) => line.op === 'workspace_task_confirmed')
+  assert.equal(boundLine.length, 1)
+  assert.equal(boundLine[0].client_request_key, null)
+  assert.equal(boundLine[0].parent_key, key)
+  const revoked = await call(started.port, 'POST', '/v1/workspaces/revoke', { workspace_id: workspaceId })
+  assert.equal(revoked.status, 200, JSON.stringify(revoked.body))
+  // Replaying B must not re-grant the workspace.
+  const replay = await call(started.port, 'POST', '/v1/workspaces', {
+    path: project, ...beta, confirm_task: true, client_request_key: key,
+  })
+  assert.equal(replay.status, 409)
+  assert.equal(replay.body.reason, 'authorization_stale')
+  assert.equal(replay.body.current, 'revoked')
+  assert.equal(replay.body.deduplicated, false)
+  assert.equal(readGrantFile(started.file).workspaceAllowlist.length, 0)
+  assert.equal(fs.statSync(project).isDirectory(), true)
+})
+
+test('sequence 1b: replaying a confirmed workspace dedupes and does not re-confirm', async (t) => {
+  const { started, outside } = await harness(t)
+  const project = path.join(outside, 'seq1b')
+  fs.mkdirSync(project)
+  const a = await call(started.port, 'POST', '/v1/workspaces', { path: project, ...TASK })
+  assert.equal(a.status, 200, JSON.stringify(a.body))
+  const key = 'seq1b-confirm-0001'
+  const beta = { task_id: 'task-beta', purpose: 'beta work' }
+  const body = { path: project, ...beta, confirm_task: true, client_request_key: key }
+  const first = await call(started.port, 'POST', '/v1/workspaces', body)
+  assert.equal(first.status, 200, JSON.stringify(first.body))
+  assert.equal(first.body.deduplicated, undefined)
+  // A confirmation is evidence: the key still answers its own successful call.
+  const replay = await call(started.port, 'POST', '/v1/workspaces', body)
+  assert.equal(replay.status, 200, JSON.stringify(replay.body))
+  assert.equal(replay.body.deduplicated, true)
+  assert.equal(replay.body.workspace_id, first.body.workspace_id)
+  const confirmed = journal(started.dir).filter((line) => line.op === 'workspace_task_confirmed')
+  assert.equal(confirmed.length, 1)
+  // A's create plus B's reuse; the replay added no third binding line.
+  const bindings = journal(started.dir).filter((line) => ['workspace_create', 'workspace_reuse'].includes(line.op))
+  assert.equal(bindings.length, 2)
+  assert.equal(readGrantFile(started.file).workspaceAllowlist[0].task_id, TASK.task_id)
+})
+
+test('sequence 2: a revoked workspace cannot be re-registered by a failed-create retry', async (t) => {
+  const { ctx, started, outside } = await harness(t)
+  const project = path.join(outside, 'seq2')
+  fs.mkdirSync(project)
+  const original = ctx.sessionController.create.bind(ctx.sessionController)
+  let armed = true
+  ctx.sessionController.create = async (request) => {
+    if (armed) {
+      armed = false
+      throw Object.assign(new Error('controller blew up'), { code: 'gateway/internal' })
+    }
+    return original(request)
+  }
+  const body = {
+    path: project, ...TASK, agent_preset: 'master-control', access: 'write', client_request_key: 'seq2-create-0001',
+  }
+  const first = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(first.status, 502, JSON.stringify(first.body))
+  const workspaceId = first.body.workspace_id
+  assert.ok(workspaceId)
+  const revoked = await call(started.port, 'POST', '/v1/workspaces/revoke', { workspace_id: workspaceId })
+  assert.equal(revoked.status, 200, JSON.stringify(revoked.body))
+  // Same key, same arguments: the retry must not re-register or re-grant.
+  const retry = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(retry.status, 409)
+  assert.equal(retry.body.reason, 'authorization_stale')
+  assert.equal(retry.body.current, 'revoked')
+  assert.equal(retry.body.historical.workspace_id, workspaceId)
+  assert.equal(ctx.state.createCalls, undefined)
+  assert.equal(readGrantFile(started.file).workspaceAllowlist.length, 0)
+  assert.equal(readGrantFile(started.file).sessionAllowlist.length, 0)
+  assert.equal(fs.statSync(project).isDirectory(), true)
+})
+
+test('sequence 3: a confirmed continuation survives a grant repair', async (t) => {
+  const { ctx, started, outside } = await harness(t)
+  const project = path.join(outside, 'seq3')
+  fs.mkdirSync(project)
+  const a = await call(started.port, 'POST', '/v1/workspaces', { path: project, ...TASK })
+  assert.equal(a.status, 200, JSON.stringify(a.body))
+  const original = started.store.grantFreshSession.bind(started.store)
+  let armed = true
+  started.store.grantFreshSession = async (...args) => {
+    if (armed) {
+      armed = false
+      throw Object.assign(new Error('allowlist write failed'), { code: 'allowlist_persist_failed' })
+    }
+    return original(...args)
+  }
+  const beta = { task_id: 'task-beta', purpose: 'beta work' }
+  const body = {
+    path: project, ...beta, confirm_task: true, agent_preset: 'master-control', access: 'write',
+    client_request_key: 'seq3-repair-0001',
+  }
+  const first = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(first.status, 500, JSON.stringify(first.body))
+  assert.equal(first.body.reason, 'grant_persist_failed')
+  assert.ok(first.body.session_id)
+  const sessionsAfterFailure = ctx.state.sessions.length
+  // Same key, same arguments: repair the grant, keep the confirmed task.
+  const retry = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(retry.status, 200, JSON.stringify(retry.body))
+  assert.equal(retry.body.repaired, true)
+  assert.equal(retry.body.session_id, first.body.session_id)
+  assert.equal(retry.body.task_id, 'task-beta')
+  assert.equal(ctx.state.sessions.length, sessionsAfterFailure)
+  const grant = readGrantFile(started.file).sessionAllowlist.find((row) => row.sessionId === retry.body.session_id)
+  assert.equal(grant.access, 'write')
+  assert.equal(grant.task_id, 'task-beta')
+  assert.equal(readGrantFile(started.file).workspaceAllowlist[0].task_id, TASK.task_id)
+})
+
+test('sequence 2b: a revoked workspace cannot be repaired into existence', async (t) => {
+  const { ctx, started, outside } = await harness(t)
+  const project = path.join(outside, 'seq2b')
+  fs.mkdirSync(project)
+  const original = started.store.grantFreshSession.bind(started.store)
+  let armed = true
+  started.store.grantFreshSession = async (...args) => {
+    if (armed) {
+      armed = false
+      throw Object.assign(new Error('allowlist write failed'), { code: 'allowlist_persist_failed' })
+    }
+    return original(...args)
+  }
+  const body = {
+    path: project, ...TASK, agent_preset: 'master-control', access: 'write', client_request_key: 'seq2b-repair-0001',
+  }
+  const first = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(first.status, 500, JSON.stringify(first.body))
+  assert.ok(first.body.session_id)
+  const revoked = await call(started.port, 'POST', '/v1/workspaces/revoke', { workspace_id: first.body.workspace_id })
+  assert.equal(revoked.status, 200)
+  const retry = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(retry.status, 409)
+  assert.equal(retry.body.reason, 'authorization_stale')
+  assert.equal(retry.body.current, 'revoked')
+  assert.equal(readGrantFile(started.file).sessionAllowlist.length, 0)
+  assert.equal(ctx.state.createCalls.length, 1)
+})
+
+test('a task write on a configured-but-ineffective host reports the policy, not the roots', async (t) => {
+  const { started, outside } = await harness(t, { allowlistFile: '', workspaceRoots: [] })
+  const project = path.join(outside, 'precedence')
+  const workspace = await call(started.port, 'POST', '/v1/workspaces', {
+    path: project, create_directory: true, ...TASK,
+  })
+  assert.equal(workspace.status, 403)
+  assert.equal(workspace.body.reason, 'workspace_autonomy_not_effective')
+  const session = await call(started.port, 'POST', '/v1/sessions', {
+    path: project, ...TASK, agent_preset: 'master-control', access: 'write',
+  })
+  assert.equal(session.status, 403)
+  assert.equal(session.body.reason, 'workspace_autonomy_not_effective')
+  // A call without task intent keeps the old reason and status.
+  const legacy = await call(started.port, 'POST', '/v1/workspaces', { path: project })
+  assert.equal(legacy.status, 403)
+  assert.equal(legacy.body.reason, 'no_allowed_roots')
+})
+
 test('the workspace_id entry obeys the same task ownership rule', async (t) => {
   const { ctx, started, outside } = await harness(t)
   const project = path.join(outside, 'by-id')

@@ -33,6 +33,21 @@ export const OPS = new Set([
   'workspace_revoke',
 ])
 
+/**
+ * Only these operations may bind (or replace) an idempotency key: they are the
+ * ones that answer a caller's request. Everything else is evidence — it says
+ * something happened, never that the key's own request succeeded.
+ */
+export const BINDING_OPS = new Set([
+  'workspace_create',
+  'workspace_reuse',
+  'workspace_grant',
+  'workspace_grant_failed',
+  'session_create',
+  'session_grant',
+  'session_grant_failed',
+])
+
 function text(value) {
   return typeof value === 'string' ? value : ''
 }
@@ -265,26 +280,48 @@ export function createKeyedLock() {
  * Append-only operation journal.
  *
  * One JSON object per line; never a bearer token. The file is also the replay
- * source: `latest(key)` answers "did this client request key already succeed,
- * and if it stopped after the Session existed, which Session?".
+ * source: `lookup(key)` answers "did this client request key already succeed,
+ * and if it stopped after the Session existed, which Session?". The caller
+ * compares the binding's `operation` with its own, so one key can never answer
+ * another operation's request. Every line carries 17 fixed keys; the lines that
+ * need them add `receipt` or `revoked`.
+ *
+ * Two classes of line share the file but not the index:
+ * - binding lines (BINDING_OPS) answer a caller's request and own the key;
+ * - evidence lines (confirmations, revocations) say what happened to an
+ *   authorization. They never bind a key and never downgrade a binding.
  */
 export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
   const target = text(file)
   let operations = 0
   const byKey = new Map()
+  const confirmations = new Map()
   const recent = []
   let readError = ''
+
+  function rememberConfirmation(entry) {
+    const key = text(entry.client_request_key) || text(entry.parent_key)
+    if (!key) return
+    confirmations.set(key, {
+      task_id: text(entry.task_id) || null,
+      workspace_id: text(entry.workspace_id) || null,
+      at: text(entry.at) || null,
+    })
+  }
 
   function remember(entry) {
     if (typeof entry.op !== 'string' || !OPS.has(entry.op)) return
     if (recent.length >= 50) recent.shift()
     recent.push(entry)
+    if (entry.op === 'workspace_task_confirmed') {
+      rememberConfirmation(entry)
+      return
+    }
+    if (!BINDING_OPS.has(entry.op)) return
     const key = text(entry.client_request_key)
     if (!key) return
-    // A key belongs to exactly one operation. The last line for that key wins,
-    // so a later success supersedes an earlier partial attempt.
     const receipt = entry.receipt && typeof entry.receipt === 'object' ? entry.receipt : null
-    byKey.set(key, {
+    const next = {
       operation: entry.operation === 'session' ? 'session' : 'workspace',
       request_hash: text(entry.request_hash),
       request: entry.request && typeof entry.request === 'object' ? entry.request : null,
@@ -300,7 +337,25 @@ export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
       at: text(entry.at) || null,
       complete: Boolean(receipt) && entry.result === 'ok',
       receipt,
-    })
+    }
+    const existing = byKey.get(key)
+    if (existing && existing.complete) {
+      // A completed binding is only replaced by a completed binding of the very
+      // same request (the repair path). A later failure or evidence line must
+      // never make a succeeded key look unfinished — that is what let a
+      // revoked workspace be re-granted by replaying its own case.
+      if (!next.complete) return
+      if (existing.request_hash && next.request_hash && existing.request_hash !== next.request_hash) return
+      byKey.set(key, next)
+      return
+    }
+    if (next.complete) {
+      byKey.set(key, next)
+      return
+    }
+    // A partial may only update a partial of the same operation.
+    if (existing && existing.operation !== next.operation) return
+    byKey.set(key, next)
   }
 
   if (target && fs.existsSync(target)) {
@@ -364,12 +419,13 @@ export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
     lookup(key) {
       return byKey.get(text(key)) || null
     },
-    /** The binding only when it belongs to this operation (`workspace`/`session`). */
-    latest(key, operation) {
-      const bound = byKey.get(text(key))
-      if (!bound) return null
-      if (operation && bound.operation !== operation) return null
-      return bound
+    /** Whether this key carries an explicit task confirmation for that workspace. */
+    confirmed(key, taskId, workspaceId) {
+      const row = confirmations.get(text(key))
+      if (!row) return false
+      if (taskId && row.task_id !== taskId) return false
+      if (workspaceId && row.workspace_id !== workspaceId) return false
+      return true
     },
     entries() {
       return [...recent]

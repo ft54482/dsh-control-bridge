@@ -522,6 +522,9 @@ export function createHostServer(ctx, config, secret) {
         receipt,
       })
       if (confirmTask && previousTask && previousTask !== task.task_id) {
+        // Evidence, not a binding: this line records that the task took the
+        // workspace over. It must never speak for the caller's key, or the key
+        // would stop answering its own (already successful) request.
         recordOp({
           op: 'workspace_task_confirmed',
           operation: 'workspace',
@@ -531,8 +534,8 @@ export function createHostServer(ctx, config, secret) {
           purpose: task.purpose,
           phase: null,
           result: 'ok',
-          client_request_key: key.key,
-          parent_key: parentKey,
+          client_request_key: null,
+          parent_key: key.key || parentKey,
           request: fingerprint,
           request_hash: requestHash,
           reason: `previous_task_id=${previousTask}`,
@@ -722,7 +725,18 @@ export function createHostServer(ctx, config, secret) {
         }
       }
       // phase `create_failed` (or a grant failure recorded before the Session
-      // id was known): the flow continues below and is idempotent by path.
+      // id was known): the flow may continue below — but only if the workspace
+      // it was registered on is still authorized. A retry is not a way to
+      // re-grant a revoked workspace.
+    }
+    if (bound && !bound.complete && bound.workspace_id) {
+      const current = workspaceGrantOf(state(), bound.workspace_id)
+      if (!current) return staleAuthorization({ operation: 'session', bound, current: 'revoked' })
+      const confirmed = Boolean(bound.request && bound.request.confirm_task === true)
+        && autonomyRecord.confirmed(requestKey, bound.task_id, bound.workspace_id)
+      if (current.task_id && bound.task_id && current.task_id !== bound.task_id && !confirmed) {
+        return staleAuthorization({ operation: 'session', bound, current: 'task_changed' })
+      }
     }
     if (preset !== undefined) {
       if (typeof preset !== 'string' || !preset.trim() || preset !== preset.trim()) {
@@ -1045,7 +1059,12 @@ export function createHostServer(ctx, config, secret) {
         },
       }
     }
-    if (previousTask && partial.task_id && previousTask !== partial.task_id) {
+    // A confirmed continuation is a legitimate owner of this Session's task:
+    // the workspace keeps its first task, so the evidence for the second one
+    // lives under this request key.
+    const confirmedContinuation = Boolean(partial.request && partial.request.confirm_task === true)
+      && autonomyRecord.confirmed(requestKey, partial.task_id, workspaceId)
+    if (previousTask && partial.task_id && previousTask !== partial.task_id && !confirmedContinuation) {
       return {
         status: 409,
         body: {
@@ -1996,12 +2015,19 @@ export function createHostServer(ctx, config, secret) {
         if (!ctx.workspaceRegistry || typeof ctx.workspaceRegistry.create !== 'function') {
           return send(res, 501, { ok: false, reason: 'workspace_create_unavailable', detail: 'the official workspaceRegistry.create is not mounted' })
         }
-        if (rootsUnavailable() && !autonomyConfig.effective) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
+        // Without an autonomy policy at all, the old order is byte-identical:
+        // no roots means no capability, before the body is even read.
+        if (!autonomyConfig.configured && rootsUnavailable()) {
+          return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
+        }
         const body = await readJson(req)
         if (autonomyConfig.effective || taskIntent(body)) {
           const outcome = await workspaceRoute(body)
           if (outcome) return send(res, outcome.status, outcome.body)
         }
+        // A configured-but-ineffective policy with no roots keeps the old
+        // refusal for calls that did not ask for autonomy at all.
+        if (rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
         const resolved = resolveWithinRoots(workspaceRoots, body.path, { createDirectory: body.create_directory === true })
         if (!resolved.ok) {
           return send(res, 400, { ok: false, reason: resolved.reason, detail: resolved.detail || null, path: null })
