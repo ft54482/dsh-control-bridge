@@ -403,6 +403,12 @@ export async function startServer(ctx, options = {}) {
     allowCreateSession: options.allowCreateSession === true,
     allowCreateWorkspace: options.allowCreateWorkspace === true,
     allowOpenPath: options.allowOpenPath === true,
+    // Workspace autonomy is opt-in: an explicit `workspaceAutonomy` value is the
+    // only thing that can turn it on, and `allowlistFile: ''` can model the
+    // "configured but not effective" deployment.
+    allowlistFile: options.allowlistFile === undefined ? (file || undefined) : options.allowlistFile,
+    workspaceAutonomy: options.workspaceAutonomy,
+    autonomyRecordFile: options.autonomyRecordFile,
     outbox: options.outbox,
     outboxFile: options.outboxFile || '',
     webhook: options.webhook,

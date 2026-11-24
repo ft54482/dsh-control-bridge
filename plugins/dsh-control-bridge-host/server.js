@@ -516,6 +516,15 @@ export function createHostServer(ctx, config, secret) {
     }
     if (!autonomyConfig.effective) return null
     if (await needsAutonomyPath(body)) {
+      const id = typeof body.workspace_id === 'string' ? body.workspace_id : ''
+      // A revoked (or never granted) workspace is not fixable by adding a task:
+      // the workspace flow has to grant it first.
+      if (id && !workspaceGrantOf(state(), id)) {
+        return {
+          status: 403,
+          body: { ok: false, reason: 'workspace_not_allowlisted', workspace_id: id, started_task: false },
+        }
+      }
       return {
         status: 400,
         body: {
@@ -571,6 +580,19 @@ export function createHostServer(ctx, config, secret) {
           return { status: 409, body: { ok: false, reason: 'agent-preset/invalid', started_task: false } }
         }
       } catch (error) {
+        // A preset the host cannot resolve to this exact id is the frozen
+        // `agent-preset/invalid` refusal for a new path; nothing is created.
+        if (error && error.code === 'agent-preset/not-found') {
+          return {
+            status: 409,
+            body: {
+              ok: false,
+              reason: 'agent-preset/invalid',
+              started_task: false,
+              detail: 'the preset id does not resolve to an available preset',
+            },
+          }
+        }
         return officialErrorBody(error, 'agentPresets.resolve')
       }
     }
