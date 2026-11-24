@@ -9,13 +9,16 @@
 
 让 Codex、Grok Bot 或自己的协调程序把任务交给指定的 DeepSeek Harness 工作区，并跟踪执行结果。**已经在同一台电脑使用 Codex 和 Harness Desktop？从 Codex skill 和 Desktop Host 开始。** 这条路径只连接本机 Host，安装好后即可在 Codex 里用自然语言操作。
 
-[Super Agent 驾驶舱](plugins/dsh-superagent-cockpit/README.md) · [Codex 技能 v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [文档目录](docs/README.md) · [端口配置与排错](docs/ports.md) · [Windows 真机验收](docs/verified-scope.md)
+[Super Agent 驾驶舱](plugins/dsh-superagent-cockpit/README.md) · [Codex 技能 v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [ZCode 技能](skills/zcode/README.md) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [文档目录](docs/README.md) · [端口配置与排错](docs/ports.md) · [Windows 真机验收](docs/verified-scope.md)
+
+**ZCode 版技能已经做好（2026-11-25）。** 安装步骤和完成情况见下方「ZCode 快速开始」。
 
 ## 选一个入口
 
 | 你的环境和目的 | 安装或运行什么 | 第一次验证 |
 | --- | --- | --- |
 | Codex 桌面端，希望继续旧会话或为新任务开主控会话 | 在 Codex 安装 **skill**，在 Harness 的 desktop profile 安装 **Host 插件** | 用 skill 执行 `health` 和 `granted`。[安装与配对](docs/windows-delivery.md#codex-desktop-setup) |
+| 用 ZCode：续接 Desktop 会话、新建主控会话，或往 SuperAgent 派工单 | 把两个 **ZCode 技能**目录装进 `~/.zcode/skills/`；Host 插件与 Codex 路径相同 | 用技能里的 `desktop.py health` 查连接，再跑它自带的三个行为测试。[ZCode 快速开始](skills/zcode/README.md) |
 | 自己的 Bot 或脚本，需要多实例、收件箱、任务审批和审计 | 安装 Python **协调桥**，用 `dsh-bridge` CLI 操作。需要接收签名 HTTP 事件时再开 `serve` | 先用 fake 跑完一次起草、发送和交卷。[协调桥指南](docs/coordinator.md) |
 | 已有工具客户端，希望用 MCP 读收件箱或起草任务 | 由客户端启动同一个 Python 协调桥的 `mcp` 子命令。v0.2.2 使用 `Content-Length` 消息帧，客户端需支持此格式 | 用兼容客户端调用 `tools/list`。仅支持逐行 JSON 的客户端可先用 CLI。[MCP 配置与工具](docs/coordinator.md) |
 | 在终端或 CI 运行独立的 Harness 普通会话 | 给 Python 协调桥配置 `headless_cli` 适配器和独立的 headless profile | 先用默认的 `spawn = false` 核对配置。[Headless CLI](docs/headless-cli.md) |
@@ -30,6 +33,17 @@
 2. **装 Host 并配对。** 使用 Python 3.11+。按 Windows 手册把 Host 装入实际使用的 desktop profile，在目标工作区选择一条空闲会话，并把长期凭据文件的路径配置给 skill。只查历史可选 `read`，要派工则选 `write`。[安装与配对](docs/windows-delivery.md#codex-desktop-setup)
 3. **先查连接。** 在 Codex 输入「用 `$deepseek-harness-bridge` 检查本机连接，列出已授权会话」。要新建主控会话，再确认同一 profile 已装 `master-control` 预设、Host 已开启会话创建，且 `health` 返回 `preset_create_verified=true`。自定义端口请一并告诉 Codex。[非默认端口示例](docs/ports.md#desktop-host)
 4. **按任务选择会话。** 可以说「找到上次修导出的会话，继续处理失败用例」，也可以说「在同一工作区开一个新的主控会话，处理这项独立任务」。创建成功后，skill 从实际会话读回预设，再派工并按请求 ID 跟踪官方终态。[会话命令与验收字段](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
+
+## ZCode 快速开始
+
+**状态：已完成（2026-11-25）。** SuperAgent 派工和 Desktop 主控会话都在一台运行两个实例的 Windows 电脑上真机跑通：SuperAgent 的首次派工和在同一张工单上追加任务都以 `completed` 结束；Desktop 这条路新建会话、发送提示词、取回「官方完成」，一次往返不到半分钟。仓库没有被改动。还没有实测的是新开 Issue 的派工路径。完整清单见 [Windows 真机验收](docs/verified-scope.md)。
+
+1. **前提。** Python 3.11+；Harness Desktop 里已装 Host 插件并完成配对，做法与 Codex 路径相同。要派 SuperAgent 工单，还需要已部署的 SuperAgent 和已登录的 GitHub CLI。要在某个工作区里新建会话，这个工作区还得在 Host 的创建范围里，否则会得到 `403 outside_allowed_roots`。
+2. **装日常派工技能。** 把 `skills/zcode/deepseek-harness-bridge/` 整个目录拷进 `~/.zcode/skills/`，把其中的 `connection.example.json` 复制成 `connection.json`，按自己的电脑填写路径、端口和 SuperAgent 实例对照。这个文件只有路径和端口，凭据本身仍由 Host 保管。
+3. **装控制面技能（可选）。** 先把本仓库克隆到技能目录之外，再把 `skills/zcode/dsh-control-bridge/` 拷进 `~/.zcode/skills/`，把 `local.example.json` 复制成 `local.json` 并填上检出的路径。
+4. **验证并开始用。** 新开一个 ZCode 会话，运行 `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`，再运行该技能 `tests/` 下的三个行为测试，全部通过为准。之后可以说「用 SuperAgent 把某某任务派出去」，或者「找到上次做某某事的会话，接着做」。
+
+ZCode 技能基于 Codex 技能 v0.2.3 的上游客户端，另外带有四个助手脚本：起草 SuperAgent 工单（按仓库查出实例的端口）、等到工单结束、往 Desktop 会话发任务书、把会话列表压成一张表。[ZCode 技能说明](skills/zcode/README.md)
 
 ## 我的端口与示例不同
 

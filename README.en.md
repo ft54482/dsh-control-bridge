@@ -8,13 +8,16 @@ Project introductions and quick starts are available in six languages through th
 
 Let Codex, Grok Bot or your own coordinator assign work to a specific DeepSeek Harness workspace and track the results. **Already using Codex and Harness Desktop on the same computer? Start with the Codex skill and Desktop Host.** This path connects to the local Host and lets you operate it through natural-language requests in Codex after setup.
 
-[Super Agent Cockpit](plugins/dsh-superagent-cockpit/README.md) · [Codex skill v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [Documentation index](docs/README.md) · [Ports and troubleshooting](docs/ports.md) · [Windows live acceptance](docs/verified-scope.md)
+[Super Agent Cockpit](plugins/dsh-superagent-cockpit/README.md) · [Codex skill v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [ZCode skills](skills/zcode/README.md) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [Documentation index](docs/README.md) · [Ports and troubleshooting](docs/ports.md) · [Windows live acceptance](docs/verified-scope.md)
+
+**The ZCode skills are finished (2026-11-25).** See the ZCode quick start below for installation and for what has been verified.
 
 ## Choose an entry point
 
 | Your environment and goal | What to install or run | First check |
 | --- | --- | --- |
 | Use Codex Desktop to continue earlier work or open a master-control session for a new task | Install the **skill** in Codex and the **Host plugin** in the Harness desktop profile | Run `health` and `granted` through the skill. [Setup and pairing](docs/windows-delivery.md#codex-desktop-setup) |
+| Use ZCode to continue a Desktop session, open a master-control session, or dispatch SuperAgent tickets | Copy the two **ZCode skill** directories into `~/.zcode/skills/`; the Host plugin is the same as on the Codex path | Run `desktop.py health` from the skill, then its three behaviour tests. [ZCode quick start](skills/zcode/README.md) |
 | Use your own bot or script for multiple instances, an inbox, task approvals and auditing | Install the Python **coordinator** and operate it through the `dsh-bridge` CLI. Start `serve` when you need to receive signed HTTP events | Complete the draft, send and submission flow with fake first. [Coordinator guide](docs/coordinator.md) |
 | Use an existing tool client to read the inbox or draft tasks through MCP | Have the client launch the same Python coordinator's `mcp` subcommand. v0.2.2 uses `Content-Length` message framing, which the client must support | Call `tools/list` with a compatible client. Clients that only support newline-delimited JSON can use the CLI first. [MCP configuration and tools](docs/coordinator.md) |
 | Run independent ordinary Harness sessions in a terminal or CI | Configure the Python coordinator's `headless_cli` adapter and a separate headless profile | Check the configuration with the default `spawn = false` first. [Headless CLI](docs/headless-cli.md) |
@@ -29,6 +32,17 @@ See [components and runtime locations](docs/README.md#仓库里的几个名字) 
 2. **Install the Host and pair.** Use Python 3.11+. Follow the Windows guide to install the Host into the desktop profile you actually use, choose an idle session in the target workspace, and configure the skill with the path to the long-lived credential file. Choose `read` for history access or `write` for dispatch. [Setup and pairing](docs/windows-delivery.md#codex-desktop-setup)
 3. **Check the connection.** Ask Codex to “use `$deepseek-harness-bridge` to check the local connection and list authorized sessions.” To create master-control sessions, also confirm that the same profile has the `master-control` preset installed, the Host allows session creation, and `health` returns `preset_create_verified=true`. Tell Codex about any custom port. [Non-default port example](docs/ports.md#desktop-host)
 4. **Choose the session for the task.** Ask to “find the earlier export-fix session and continue the failing cases,” or “open a new master-control session in the same workspace for this independent task.” After creation, the skill reads back the preset from the actual session, dispatches the task and tracks the official terminal state by request ID. [Session commands and acceptance fields](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
+
+## ZCode quick start
+
+**Status: finished (2026-11-25).** SuperAgent dispatch and Desktop master-control sessions were both verified on a Windows machine running two instances: a first SuperAgent ticket and a follow-up on the same ticket both ended `completed`, and on the Desktop path a new session was created, sent a prompt and read back `completed` in under half a minute. The repository was left unchanged. Not yet verified: the new-Issue dispatch path. The full list is in [Windows live acceptance](docs/verified-scope.md).
+
+1. **Prerequisites.** Python 3.11+. The Host plugin is installed and paired in Harness Desktop, exactly as on the Codex path. Dispatching SuperAgent tickets also needs a deployed SuperAgent and a GitHub CLI that is logged in. To create sessions in a workspace, that workspace must be in the Host's creation scope; otherwise the answer is `403 outside_allowed_roots`.
+2. **Install the dispatch skill.** Copy `skills/zcode/deepseek-harness-bridge/` into `~/.zcode/skills/`, copy its `connection.example.json` to `connection.json`, and fill in the paths, ports and SuperAgent instances of your machine. The file holds paths and ports only; the credential itself stays with the Host.
+3. **Install the coordinator skill (optional).** Clone this repository outside every skills directory, copy `skills/zcode/dsh-control-bridge/` into `~/.zcode/skills/`, and copy `local.example.json` to `local.json` with the path of that checkout.
+4. **Check, then use it.** Start a new ZCode session. Run `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`, then the three behaviour tests in the skill's `tests/` directory; all of them must pass. After that you can ask ZCode to “dispatch this task to SuperAgent”, or to “find the session that did such-and-such last time and continue it”.
+
+The ZCode skills build on the upstream clients of Codex skill v0.2.3 and add four helper scripts: one prepares a SuperAgent ticket and looks up the port of the instance by repository, one waits for a ticket to end, one sends a brief to a Desktop session, and one compiles the session list. [ZCode skills](skills/zcode/README.md)
 
 ## Using different ports
 
