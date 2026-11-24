@@ -42,7 +42,7 @@ Die Zuordnung der Verzeichnisse erläutert [Komponenten und Ausführungsorte](do
 3. **Koordinator-Skill installieren (optional).** Dieses Repository außerhalb aller Skill-Verzeichnisse klonen, `skills/zcode/dsh-control-bridge/` nach `~/.zcode/skills/` kopieren und `local.example.json` als `local.json` mit dem Pfad des Klons kopieren.
 4. **Prüfen und loslegen.** Eine neue ZCode-Sitzung öffnen. `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health` ausführen, danach die drei Verhaltenstests im Verzeichnis `tests/` des Skills; alle müssen bestehen. Danach können Sie ZCode bitten, „diese Aufgabe an SuperAgent zu schicken“ oder „die Sitzung zu finden, die das zuletzt erledigt hat, und fortzusetzen“.
 
-Die ZCode-Skills teilen die Upstream-Clients mit dem Codex-Skill und bringen vier Helper-Skripte mit: Eines bereitet ein SuperAgent-Ticket aus einer Auftragsdatei vor und ermittelt den Port der Instanz anhand des Repositorys, eines wartet, bis ein Ticket endet, eines schickt eine Auftragsdatei an eine Desktop-Sitzung und eines fasst die Sitzungsliste in einer Tabelle zusammen. [ZCode-Skills](skills/zcode/README.md)
+Die ZCode-Skills bauen auf den Upstream-Clients des Codex-Skills v0.2.3 auf und bringen vier Helper-Skripte mit: Eines bereitet ein SuperAgent-Ticket aus einer Auftragsdatei vor und ermittelt den Port der Instanz anhand des Repositorys, eines wartet, bis ein Ticket endet, eines schickt eine Auftragsdatei an eine Desktop-Sitzung und eines fasst die Sitzungsliste in einer Tabelle zusammen. [ZCode-Skills](skills/zcode/README.md)
 
 ## Eigene Ports verwenden
 

@@ -22,7 +22,7 @@
 | 位置 | 运行在哪里 | 职责 |
 | --- | --- | --- |
 | [`skills/deepseek-harness-bridge/`](../skills/deepseek-harness-bridge/) | Codex 所在的本机 | 提供操作指引和两个 Python 客户端，分别访问 Desktop Host 与 SuperAgent 管理服务。 |
-| [`skills/zcode/`](../skills/zcode/) | ZCode 所在的本机 | 给 ZCode 用的两个技能。与 Codex 技能共用上游客户端，另带起草 SuperAgent 工单、等待工单结束、给 Desktop 会话发任务书等助手脚本。 |
+| [`skills/zcode/`](../skills/zcode/) | ZCode 所在的本机 | 给 ZCode 用的两个技能。基于 Codex 技能 v0.2.3 的上游客户端，另带起草 SuperAgent 工单、等待工单结束、给 Desktop 会话发任务书等助手脚本。 |
 | [`plugins/dsh-control-bridge-host/`](../plugins/dsh-control-bridge-host/) | Harness Desktop 进程 | 在已授权范围内，将本机 HTTP 请求交给官方会话服务。 |
 | [`src/dsh_control_bridge/`](../src/dsh_control_bridge/) | 自己的协调程序所在机器 | 提供 `dsh-bridge` CLI、stdio MCP 和独立的签名事件接收器。 |
 | [`scripts/windows/`](../scripts/windows/) | Windows 安装或维护时 | 安装、升级、配对和运行本机检查。 |

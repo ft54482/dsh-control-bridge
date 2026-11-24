@@ -43,7 +43,7 @@
 3. **装控制面技能（可选）。** 先把本仓库克隆到技能目录之外，再把 `skills/zcode/dsh-control-bridge/` 拷进 `~/.zcode/skills/`，把 `local.example.json` 复制成 `local.json` 并填上检出的路径。
 4. **验证并开始用。** 新开一个 ZCode 会话，运行 `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`，再运行该技能 `tests/` 下的三个行为测试，全部通过为准。之后可以说「用 SuperAgent 把某某任务派出去」，或者「找到上次做某某事的会话，接着做」。
 
-ZCode 技能与 Codex 技能共用同一份上游客户端，另外带有四个助手脚本：起草 SuperAgent 工单（按仓库查出实例的端口）、等到工单结束、往 Desktop 会话发任务书、把会话列表压成一张表。[ZCode 技能说明](skills/zcode/README.md)
+ZCode 技能基于 Codex 技能 v0.2.3 的上游客户端，另外带有四个助手脚本：起草 SuperAgent 工单（按仓库查出实例的端口）、等到工单结束、往 Desktop 会话发任务书、把会话列表压成一张表。[ZCode 技能说明](skills/zcode/README.md)
 
 ## 我的端口与示例不同
 

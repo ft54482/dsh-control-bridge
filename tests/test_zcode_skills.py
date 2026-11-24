@@ -1,5 +1,6 @@
-"""The ZCode skills under skills/zcode track the Codex skill and ship nothing that belongs to one machine."""
+"""The ZCode skills under skills/zcode track a released Codex skill and ship nothing that belongs to one machine."""
 
+import hashlib
 import json
 import os
 import re
@@ -12,9 +13,17 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 ZCODE = ROOT / "skills" / "zcode"
 SKILLS = ("deepseek-harness-bridge", "dsh-control-bridge")
-# These files are the upstream clients. The ZCode skill carries them unchanged from the Codex skill.
-SHARED_WITH_CODEX = ("references/desktop.md", "references/superagent.md", "scripts/desktop.py",
-                     "scripts/superagent.py", "scripts/github_source.py")
+# These files are the upstream clients. The ZCode skill carries them unchanged from one released
+# version of the Codex skill, pinned by the SHA-256 of the bytes git stores. The Codex skill on the
+# default branch can be ahead of that release. Upgrading the ZCode skill means replacing these files
+# and these hashes in the same change, after checking that the ZCode helpers still work with them.
+SHARED_WITH_CODEX = {
+    "references/desktop.md": "e6879a7e98cb19ecaaa45bf0466317a5f2d79a29f980dfd237f5a87bc14bcef7",
+    "references/superagent.md": "6ae5c8ee18daab4de20a8b322703120ddaaca4cfd3591aaaeb6d814cacd8a8e7",
+    "scripts/desktop.py": "dae0a7b5f2b81f12ac7887d1cc6ae9721fa5a01d66e0fbb16ba07a5ad920ef5f",
+    "scripts/superagent.py": "b5431369c7d4713da7849b6850d56e0444765215b0b7e804a7b0f9573e4d3ee3",
+    "scripts/github_source.py": "dd52a12d13ab41a8d5fae8f64f0b3ccffa37b5c84f60474505b07307e6dcb7aa",
+}
 # Filled-in copies of these stay on the machine that uses them; the repository ships the examples only.
 LOCAL_ONLY = ("connection.json", "local.json")
 TOKEN_LIKE = re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}")
@@ -33,11 +42,10 @@ def as_stored_by_git(path: Path) -> bytes:
     return path.read_bytes().replace(b"\r\n", b"\n")
 
 
-def test_shared_files_match_the_codex_skill():
-    for relative in SHARED_WITH_CODEX:
-        zcode = as_stored_by_git(ZCODE / "deepseek-harness-bridge" / relative)
-        codex = as_stored_by_git(ROOT / "skills" / "deepseek-harness-bridge" / relative)
-        assert zcode == codex, relative
+def test_shared_files_match_the_released_codex_skill():
+    for relative, digest in SHARED_WITH_CODEX.items():
+        carried = as_stored_by_git(ZCODE / "deepseek-harness-bridge" / relative)
+        assert hashlib.sha256(carried).hexdigest() == digest, relative
 
 
 def test_each_skill_is_named_after_its_directory():

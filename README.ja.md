@@ -42,7 +42,7 @@ Codex、Grok Bot、独自の調整プログラムから、指定した DeepSeek 
 3. **調整ブリッジ用 skill をインストール（任意）。** このリポジトリを skill ディレクトリの外にクローンしてから、`skills/zcode/dsh-control-bridge/` を `~/.zcode/skills/` にコピーし、`local.example.json` を `local.json` として複製してクローン先のパスを記入します。
 4. **確認して使い始める。** 新しい ZCode セッションを開きます。`python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health` を実行し、次に skill の `tests/` にある 3 つの動作テストを実行します。すべて通る必要があります。その後は「このタスクを SuperAgent に送って」や「前回これをした会話を探して続けて」と依頼できます。
 
-ZCode skill は Codex skill と同じクライアント群を使い、4 つの helper スクリプトを追加します。依頼書ファイルからチケットを起草する（リポジトリから SuperAgent インスタンスのポートを引く）、チケットが終わるまで待つ、デスクトップの会話に依頼書を送る、会話一覧を表にまとめる、です。[ZCode skill の説明](skills/zcode/README.md)
+ZCode skill は Codex skill v0.2.3 と同じクライアント群を使い、4 つの helper スクリプトを追加します。依頼書ファイルからチケットを起草する（リポジトリから SuperAgent インスタンスのポートを引く）、チケットが終わるまで待つ、デスクトップの会話に依頼書を送る、会話一覧を表にまとめる、です。[ZCode skill の説明](skills/zcode/README.md)
 
 ## サンプルと異なるポートを使う
 

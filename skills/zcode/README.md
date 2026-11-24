@@ -1,6 +1,6 @@
 # ZCode 技能
 
-给 ZCode 用的两个技能，和本项目的 Codex 技能出自同一套客户端。**状态：已完成（2026-11-25）。** 能装、能自检；SuperAgent 派工和 Desktop 主控会话（新建、发送提示词、取回结果）都在一台运行两个实例的 Windows 电脑上真机跑通。哪些验证过、哪些没有，见下面的[完成情况](#完成情况)和 [Windows 真机验收](../../docs/verified-scope.md)。
+给 ZCode 用的两个技能，和本项目的 Codex 技能出自同一套客户端，基于它的发布版 v0.2.3（标签 `skill-v0.2.3`）。**状态：已完成（2026-11-25）。** 能装、能自检；SuperAgent 派工和 Desktop 主控会话（新建、发送提示词、取回结果）都在一台运行两个实例的 Windows 电脑上真机跑通。哪些验证过、哪些没有，见下面的[完成情况](#完成情况)和 [Windows 真机验收](../../docs/verified-scope.md)。
 
 ## 两个技能
 
@@ -13,7 +13,8 @@
 
 ## 和 Codex 技能的关系
 
-- **共用同一份上游客户端。** `deepseek-harness-bridge/` 里的 `scripts/desktop.py`、`scripts/superagent.py`、`scripts/github_source.py`、`references/desktop.md`、`references/superagent.md`，与 [`skills/deepseek-harness-bridge/`](../deepseek-harness-bridge/) 里的同名文件逐字节相同。仓库的测试守着这一点，两边不会悄悄分叉。
+- **共用同一份上游客户端。** `deepseek-harness-bridge/` 里的 `scripts/desktop.py`、`scripts/superagent.py`、`scripts/github_source.py`、`references/desktop.md`、`references/superagent.md`，与 Codex 技能发布版 v0.2.3（标签 `skill-v0.2.3`）里的同名文件逐字节相同，仓库的测试守着这一点。
+- **主干上的 Codex 技能可能更新。** v0.2.3 之后主干上的改动还没有同步进 ZCode 技能，目前是待办收件箱、回帖和轮询（#13）。同步之前，这里只有 v0.2.3 的能力。同步的时候要重新核对两个 SuperAgent 助手，并更新测试里钉住的哈希。
 - **`SKILL.md` 是 ZCode 版。** 用中文重写，按 ZCode 的加载方式写命令，并记下了真机上碰到的判读问题。
 - **多了四个助手脚本**，都只用 Python 标准库：
 

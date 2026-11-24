@@ -42,7 +42,7 @@ See [components and runtime locations](docs/README.md#仓库里的几个名字) 
 3. **Install the coordinator skill (optional).** Clone this repository outside every skills directory, copy `skills/zcode/dsh-control-bridge/` into `~/.zcode/skills/`, and copy `local.example.json` to `local.json` with the path of that checkout.
 4. **Check, then use it.** Start a new ZCode session. Run `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`, then the three behaviour tests in the skill's `tests/` directory; all of them must pass. After that you can ask ZCode to “dispatch this task to SuperAgent”, or to “find the session that did such-and-such last time and continue it”.
 
-The ZCode skills share the upstream clients with the Codex skill and add four helper scripts: one prepares a SuperAgent ticket and looks up the port of the instance by repository, one waits for a ticket to end, one sends a brief to a Desktop session, and one compiles the session list. [ZCode skills](skills/zcode/README.md)
+The ZCode skills build on the upstream clients of Codex skill v0.2.3 and add four helper scripts: one prepares a SuperAgent ticket and looks up the port of the instance by repository, one waits for a ticket to end, one sends a brief to a Desktop session, and one compiles the session list. [ZCode skills](skills/zcode/README.md)
 
 ## Using different ports
 

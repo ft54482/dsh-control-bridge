@@ -35,7 +35,9 @@
 - 回帖里出现派工标记后，`trace` 报 `comment_marker_not_unique`。
 - Ticket 结束后，发件账号在同一 Issue 下的评论会追加一个 Assignment，并改写 Ticket 的 `ended.outcome`。
 
-仓库里的 `tests/test_zcode_skills.py` 守两件事：ZCode 技能里与 Codex 技能共用的五个文件逐字节相同；`skills/zcode/` 下没有本机的配对文件，也没有像令牌的字符串。ZCode 的行为测试只在 Windows 上运行，其他系统的 CI 跳过它们。模拟通过不等于上面这台电脑已经复测了新提交。
+仓库里的 `tests/test_zcode_skills.py` 守两件事：ZCode 技能里那五个上游文件与 Codex 技能发布版 v0.2.3（标签 `skill-v0.2.3`）逐字节相同；`skills/zcode/` 下没有本机的配对文件，也没有像令牌的字符串。ZCode 的行为测试只在 Windows 上运行，其他系统的 CI 跳过它们。模拟通过不等于上面这台电脑已经复测了新提交。
+
+主干上的 Codex 技能在 #13 之后多了待办收件箱、回帖和轮询，ZCode 技能还没有同步这部分。
 
 ## 0.2.2 在已授权 Desktop 工作区的主控会话
 

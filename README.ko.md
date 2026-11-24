@@ -42,7 +42,7 @@ Codex, Grok Bot 또는 직접 만든 조정 프로그램에서 지정한 DeepSee
 3. **조정 브리지용 skill 설치(선택).** 이 저장소를 skill 디렉터리 밖에 복제한 뒤 `skills/zcode/dsh-control-bridge/`를 `~/.zcode/skills/`에 복사하고, `local.example.json`을 `local.json`으로 복제하여 복제한 경로를 적습니다.
 4. **확인 후 사용.** 새 ZCode 세션을 엽니다. `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`를 실행한 뒤 skill의 `tests/` 디렉터리에 있는 세 개의 동작 테스트를 실행합니다. 모두 통과해야 합니다. 이후 “이 작업을 SuperAgent에 보내 줘” 또는 “지난번에 이 작업을 한 대화를 찾아 이어 가 줘”라고 요청할 수 있습니다.
 
-ZCode skill은 Codex skill과 같은 클라이언트를 공유하며 helper 스크립트 네 개를 추가합니다. 작업서 파일에서 티켓을 초안 작성하고(저장소로 SuperAgent 인스턴스의 포트를 찾음), 티켓이 끝나길 기다리고, 데스크톱 대화에 작업서를 보내고, 대화 목록을 표로 정리합니다.[ZCode skill 안내](skills/zcode/README.md)
+ZCode skill은 Codex skill v0.2.3과 같은 클라이언트를 쓰며 helper 스크립트 네 개를 추가합니다. 작업서 파일에서 티켓을 초안 작성하고(저장소로 SuperAgent 인스턴스의 포트를 찾음), 티켓이 끝나길 기다리고, 데스크톱 대화에 작업서를 보내고, 대화 목록을 표로 정리합니다.[ZCode skill 안내](skills/zcode/README.md)
 
 ## 예시와 다른 포트 사용
 
