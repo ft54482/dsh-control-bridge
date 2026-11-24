@@ -1,5 +1,7 @@
 # 文档目录
 
+项目介绍与快速开始提供 [简体中文](../README.md)、[English](../README.en.md)、[Français](../README.fr.md)、[日本語](../README.ja.md)、[한국어](../README.ko.md) 和 [Deutsch](../README.de.md) 版本。以下详细手册主要使用中文，命令和协议字段保持原文。
+
 首次使用从下面选与自己环境相符的一行。已有安装需要迁移或排查连接时，先核对目标服务、profile 和端口。[项目首页](../README.md) · [端口配置与排错](ports.md)
 
 ## 安装与操作

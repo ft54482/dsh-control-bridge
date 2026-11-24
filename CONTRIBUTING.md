@@ -1,6 +1,8 @@
 # Contributing
 
-Issues and pull requests are welcome. The project language for docs is Chinese, with a short English overview in the README. Code, errors, and tests are in English.
+Issues and pull requests are welcome. The project overview and quick start are available in Chinese, English, French, Japanese, Korean and German. Detailed guides are primarily in Chinese. Code, errors, and tests are in English.
+
+When changing onboarding instructions, update the root README translations together. Preserve executable commands, parameter names, version numbers, links and compatibility limits across languages. Keep the language badges pointing to the six root README files.
 
 ## Development
 
