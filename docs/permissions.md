@@ -50,6 +50,20 @@ Host 默认全部关闭，没放行就拒绝。每一种拒绝对应一件要由
 - **长期凭据 `host.secret`。** 拿到这个文件的程序，能做 Host 已经授权的全部事情，还能列出这个 Desktop profile 里所有工作区和会话的名称、目录和状态。历史正文仍然要逐个会话授权。重开配对窗口、再配对，都不会换掉它。不要外传，不要贴进聊天记录、仓库或工单。
 - **`connection.json`。** 它只放凭据文件的路径、端口和实例对照，只留在本机，不进任何仓库。
 
+<a id="workspace-autonomy-mode"></a>
+
+### 全工作区自主模式（`workspaceAutonomy`，默认关闭）
+
+上面那张表是「逐个会话、逐个工作区放行」的默认模型。还有一个**一次授权的模式**，开关同样由你本人决定，Agent 不能自己打开：
+
+- **打开它仍然是你的事，而且是个大决定。** 在 Host 配置里把 `workspaceAutonomy` 设为 `true`（或 `{ enabled: true }`），并配好 `allowlistFile`；改配置会让 Desktop 自动重启（见下一节）。`health` 的 `workspace_autonomy.effective` 只有在你打开并满足条件后才是 `true`；不是 `true` 时，下面这些一概不发生，带任务标识的请求还会直接 403 `workspace_autonomy_not_effective`。
+- **打开之后，Agent 不再逐目录问你。** 带任务标识的请求（`task_id` + `purpose`）可以在这个账号本来就能访问的任意路径上创建或复用工作区、取任务范围的写授权、建 `master-control` 会话并发首轮，不必为每个目录、每个工作区再找你要人工批准。这是你**一次授权**的结果，不是 Agent 自己扩权：它只能在你账号本来就有权限的路径上动作，Host 也不检查目录可写性——真正能写什么由你的文件系统权限决定。
+- **边界没有变。** 不删目录（撤销只撤授权，`revoke-workspace` 会报 `directory_intact`）；不取消、不抢占正在运行的会话（忙就是 409 `busy`）；不扩 GitHub 账号权限，派工仍受 SuperAgent 实例的发件名单和 precheck 约束。
+- **怎么收回。** 单个工作区用 `revoke-workspace`；想让整体回到逐项放行，就把 `workspaceAutonomy` 改回 `false` 或删掉该项并重启，旧规则（名单、根目录、已有写会话）立刻恢复。
+- **没有打开时，旧规则照旧。** 名单外的工作区、`workspaceRoots` 外的目录、还没有写会话的新写授权，仍然需要你逐项放行。
+
+细节与拒绝码见 [Host HTTP API](host-api.md#workspace-autonomy-api) 和[工作区自主：安装、启用与回退](windows-delivery.md#workspace-autonomy)；真机证据只到隔离 Host，见[验收范围](verified-scope.md#workspace-autonomy-scope)。
+
 <a id="another-workspace"></a>
 
 ## 要在另一个工作区里用
