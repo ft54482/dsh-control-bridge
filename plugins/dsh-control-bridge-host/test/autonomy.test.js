@@ -353,6 +353,18 @@ test('a workspace owned by another task needs an explicit confirmation', async (
   assert.equal(session.body.task_id, 'task-beta')
   const grant = readGrantFile(started.file).sessionAllowlist.find((row) => row.sessionId === session.body.session_id)
   assert.equal(grant.task_id, 'task-beta')
+
+  // The same ownership rule applies when the workspace is named by id, which is
+  // not a way to take it over silently.
+  const byId = await call(started.port, 'POST', '/v1/sessions', {
+    workspace_id: session.body.workspace_id, ...other, agent_preset: 'master-control', access: 'read',
+  })
+  assert.equal(byId.status, 409)
+  assert.equal(byId.body.reason, 'workspace_task_mismatch')
+  const byIdConfirmed = await call(started.port, 'POST', '/v1/sessions', {
+    workspace_id: session.body.workspace_id, ...other, confirm_task: true, agent_preset: 'master-control', access: 'read',
+  })
+  assert.equal(byIdConfirmed.status, 200, JSON.stringify(byIdConfirmed.body))
 })
 
 test('a busy Session is joined, never preempted, and the old busy refusal still holds', async (t) => {
@@ -451,7 +463,7 @@ test('a failed grant is repaired by the same request key instead of creating aga
   assert.ok(first.body.session_id)
   assert.equal(first.body.saved, false)
   assert.equal(readGrantFile(started.file).sessionAllowlist.length, 0)
-  const partial = journal(started.dir).find((line) => line.op === 'session_create' && line.result === 'failed')
+  const partial = journal(started.dir).find((line) => line.op === 'session_grant_failed' && line.result === 'failed')
   assert.equal(partial.phase, 'session_created')
   assert.equal(partial.session_id, first.body.session_id)
   const sessionsAfterFailure = ctx.state.sessions.length

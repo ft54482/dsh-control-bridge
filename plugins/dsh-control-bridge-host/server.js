@@ -171,7 +171,9 @@ export function createHostServer(ctx, config, secret) {
   // byte-identical. A configured-but-ineffective policy never falls back to
   // the standard mode: a request that carries task intent fails closed.
   const autonomyConfig = resolveAutonomyConfig(config, ctx)
-  const autonomyRecord = autonomyConfig.effective ? createAutonomyRecord({ file: autonomyConfig.record_file }) : null
+  const autonomyRecord = autonomyConfig.record_file
+    ? createAutonomyRecord({ file: autonomyConfig.record_file })
+    : null
   const withWorkspaceLock = createKeyedLock()
   const withRequestKeyLock = createKeyedLock()
   let anonymousLockSeq = 0
@@ -634,6 +636,38 @@ export function createHostServer(ctx, config, secret) {
     const directory = canonicalDirectory(workspace.path)
     const access = body.access === 'write' ? 'write' : 'read'
     const options = { firstWriteAllowed: true, unrestrictedRoots: true }
+    if (!wantedPath) {
+      // Naming a workspace by id is not a takeover: the same ownership rule as
+      // the path flow applies, and confirmation is journaled the same way.
+      const previousTask = (workspaceGrantOf(state(), workspaceId) || {}).task_id || null
+      if (previousTask && previousTask !== task.task_id && body.confirm_task !== true) {
+        return {
+          status: 409,
+          body: {
+            ok: false,
+            reason: 'workspace_task_mismatch',
+            workspace_id: workspaceId,
+            existing_task_id: previousTask,
+            task_id: task.task_id,
+            started_task: false,
+            detail: 'this workspace already belongs to another task; pass confirm_task:true to take it for this one',
+          },
+        }
+      }
+      if (previousTask && previousTask !== task.task_id) {
+        recordOp({
+          op: 'workspace_task_confirmed',
+          workspace_id: workspaceId,
+          path: directory,
+          task_id: task.task_id,
+          purpose: task.purpose,
+          phase: null,
+          result: 'ok',
+          client_request_key: requestKey,
+          reason: `previous_task_id=${previousTask}`,
+        })
+      }
+    }
     if (preset === undefined) {
       // Autonomy can relax the first-write rule, not the grant itself: the
       // workspace must already carry a grant before a Session may join it.
@@ -784,7 +818,7 @@ export function createHostServer(ctx, config, secret) {
           session_id: sessionId,
           preset,
           access,
-          phase: 'session_created',
+          phase: 'projection_unverified',
           result: 'failed',
           reason: 'agent_preset_unverified',
           client_request_key: requestKey,
@@ -864,7 +898,7 @@ export function createHostServer(ctx, config, secret) {
       const detail = safeError(error, 'grants.save')
       note(config, [detail])
       const recorded = recordOp({
-        op: 'session_create',
+        op: 'session_grant_failed',
         workspace_id: workspaceId,
         path: directory,
         task_id: task.task_id,

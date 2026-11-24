@@ -125,7 +125,9 @@ export function resolveAutonomyConfig(config = {}, ctx = {}) {
     require_task: true,
     roots_mode: enabled ? 'unrestricted' : 'configured_roots',
     grant_store: allowlistFile ? 'file' : 'memory',
-    record_file: recordFile && reason === null ? recordFile : '',
+    // The journal path is a fact about this Host, not a claim of effect: report
+    // it whenever it is known so an operator can find the file that exists.
+    record_file: recordFile,
   }
 }
 
@@ -234,7 +236,10 @@ export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
       byKey.set(key, { complete: true, receipt })
       return
     }
-    if (entry.op === 'session_create' && entry.phase === 'session_created' && text(entry.session_id)) {
+    // A grant that failed after the Session existed is repairable by the same
+    // request key: remember which Session to repair, never create a second one.
+    if ((entry.op === 'session_create' || entry.op === 'session_grant_failed')
+      && entry.phase === 'session_created' && text(entry.session_id)) {
       byKey.set(key, {
         complete: false,
         receipt: null,

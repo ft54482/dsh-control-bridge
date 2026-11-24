@@ -296,8 +296,11 @@ export function createGrantStore({ file, initial, now = () => Date.now() } = {})
     const merged = { ...list[index], ...entry, title: entry.title || list[index].title, cwd: entry.cwd || list[index].cwd }
     // The first task that claimed this workspace owns it. A later task may be
     // confirmed (`confirm_task`) and is recorded on its own Session grant, but
-    // it never rewrites the workspace's original owner.
-    if (list[index].task_id) merged.task_id = list[index].task_id
+    // it never rewrites the workspace's original owner — or that owner's purpose.
+    if (list[index].task_id) {
+      merged.task_id = list[index].task_id
+      if (list[index].purpose) merged.purpose = list[index].purpose
+    }
     return list.map((item, at) => (at === index ? merged : item))
   }
 
