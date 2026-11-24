@@ -35,9 +35,9 @@ Codex, Grok Bot 또는 직접 만든 조정 프로그램에서 지정한 DeepSee
 
 ## ZCode 빠른 시작
 
-**상태: 완료(2026-11-25).** SuperAgent 티켓 전송은 인스턴스 두 개를 실행하는 Windows 컴퓨터에서 실제 환경으로 검증했습니다. 첫 티켓과 같은 티켓에 추가한 작업이 모두 `completed`로 끝났고 저장소는 변경되지 않았습니다. 아직 검증하지 않은 항목은 새 Issue로 보내는 경로와 ZCode에서 데스크톱 주 제어 대화로 실제 작업을 보내는 것입니다. 전체 목록은 [Windows 실제 환경 검증](docs/verified-scope.md)을 참고하세요.
+**상태: 완료(2026-11-25).** SuperAgent 티켓 전송과 데스크톱 주 제어 대화 모두 인스턴스 두 개를 실행하는 Windows 컴퓨터에서 실제 환경으로 검증했습니다. SuperAgent에서는 첫 티켓과 같은 티켓에 추가한 작업이 모두 `completed`로 끝났고, Desktop에서는 새 대화를 만들고 프롬프트를 보낸 뒤 30 초 안에 `completed`를 받았습니다. 저장소는 변경되지 않았습니다. 아직 검증하지 않은 항목은 새 Issue로 보내는 경로입니다. 전체 목록은 [Windows 실제 환경 검증](docs/verified-scope.md)을 참고하세요.
 
-1. **전제 조건.** Python 3.11 이상. Codex 경로와 같은 방법으로 Harness Desktop에 Host 플러그인을 설치하고 페어링을 마칩니다. SuperAgent 티켓을 보내려면 배포된 SuperAgent와 로그인된 GitHub CLI도 필요합니다.
+1. **전제 조건.** Python 3.11 이상. Codex 경로와 같은 방법으로 Harness Desktop에 Host 플러그인을 설치하고 페어링을 마칩니다. SuperAgent 티켓을 보내려면 배포된 SuperAgent와 로그인된 GitHub CLI도 필요합니다. 작업 공간에서 대화를 만들려면 그 작업 공간이 Host의 생성 범위에 포함되어야 하며, 그렇지 않으면 `403 outside_allowed_roots`가 반환됩니다.
 2. **전송용 skill 설치.** `skills/zcode/deepseek-harness-bridge/`를 `~/.zcode/skills/`에 복사하고, 그 안의 `connection.example.json`을 `connection.json`으로 복제한 뒤 자신의 컴퓨터 경로, 포트, SuperAgent 인스턴스 대응을 적습니다. 이 파일에는 경로와 포트만 적고 인증 정보 자체는 Host가 관리합니다.
 3. **조정 브리지용 skill 설치(선택).** 이 저장소를 skill 디렉터리 밖에 복제한 뒤 `skills/zcode/dsh-control-bridge/`를 `~/.zcode/skills/`에 복사하고, `local.example.json`을 `local.json`으로 복제하여 복제한 경로를 적습니다.
 4. **확인 후 사용.** 새 ZCode 세션을 엽니다. `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`를 실행한 뒤 skill의 `tests/` 디렉터리에 있는 세 개의 동작 테스트를 실행합니다. 모두 통과해야 합니다. 이후 “이 작업을 SuperAgent에 보내 줘” 또는 “지난번에 이 작업을 한 대화를 찾아 이어 가 줘”라고 요청할 수 있습니다.

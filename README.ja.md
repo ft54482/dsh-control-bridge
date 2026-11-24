@@ -35,9 +35,9 @@ Codex、Grok Bot、独自の調整プログラムから、指定した DeepSeek 
 
 ## ZCode のクイックスタート
 
-**状態：完了（2026-11-25）。** SuperAgent へのタスク送信は、2 つのインスタンスを動かす Windows マシンで実機検証済みです。最初のチケットも、同じチケットへの追加タスクも `completed` で終了し、リポジトリは変更されませんでした。未検証の項目は、新規 Issue からの送信と、ZCode からデスクトップの主制御会話への実際のタスク送信です。完全な一覧は [Windows 実機検証](docs/verified-scope.md) を参照してください。
+**状態：完了（2026-11-25）。** SuperAgent へのタスク送信と、デスクトップの主制御会話の両方を、2 つのインスタンスを動かす Windows マシンで実機検証済みです。SuperAgent では、最初のチケットも、同じチケットへの追加タスクも `completed` で終了しました。Desktop では、新しい会話を作成し、プロンプトを送り、30 秒ほどで `completed` を受け取りました。リポジトリは変更されていません。未検証の項目は、新規 Issue からの送信です。完全な一覧は [Windows 実機検証](docs/verified-scope.md) を参照してください。
 
-1. **前提。** Python 3.11 以上。Harness Desktop に Host プラグインをインストールし、ペアリングを済ませておきます。手順は Codex の経路と同じです。SuperAgent にチケットを送るには、導入済みの SuperAgent とログイン済みの GitHub CLI も必要です。
+1. **前提。** Python 3.11 以上。Harness Desktop に Host プラグインをインストールし、ペアリングを済ませておきます。手順は Codex の経路と同じです。SuperAgent にチケットを送るには、導入済みの SuperAgent とログイン済みの GitHub CLI も必要です。ワークスペースで会話を新規作成するには、そのワークスペースが Host の作成対象範囲に入っていなければなりません。入っていない場合は `403 outside_allowed_roots` が返ります。
 2. **送信用 skill をインストール。** `skills/zcode/deepseek-harness-bridge/` を `~/.zcode/skills/` にコピーし、その中の `connection.example.json` を `connection.json` として複製して、自分のマシンのパス、ポート、SuperAgent インスタンスの対応を記入します。このファイルにはパスとポートだけを書き、認証情報自体は Host が管理します。
 3. **調整ブリッジ用 skill をインストール（任意）。** このリポジトリを skill ディレクトリの外にクローンしてから、`skills/zcode/dsh-control-bridge/` を `~/.zcode/skills/` にコピーし、`local.example.json` を `local.json` として複製してクローン先のパスを記入します。
 4. **確認して使い始める。** 新しい ZCode セッションを開きます。`python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health` を実行し、次に skill の `tests/` にある 3 つの動作テストを実行します。すべて通る必要があります。その後は「このタスクを SuperAgent に送って」や「前回これをした会話を探して続けて」と依頼できます。

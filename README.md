@@ -36,9 +36,9 @@
 
 ## ZCode 快速开始
 
-**状态：已完成（2026-11-25）。** SuperAgent 派工已在一台运行两个实例的 Windows 电脑上真机跑通：首次派工和在同一张工单上追加任务都以 `completed` 结束，仓库没有被改动。还没有实测的有：新开 Issue 的派工路径，以及从 ZCode 向 Desktop 主控会话派发一次真实任务。完整清单见 [Windows 真机验收](docs/verified-scope.md)。
+**状态：已完成（2026-11-25）。** SuperAgent 派工和 Desktop 主控会话都在一台运行两个实例的 Windows 电脑上真机跑通：SuperAgent 的首次派工和在同一张工单上追加任务都以 `completed` 结束；Desktop 这条路新建会话、发送提示词、取回「官方完成」，一次往返不到半分钟。仓库没有被改动。还没有实测的是新开 Issue 的派工路径。完整清单见 [Windows 真机验收](docs/verified-scope.md)。
 
-1. **前提。** Python 3.11+；Harness Desktop 里已装 Host 插件并完成配对，做法与 Codex 路径相同。要派 SuperAgent 工单，还需要已部署的 SuperAgent 和已登录的 GitHub CLI。
+1. **前提。** Python 3.11+；Harness Desktop 里已装 Host 插件并完成配对，做法与 Codex 路径相同。要派 SuperAgent 工单，还需要已部署的 SuperAgent 和已登录的 GitHub CLI。要在某个工作区里新建会话，这个工作区还得在 Host 的创建范围里，否则会得到 `403 outside_allowed_roots`。
 2. **装日常派工技能。** 把 `skills/zcode/deepseek-harness-bridge/` 整个目录拷进 `~/.zcode/skills/`，把其中的 `connection.example.json` 复制成 `connection.json`，按自己的电脑填写路径、端口和 SuperAgent 实例对照。这个文件只有路径和端口，凭据本身仍由 Host 保管。
 3. **装控制面技能（可选）。** 先把本仓库克隆到技能目录之外，再把 `skills/zcode/dsh-control-bridge/` 拷进 `~/.zcode/skills/`，把 `local.example.json` 复制成 `local.json` 并填上检出的路径。
 4. **验证并开始用。** 新开一个 ZCode 会话，运行 `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`，再运行该技能 `tests/` 下的三个行为测试，全部通过为准。之后可以说「用 SuperAgent 把某某任务派出去」，或者「找到上次做某某事的会话，接着做」。

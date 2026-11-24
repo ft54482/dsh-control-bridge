@@ -1,6 +1,6 @@
 # ZCode 技能
 
-给 ZCode 用的两个技能，和本项目的 Codex 技能出自同一套客户端。**状态：已完成（2026-11-25）。** 能装、能自检；SuperAgent 派工在一台运行两个实例的 Windows 电脑上真机跑通。哪些验证过、哪些没有，见下面的[完成情况](#完成情况)和 [Windows 真机验收](../../docs/verified-scope.md)。
+给 ZCode 用的两个技能，和本项目的 Codex 技能出自同一套客户端。**状态：已完成（2026-11-25）。** 能装、能自检；SuperAgent 派工和 Desktop 主控会话（新建、发送提示词、取回结果）都在一台运行两个实例的 Windows 电脑上真机跑通。哪些验证过、哪些没有，见下面的[完成情况](#完成情况)和 [Windows 真机验收](../../docs/verified-scope.md)。
 
 ## 两个技能
 
@@ -28,7 +28,7 @@
 
 ## 安装
 
-前提：Python 3.11 或更新；Harness Desktop 里已装 Host 插件并配对，做法和 [Codex 路径](../../docs/windows-delivery.md#codex-desktop-setup)完全相同。要派 SuperAgent 工单，还需要一台已部署的 SuperAgent 和已登录的 GitHub CLI。
+前提：Python 3.11 或更新；Harness Desktop 里已装 Host 插件并配对，做法和 [Codex 路径](../../docs/windows-delivery.md#codex-desktop-setup)完全相同。要派 SuperAgent 工单，还需要一台已部署的 SuperAgent 和已登录的 GitHub CLI。要在某个工作区里新建会话，这个工作区还得在 Host 的创建范围里（在 `workspaceRoots` 之下，或把它的编号列进 `presetSessionWorkspaceIds`），否则返回 `403 outside_allowed_roots`。
 
 1. **装日常派工技能。** 把 `deepseek-harness-bridge/` 整个目录拷进 `~/.zcode/skills/`。
 2. **填本机配置。** 把其中的 `connection.example.json` 复制成 `connection.json`，按自己的电脑填写。它只放凭据**文件**的路径、端口和 SuperAgent 实例对照，凭据本身仍由 Host 保管。`superagent_instances` 里每个实例一行，写着它监听的仓库和端口。
@@ -58,13 +58,14 @@ python ~/.zcode/skills/dsh-control-bridge/dsh-bridge.py --version
 - **SuperAgent 派工全程。** 核对、起草、发送、跟踪四步走通。首次派工从发出评论到工单以 `completed` 结束用了 4 分 26 秒；在同一张工单上追加任务用了 1 分 20 秒，派给同一个工人会话。两次仓库都没有新增提交、分支或 PR。
 - **发布前，用仓库里的这一份再派一次。** 新开一张工单，让工人做一项只读统计并回帖。从发出评论到工单以 `completed` 结束用了 4 分 01 秒，工人报的两个数字与协调方独立统计的结果一致，仓库没有被改动。
 - **热配对。** 不重启 Desktop 给一个工作区写入授权；桥能列出并读取这个会话。
+- **Desktop 会话全程。** 在配对的工作区里新建了一个 `master-control` 会话，回读预设无误；发一条提示词，取回「官方完成」和正确的回答，不到半分钟，没有手动选模型。在另一个已有模型记录的会话上结果相同。
 - **桥的只读接口。** `health`、`granted`、`discover`、`history`、`membership`。
 - **助手的自检。** 三套行为测试和变异对照：把两个 SuperAgent 助手故意改坏 16 处，每一处都被测试抓住。
 
 **还没有在真机上看到**
 
 - 新开 Issue 的派工路径（`--kind issue`）。它走 `gh issue create`，而那台电脑的令牌没有 project 读权限。
-- 从 ZCode 向 Desktop 主控会话派发一次真实任务。发送助手是用桩服务验证的；在那台电脑上新建主控会话被 Host 以 `outside_allowed_roots` 拒绝，因为工作区不在 Host 配置的允许范围里。给已配对的空白会话发提示词，则被以 `model_unknown` 拒绝：它没有选过模型，也没有在线的 Agent。
+- 给没选过模型的空白会话发提示词。`409 model_unknown`；请求里带上模型则是 `409 needs_ui`。要先在 Desktop 里给它选模型，或者新建带预设的主控会话。
 - 非 Windows 系统。行为测试只在 Windows 上跑过，CI 在其他系统上跳过它们。
 - 撤销授权。Host 的 `/v1/revoke` 只读过源码和文档。
 
@@ -84,4 +85,4 @@ python ~/.zcode/skills/dsh-control-bridge/dsh-bridge.py --version
 
 ## English
 
-Two skills for ZCode, built on the same clients as the Codex skill in this repository. `deepseek-harness-bridge` handles everyday dispatch to Desktop master-control sessions and to SuperAgent tickets; `dsh-control-bridge` wraps the `dsh-bridge` CLI. Install by copying each directory into `~/.zcode/skills/` and filling in the example configuration files. SuperAgent dispatch was verified on a Windows machine running two instances on 2026-11-24; the sections above list what was and was not verified.
+Two skills for ZCode, built on the same clients as the Codex skill in this repository. `deepseek-harness-bridge` handles everyday dispatch to Desktop master-control sessions and to SuperAgent tickets; `dsh-control-bridge` wraps the `dsh-bridge` CLI. Install by copying each directory into `~/.zcode/skills/` and filling in the example configuration files. SuperAgent dispatch and a Desktop master-control session round trip (create the session, send a prompt, read the official completion) were verified on a Windows machine on 2026-11-24 and 25; the sections above list what was and was not verified.

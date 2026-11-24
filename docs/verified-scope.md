@@ -17,13 +17,15 @@
 - **SuperAgent 派工全程。** `precheck`、`prepare`、`send --yes`、`trace` 四步走通。一张只要求回帖的工单，从发出评论到以 `completed` 结束用了 4 分 26 秒，Assignment 的 `report.state` 是 `ready`。随后在同一个 Issue 下追加一条带新标记的评论，同一张 Ticket 追加了第三个 Assignment，派给同一个工人会话，1 分 20 秒后以 `completed` 结束。两次仓库都没有新增提交、分支或 PR。
 - **发布前，用仓库里提交的这一份再派一次。** 一项只读统计任务：从发出评论到 Ticket 以 `completed` 结束用了 4 分 01 秒，其中约两分半是工人在自己的检出里干活。工人回帖的两个数字与协调方在同一个提交上独立统计的结果一致，仓库没有被改动。
 - **热配对。** 不重启 Desktop 开了一次性的配对窗口，给一个工作区的空白会话写入 `write` 授权。`granted` 里它是 `write`、`idle`，`history` 返回 200，`membership` 前后一致。
+- **Desktop 会话全程。** 负责人授权后，把工作区编号加进 Host 配置的 `presetSessionWorkspaceIds`，用 `desktop.py create-session` 新建了一个 `master-control` 会话。回执里 `agent_preset` 是 `master-control`、`agent_preset_source` 是 `session_projection`、`started_task` 是 `false`。接着用 `send_brief.py` 发一条只回一行字的提示词，`wait` 返回 `phase: terminal`、`terminal_scope: official`、`completed: true`，回答正确，不到半分钟。执行模型是 Host 的全局默认，没有手动选模型。在一个已有模型记录的既有会话上也做了一次同样的往返，结果相同。
+- **改 Host 配置后 Desktop 自动重启。** 两次改动 `cordis.patch.yml`，Desktop 都在 8 到 20 秒内自动重启，新配置随之生效（Desktop 0.2.3-alpha.2）。只观察到这两次，没有做受控实验。
 - **工人的执行目录。** 每张工单一个目录，在分支 `agent/<同名>` 上，起点是引擎当时的 `origin/main`，不碰项目的主工作副本。
 - **助手的自检。** 三套行为测试全部通过；变异对照把两个助手故意改坏 16 处，每一处都被测试抓住。
 
 这台电脑上没有看到的：
 
 - 新开 Issue 的派工路径（`--kind issue`）。它走 `gh issue create`，而这里的 `gh` 令牌没有 project 读权限。
-- 从 ZCode 向 Desktop 主控会话派发一次真实任务。`send_brief.py` 是用桩 Host 验证的。在这台电脑上新建主控会话返回 `403 outside_allowed_roots`：工作区在 `workspaceRoots` 之外，也没有列进 `presetSessionWorkspaceIds`。给已配对的那个空白会话发提示词，则返回 `409 model_unknown`：它没有模型选择，也没有在线的 Agent。
+- 给没选过模型的空白会话发提示词。`409 model_unknown`；请求里带上模型则是 `409 needs_ui`。要先在 Desktop 里给它选模型，或者新建带预设的主控会话。新建会话要求工作区在 Host 的创建范围里，否则是 `403 outside_allowed_roots`。
 - 撤销授权（`/v1/revoke`）。只读过 Host 的源码和文档。
 
 真机上碰到、上游 0.2.3 客户端还没有处理的四件事。绕法写在 ZCode 技能的 `SKILL.md` 里，原因写在 [`skills/zcode/dsh-control-bridge/references/develop.md`](../skills/zcode/dsh-control-bridge/references/develop.md)：

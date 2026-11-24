@@ -57,7 +57,7 @@ python scripts/desktop.py discover --param workspace_id=WORKSPACE_ID --param kin
 
 ## 4. 新建主控会话
 
-前提：`health` 的 `preset_create_verified` 为 `true`，而且这个工作区已经配对、里面已有可写会话的授权。工作区的编号在 `connection.json` 的 `desktop_workspaces` 里（登记过的），没登记就用第 2 节的全局发现按目录找。工作区还得在 Host 的允许范围里：`workspaceRoots` 之内的可以直接建；之外的，它的工作区编号要列在 Host 配置的 `presetSessionWorkspaceIds` 里，否则返回 `403 outside_allowed_roots`。这一项是 Host 启动时读的，改它要重启 Desktop，属于用户的事，见 `references/host-setup.md`。
+前提：`health` 的 `preset_create_verified` 为 `true`，而且这个工作区已经配对、里面已有可写会话的授权。工作区的编号在 `connection.json` 的 `desktop_workspaces` 里（登记过的），没登记就用第 2 节的全局发现按目录找。工作区还得在 Host 的允许范围里：`workspaceRoots` 之内的可以直接建；之外的，它的工作区编号要列在 Host 配置的 `presetSessionWorkspaceIds` 里，否则返回 `403 outside_allowed_roots`。这一项改动是在扩大 Host 的权限，而且会让 Desktop 自动重启、打断里面正在跑的任务，所以要用户明确授权、挑 Desktop 空闲的时候做，见 `references/host-setup.md`。
 
 ```bash
 printf '%s' '{"workspace_id":"WORKSPACE_ID","access":"write","agent_preset":"master-control"}' | python scripts/desktop.py create-session --data -
@@ -246,11 +246,11 @@ python scripts/github_source.py compare --port PORT --repo OWNER/REPO --issues 1
 | `reason` 是 `invalid_local_input`，退出码 2 | JSON 不是 UTF-8 对象，或者 `secret_file` 路径无效 | 检查文件编码和路径，不要去动凭据 |
 | HTTP 401 `unauthorized` | 凭据不对 | `secret_file` 是否指向当前这份 Host 的 `host.secret` |
 | HTTP 403，`not_allowlisted` 一类或 `*_disabled` | 这个会话或目录没有授权，或者 Host 没开对应的能力 | 用 `granted` 核对；补授权见 `references/host-setup.md` |
-| HTTP 403 `outside_allowed_roots`（新建会话时） | 工作区在 Host 的 `workspaceRoots` 之外，编号也没列进 Host 配置的 `presetSessionWorkspaceIds` | 配对本身没有问题。把工作区编号报给用户，由用户加进 Host 配置并重启 Desktop；不要自己改配置，也不要为此放宽 `workspaceRoots`。等不了的话用 `references/host-setup.md` C 节的手动办法 |
+| HTTP 403 `outside_allowed_roots`（新建会话时） | 工作区在 Host 的 `workspaceRoots` 之外，编号也没列进 Host 配置的 `presetSessionWorkspaceIds` | 配对本身没有问题。把工作区编号和要改的那一行原样报给用户。这是在扩大 Host 的权限，要用户明确授权后才改；改动会让 Desktop 自动重启。不要为此放宽 `workspaceRoots` |
 | HTTP 409 `busy` | 会话正在运行 | 等它结束，不要取消别人的回合 |
 | HTTP 409 `idempotency_conflict` | 同一个 `request_id` 配了不同的会话或正文 | 换一个新的 `request_id` |
-| HTTP 409 `needs_ui` | 会话没有在线的 Agent，冷会话改模型时常见 | 不改模型直接派工，或者在 Desktop 里打开这个会话 |
-| HTTP 409 `model_unknown` | 这个会话没有记录模型选择，常见于从没用过的空白会话；桥不知道该用哪个模型 | 什么都没有发出。请用户在 Desktop 里打开这个会话并选好模型；桥不替冷会话选模型（`models` 里 `can_set` 是 `false`）。或者新建一个带预设的主控会话，见第 4 节 |
+| HTTP 409 `needs_ui` | 会话没有在线的 Agent。给冷会话改模型，或者给没选过模型的会话带着模型发提示词时出现 | 有模型记录的会话可以直接发，桥会自己把它拉起来；其余情况请用户在 Desktop 里打开这个会话，或者新建带预设的主控会话（第 4 节） |
+| HTTP 409 `model_unknown` | 这个会话没有记录模型选择，常见于从没用过的空白会话；桥不知道该用哪个模型 | 什么都没有发出。请求里带模型也不行，会换成 `needs_ui`。请用户在 Desktop 里打开这个会话选好模型；或者新建一个带预设的主控会话，见第 4 节 |
 | HTTP 404 `unknown_request`、`missing_session` | ID 记错了，或者不在当前授权里 | 对照 `granted` 和自己的记录 |
 | `No module named 'desktop'` | 用了 `python -I` 跑 `superagent.py` | 去掉 `-I` |
 | `superagent_unavailable_or_incompatible` | 这个端口上没有 SuperAgent 管理面 | 核对 `connection.json`；找端口：`netstat -ano \| grep LISTENING \| grep "127.0.0.1:30"` |

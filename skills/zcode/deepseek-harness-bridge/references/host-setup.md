@@ -51,7 +51,7 @@ printf '%s' '{"session_id":"SESSION_ID","access":"write"}' | python scripts/desk
 
 配对只改 `allowlist.json`：不轮换长期的 `host.secret`，不启动任务，不改模型。
 
-**配对成功不等于能发提示词。** 一个从没用过的空白会话没有模型选择，也没有在线的 Agent。往它发提示词会得到 `409 model_unknown`，什么都没有发出（2026-11-25 实测）。桥不替这样的冷会话选模型：`models` 返回的 `can_set` 是 `false`，原因是 `agent_not_attached`。要让它能用，请用户在 Desktop 里打开这个会话、在界面上选好模型；要派开发任务，再把预设选成「主控模式」。之后用 `models` 回读确认。
+**配对成功不等于能发提示词。** 一个从没用过的空白会话没有模型选择，也没有在线的 Agent。往它发提示词会得到 `409 model_unknown`，什么都没有发出（2026-11-25 实测）。在请求里带上模型也不行，得到的是 `409 needs_ui`。对照：有模型记录的会话即使没在界面上开着，也能直接发，桥会自己把它拉起来（同日实测，一次只回一行字的往返不到半分钟）。桥不替这样的冷会话选模型：`models` 返回的 `can_set` 是 `false`，原因是 `agent_not_attached`。要让它能用，请用户在 Desktop 里打开这个会话、在界面上选好模型；要派开发任务，再把预设选成「主控模式」。之后用 `models` 回读确认。
 
 **2026-11-25 的一次做法（实测通过）。** 给一个工作区配对时没有用编号，而是在同一段程序里先读一遍候选清单，确认那个编号仍是选定的会话而且不忙，再按会话编号调 Host 的 `POST /v1/bootstrap/select`，正文是 `{"session_id": "…", "access": "write"}`。选的是工作区里一个没有标题的空白会话，它只当锚点，不往里派任务。核对：`granted` 里这个会话是 `write`、`idle`，读它的 `history` 返回 200；`health` 的 `bootstrap_armed` 回到 `false`、`bootstrap_consumed` 是 `true`；`membership` 前后一致（工作区数和会话数都没有变）。
 
@@ -64,8 +64,8 @@ printf '%s' '{"session_id":"SESSION_ID","access":"write"}' | python scripts/desk
 - Host 0.2.2 或更新：`health` 的 `preset_create_verified` 为 `true`。
 - Harness 的同一个 profile 里装好可信的 `master-control` 预设包（Desktop 侧栏「插件 → 添加插件」）。装好以后，一个空白会话的预设选择器里会出现「主控模式」。预设决定执行方的人设和工具权限，所以必须是用户自己信任的包。
 - Host 的配置（Desktop profile 的 `cordis.patch.yml` 里 `dsh-control-bridge-host` 那一行）打开 `allowCreateSession`。工作区在 `workspaceRoots` 之外时，把它的**确切 ID** 加进 `presetSessionWorkspaceIds`；不要为此放宽文件操作的根目录。
-- `presetSessionWorkspaceIds` 和 `workspaceRoots` 是 Host **启动时**读进内存的（2026-11-25 看 Host 源码确认）。改完配置要退出并重开 Desktop 才生效，会打断 Desktop 里正在跑的任务，所以这件事由用户挑时间做。被拒绝时 Host 返回 `403 outside_allowed_roots`，没有创建任何会话。
-- 等不了重启的话有个手动办法，来自上游 `desktop.md`，没有实测：在 Desktop 里于目标工作区开一个空白会话，在它的预设选择器里选「主控模式」，再按 B 节配对这个会话。这样一个工作区一次只有一个可用的主控会话，再要新的就得重来一遍。
+- 往 `presetSessionWorkspaceIds` 里加一个工作区，是在扩大 Host 的权限：**先取得用户对这一项改动的明确授权**，「先做通」这类话不算。得到授权后改那一行即可，不用另外重启：Desktop 监听着 `cordis.patch.yml`，文件一变，它会在几秒到二十秒内自动重启，新配置随之生效（2026-11-25 观察到两次，Desktop 0.2.3-alpha.2，没有做受控实验）。自动重启会打断 Desktop 里正在跑的任务，所以挑空闲的时候改。被拒绝时 Host 返回 `403 outside_allowed_roots`，没有创建任何会话。2026-11-25 实测：加上之后 `create-session` 返回 200，回执里 `agent_preset` 是 `master-control`、`agent_preset_source` 是 `session_projection`、`started_task` 是 `false`；接着发第一条提示词，不需要手动选模型，一次只回一行字的往返不到半分钟。
+- 不想改 Host 配置的话有个手动办法，来自上游 `desktop.md`，没有实测：在 Desktop 里于目标工作区开一个空白会话，在它的预设选择器里选「主控模式」，再按 B 节配对这个会话。这样一个工作区一次只有一个可用的主控会话，再要新的就得重来一遍。
 
 ## D. 安装、升级、回滚 Host 插件
 
