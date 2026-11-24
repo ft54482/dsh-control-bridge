@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -237,6 +238,41 @@ def test_task_scoped_session_receipts_must_carry_that_task(invoke_client):
     )
     assert failed.returncode == 1
     assert json.loads(failed.stdout)["reason"] == "task_receipt_unverified"
+
+
+def test_task_scoped_create_session_without_a_preset_still_gates_on_health(invoke_client):
+    # The caller names no preset: the task intent alone must trigger the policy
+    # gate, so a configured-but-ineffective Host is never written to.
+    request = {"path": "/tmp/project", "task_id": "task-1", "purpose": "build"}
+    result, requests = invoke_client(
+        [(200, "application/json", json.dumps({"ok": True, "preset_create_verified": True,
+                                              "workspace_autonomy": {"configured": True, "enabled": True,
+                                                                     "effective": False, "reason": "allowlist_file_missing"}}).encode())],
+        ["create-session", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert [item[:2] for item in requests] == [("GET", "/v1/health")]
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["reason"] == "workspace_autonomy_not_effective"
+
+
+def test_task_session_receipt_proof_does_not_depend_on_a_preset():
+    # A plain Session (no preset) still has to prove the task and the grant.
+    spec = importlib.util.spec_from_file_location("desktop_cli_under_test", CLIENT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    request = {"path": "/tmp/project", "task_id": "task-1", "purpose": "build", "access": "write"}
+    receipt = {"ok": True, "session_id": "s1", "workspace_id": "w1", "access": "write",
+               "grant": {"session_id": "s1", "workspace_id": "w1", "access": "write", "task_id": "task-1"},
+               "started_task": False, "task_id": "task-1"}
+    assert module.verified_task_session_receipt(request, receipt) is True
+    assert module.verified_task_session_receipt(request, dict(receipt, task_id="task-2")) is False
+    assert module.verified_task_session_receipt(request, dict(receipt, started_task=True)) is False
+    assert module.verified_task_session_receipt(request, dict(receipt, access="read")) is False
+    assert module.verified_task_session_receipt(
+        request, dict(receipt, grant={"session_id": "s1", "workspace_id": "other", "access": "write"})) is False
+    # The helper's default preset receipt satisfies the same proof.
+    preset = dict(receipt, agent_preset="master-control", agent_preset_source="session_projection")
+    assert module.verified_task_session_receipt(request, preset) is True
 
 
 def test_a_deduplicated_session_receipt_still_proves_grant_consistency(invoke_client):

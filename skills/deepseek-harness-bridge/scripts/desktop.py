@@ -79,12 +79,28 @@ def verified_workspace_receipt(receipt: dict) -> bool:
     )
 
 
-def verified_task_receipt(request: dict, receipt: dict) -> bool:
-    """A task-scoped Session receipt must carry the task it was created for."""
-    task_id = receipt.get("task_id")
+def verified_task_session_receipt(request: dict, receipt: dict) -> bool:
+    """A task-scoped Session receipt must identify its Session and its task.
+
+    Deliberately independent of the preset proof: a task-scoped Session is one
+    the Host created for this task, whether or not a preset was requested.
+    """
+    session_id = receipt.get("session_id")
+    workspace_id = receipt.get("workspace_id")
+    grant = receipt.get("grant")
+    access = request.get("access", "read")
+    # The grant is the authorization authority; a receipt that also carries a
+    # top-level access must not contradict it.
+    receipt_access = receipt.get("access", access)
     return (
-        isinstance(task_id, str) and task_id == request.get("task_id")
-        and verified_preset_receipt(request, receipt)
+        receipt.get("ok") is True and receipt.get("started_task") is False
+        and isinstance(receipt.get("task_id"), str) and receipt.get("task_id") == request.get("task_id")
+        and isinstance(session_id, str) and bool(session_id.strip())
+        and isinstance(workspace_id, str) and bool(workspace_id.strip())
+        and workspace_id == request.get("workspace_id", workspace_id)
+        and receipt_access == access
+        and isinstance(grant, dict) and grant.get("session_id") == session_id
+        and grant.get("workspace_id") == workspace_id and grant.get("access") == access
     )
 
 
@@ -202,7 +218,7 @@ def main() -> int:
                 workspace = body.get("workspace_id")
                 if not isinstance(workspace, str) or not workspace.strip():
                     parser.error("revoke-workspace requires a nonempty workspace_id")
-            autonomy_task = task_scoped(body) and (verify_preset or verify_workspace)
+            autonomy_task = task_scoped(body) and command in ("create-session", "create-workspace")
             if command == "resume":
                 request_id = body.get("request_id")
                 if not isinstance(request_id, str) or not request_id.strip():
@@ -269,7 +285,9 @@ def main() -> int:
                           "session_id": result.get("session_id"), "workspace_id": result.get("workspace_id"),
                           "manual_reconcile": True}, secret)
                     return 1
-                if autonomy_task and not verified_task_receipt(body, result):
+                # A task-scoped write must answer for *this* task, with one
+                # identity for the Session and its grant (replays included).
+                if autonomy_task and not verified_task_session_receipt(body, result):
                     emit({"http_status": response.status, "ok": False, "reason": "task_receipt_unverified",
                           "session_id": result.get("session_id"), "workspace_id": result.get("workspace_id"),
                           "task_id": result.get("task_id"), "manual_reconcile": True}, secret)
