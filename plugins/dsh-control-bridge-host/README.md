@@ -76,36 +76,122 @@ Three endpoints are disabled unless the plugin config names both the capability 
 - `POST /v1/sessions {workspace_id | (path + create_workspace:true), access?, title?, model?, agent_preset?}` → official `sessionController.create`, then a merge-only grant (default `read`; `write` explicit). A new session's model is `deferred` unless a live idle Agent exists; the deployment default is never changed.
 - `POST /v1/open {path, action?, application?}` → official `openWorkspacePath`; it opens on the Host desktop and creates nothing.
 
-For preset sessions in 0.2.2, use an already paired workspace ID. If its directory is outside the roots, list its exact ID in `presetSessionWorkspaceIds`. A new write session requires an existing write grant in that workspace. This exception applies only to creating a preset session.
+For preset sessions in 0.2.2, use an already paired workspace ID. If its directory is outside the roots, list its exact ID in `presetSessionWorkspaceIds`. A new write session requires an existing write grant in that workspace. This exception applies only to creating a preset session, and it is the rule that [workspace autonomy](#workspace-autonomy-opt-in-per-operator-this-release) relaxes — only when the operator turns that policy on.
 
 Filesystem paths are realpath-checked inside `workspaceRoots`: the root itself, sibling prefixes, `..`, and symlink escapes are refused. No delete endpoint is exposed.
 
 ## Workspace autonomy, opt-in per operator (this release)
 
-The plugin manifest version is bumped together with the release notes, not in this change.
+**Identity of this change.** The plugin manifest stays at `0.2.2`; this work is not a version bump and is not released. `tests/test_release_manifest.py:15-19` asserts `dsh_control_bridge.__version__ == pyproject.toml` version `== dsh-control-bridge-host` version, so the number moves only together with a release of all three. Until then, identify the build by commit, not by the version string in `package.json`.
 
-A fresh workspace cannot be bootstrapped by the guarded create endpoints above: registration produces no grant, and a preset write Session requires an existing write Session. `workspaceAutonomy` closes that loop **only when the operator turns it on**:
+**What it changes.** A fresh workspace cannot be bootstrapped by the guarded create endpoints above: registration produces no grant, and a preset write Session requires an existing write Session. `workspaceAutonomy` closes that loop **only when the operator turns it on**.
+
+**What it costs.** An effective policy makes *any absolute directory* eligible to become a workspace, take a write grant and hold the first write Session. The Host performs no writability test — it canonicalizes the path and, when asked, creates one leaf — so the real limit is the OS account's own file permissions: the same reach an ordinary shell in that account has. The policy is not a sandbox and it does not add a path restriction. It is therefore off by default, has no remote switch, and must be enabled by the operator in the plugin configuration of one profile. The bearer stays loopback-only, so this does not widen the network surface — it widens what a local caller with the bearer may name. Enable it in an isolated profile first; see [First start](#first-start) and [windows-delivery.md](../../docs/windows-delivery.md#workspace-autonomy).
+
+### Configuration
 
 ```yaml
-    allowlistFile: <file>
+- id: dsh-control-bridge-host
+  config:
+    allowlistFile: <state dir>/allowlist.json
+    secretFile: <state dir>/host.secret
     workspaceAutonomy: true            # or { enabled: true }; absent/false = old behaviour
     autonomyRecordFile: <file>         # optional; default dirname(allowlistFile)/workspace-autonomy.jsonl
+    allowCreateWorkspace: true         # still the capability switch for POST /v1/workspaces
+    allowCreateSession: true           # still the capability switch for POST /v1/sessions
+    busyPolicy: refuse                 # default; a busy Session is never preempted
 ```
 
-`effective` is the conjunction `enabled && allowlistFile configured && workspaceRegistry.create callable && sessionController.create callable && sessionController.projections callable`. `GET /v1/health` always declares the truth (`configured`, `enabled`, `effective`, `reason`, `roots_mode`, `grant_store`, `record_file`, `operations`), and a configured-but-ineffective policy **fails closed**: a write request that carries `task_id` gets `403 workspace_autonomy_not_effective` instead of silently falling back to the standard mode.
+- `workspaceAutonomy` accepts `true` or `{ enabled: true }`. Absent, `false`, `null`, or any other value means **disabled**; every request and response then keeps its exact old shape.
+- `autonomyRecordFile` is optional. Without it the journal is `dirname(allowlistFile)/workspace-autonomy.jsonl`.
+- `allowCreateWorkspace` / `allowCreateSession` are still required: the policy relaxes *who may be granted*, not whether the capability is switched on. Both gates answer `403 create_workspace_disabled` / `403 create_session_disabled` before the policy is consulted.
 
-**First start.** A profile that has never paired anything has an empty or absent allowlist, and the Host only starts a listener for that when the policy is `effective` — nothing is pre-seeded, and the grant file is created by the first grant. Without an effective policy an empty allowlist still leaves the Host silent (the only other way in is an armed bootstrap window), a zero-byte or corrupt allowlist file is still `allowlist_unreadable`, and a missing secret, missing Desktop services or a non-loopback bind are still refused with their original reasons. The startup result also reports `autonomy: {configured, enabled, effective, reason}`.
+**Effective determination.** `effective` is exactly the conjunction `enabled && allowlistFile configured && workspaceRegistry.create callable && sessionController.create callable && sessionController.projections callable` (`autonomy.js:166-201`). `reason` names the first missing piece: `not_configured`, `disabled`, `allowlist_file_missing`, `workspace_create_unavailable`, `session_create_unavailable`, `session_projections_unavailable`. A configured-but-ineffective policy **fails closed**: a write request that carries task intent gets `403 workspace_autonomy_not_effective` (with `autonomy_reason`) instead of silently falling back to the standard mode.
 
-When it is effective:
+`GET /v1/health` always declares the truth in `workspace_autonomy` (`configured`, `enabled`, `effective`, `reason`, `require_task`, `roots_mode`, `grant_store`, `record_file`, `operations`). `roots_mode` is `unrestricted` whenever the switch is enabled and `configured_roots` otherwise; that field is a declaration, not an extra capability.
 
-- Every autonomy write must carry `task_id` (1..200) and `purpose` (1..500); missing or blank is `400 task_required`. `client_request_key` (optional, `^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$`) makes a retry idempotent.
-- `POST /v1/workspaces {path, task_id, purpose, create_directory?, confirm_task?, title?}` canonicalizes with `fs.realpathSync.native`, serializes per canonical path, resolves → creates → resolves again for the authoritative id, and takes a workspace grant (`source: 'autonomy'`, first task wins). A different task on the same workspace is `409 workspace_task_mismatch` unless `confirm_task: true`, which journals `workspace_task_confirmed` and grants the new task on its Session.
-- `POST /v1/sessions {path? | workspace_id, task_id, purpose, agent_preset, access, ...}` registers the path first when given, then creates the Session, proves the preset through `sessionController.projections`, and only then grants. The first write Session in a workspace is allowed; `agentPresets.resolve` and the projection proof are never skipped (`409 agent-preset/invalid`, `409 agent_preset_unverified`). A busy Session is never cancelled or reused.
-- `POST /v1/workspaces/revoke {workspace_id}` removes the workspace grant and every Session grant under it in one atomic write and reports `directory_intact`. It never deletes a directory and never cancels a running turn.
-- Every operation is appended to `workspace-autonomy.jsonl` with 17 fixed keys: `at`, `op`, `operation` (`workspace` or `session`), `workspace_id`, `path`, `task_id`, `purpose`, `session_id`, `preset`, `access`, `client_request_key`, `parent_key`, `request_hash`, `request`, `phase`, `result`, `reason` (null when a field does not apply), plus `receipt` on a success line and `revoked` on a revoke line. Lines split into **bindings** (`workspace_create`/`workspace_reuse`/`workspace_grant_failed`, `session_create`/`session_grant`/`session_grant_failed`) that answer a caller's request and own its key, and **evidence** (`workspace_task_confirmed`, `workspace_revoke`) that never binds a key and never downgrades a binding. No bearer, no secret, no message text. A failed append never rolls back a durable grant: the response reports `recorded: false` with `record_error`. `purpose` is stored verbatim, so callers must not put confidential material in it.
+### Endpoints
+
+| Method | Path | Under an effective policy |
+| --- | --- | --- |
+| POST | `/v1/workspaces` | With `task_id`+`purpose`: register or reuse the canonical directory, take a task-scoped workspace grant, return the 3.3 receipt. Without task intent the old guarded path answers unchanged; a path outside the roots, or an already-registered workspace with no grant, answers `400 task_required`. |
+| POST | `/v1/sessions` | With `task_id`+`purpose`: register the path when given, create the Session, prove the preset through `sessionController.projections`, then grant. Without task intent, a request that needs a path / the first write Session / an unrestricted root answers `400 task_required`; a revoked workspace answers `403 workspace_not_allowlisted` (adding a task does not repair it). |
+| POST | `/v1/workspaces/revoke` | Removes the workspace grant and every Session grant under it in one atomic write. Available even when the policy is off (it only ever removes authorization), and it is not task-scoped. |
+| GET | `/v1/health` | Adds the `workspace_autonomy` block. |
+| GET | `/v1/workspaces` | Each row now carries `task_id` (the owning task, `null` for an older grant) next to `id`, `title`, `cwd`. |
+
+Receipts are additive; no old field changed meaning. `POST /v1/workspaces` returns `ok`, `workspace_id`, `workspace{id,title,path}`, `path`, `created`, `reused`, `created_directory`, `task{task_id,purpose,confirmed,previous_task_id}`, `grant{workspace_id,path}`, `autonomy{enabled,effective}`, `started_task:false`, `recorded` (plus `record_error` when the journal append failed). `POST /v1/sessions` returns `session_id`, `workspace_id`, `path`, `agent_preset` + `agent_preset_source`, `access`, `grant{session_id,workspace_id,access,cwd,task_id,source}`, `model`, `revision`, `task_id`, `purpose`, `workspace_created`, `workspace_reused`, `deduplicated`, `started_task:false`, `recorded` (plus `repaired:true` for a grant repair). `POST /v1/workspaces/revoke` returns `workspace_id`, `revoked{workspace,sessions}`, `directory_intact`, `started_task:false`, `revision`, and journals `workspace_revoke` with a `revoked` payload.
+
+Error codes this flow can answer, beyond the pre-existing ones:
+
+| Status | `reason` | When |
+| --- | --- | --- |
+| 400 | `task_required` | `task_id`/`purpose` missing, blank or too long; also the "this call needs a task" answer for an old-shaped request that only the policy can serve |
+| 400 | `invalid_client_request_key` | `client_request_key` does not match `^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$` |
+| 403 | `workspace_autonomy_not_effective` | task intent arrived but the policy is configured and not effective (`autonomy_reason` says why) |
+| 409 | `workspace_task_mismatch` | the workspace already belongs to another task and `confirm_task` was not set |
+| 409 | `idempotency_key_reused` | the key is bound to another operation or other arguments (`previous_operation`, `mismatched`) |
+| 409 | `authorization_stale` | the replay's authorization was revoked, downgraded, removed or taken over (`historical` + `current.reason`) |
+| 409 | `agent-preset/invalid` | the requested preset does not resolve to that exact id |
+| 409 | `agent_preset_unverified` | the Session exists but its projection does not read back the preset; do not retry creation |
+| 409 | `session_already_granted` | a repair found the Session already granted |
+| 500 | `grant_persist_failed` | the Session exists but the grant write failed; retry with the same key to repair |
+| 502 | `workspace_grant_failed` | the workspace is registered but the grant write failed (`manual_reconcile`) |
+| 502 | `workspace_unresolved`, `create_returned_no_session_id`, `session/workspace-attach-failed` | the official call half-succeeded; reconcile before retrying |
+| 400 | `missing_path`, `invalid_path`, `missing_directory`, `missing_parent`, `not_a_directory`, `unreadable_path`, `create_failed` | path resolution (`autonomy.js:210-259`) |
+
+### Operation record
+
+Every operation is appended to `workspace-autonomy.jsonl` with 17 fixed keys: `at`, `op`, `operation` (`workspace` or `session`), `workspace_id`, `path`, `task_id`, `purpose`, `session_id`, `preset`, `access`, `client_request_key`, `parent_key`, `request_hash`, `request`, `phase`, `result`, `reason` (null when a field does not apply), plus `receipt` on a success line and `revoked` on a revoke line. Lines split into **bindings** (`workspace_create`/`workspace_reuse`/`workspace_grant_failed`, `session_create`/`session_grant`/`session_grant_failed`) that answer a caller's request and own its key, and **evidence** (`workspace_task_confirmed`, `workspace_revoke`) that never binds a key and never downgrades a binding. No bearer, no secret, no message text. A failed append never rolls back a durable grant: the response reports `recorded: false` with `record_error`. `purpose` is stored verbatim, so callers must not put confidential material in it.
+
+### First start
+
+A profile that has never paired anything has an empty or absent allowlist (`{"version":1,"workspaceAllowlist":[],"sessionAllowlist":[]}` or no file at all). The Host only starts a listener for that when all of these hold:
+
+1. the policy is **really effective** (`workspace_autonomy.effective: true`, not merely a flag that exists);
+2. a long-lived host secret of at least 32 characters is readable (`secretFile` or `secretEnv`);
+3. the official Desktop services are mounted (`sessionController`, `workspaceRegistry`, `sessionQuery`);
+4. the bind is `127.0.0.1`;
+5. the allowlist file is either absent or a valid, empty one — a zero-byte, unparseable or structurally invalid file stays `allowlist_unreadable`.
+
+Nothing is pre-seeded: the first start writes no grant, and the allowlist file is created by the first successful grant. No armed bootstrap window is needed and none is implied; an armed window still opens the port without a policy, exactly as before, and it is **not** a way to bypass an ineffective policy (`policy.js:51-56`, `index.js:22-47`).
+
+Every other refusal keeps its original reason: default off with an empty allowlist → `no steady allowlist and no armed bootstrap`; missing secret, missing services, non-loopback bind → their existing messages; unreadable allowlist → `allowlist_unreadable`. The startup result (the value `apply` returns, visible in the Desktop log) also reports `autonomy: {configured, enabled, effective, reason}`.
+
+### Isolated-profile verification
+
+Verify in a throwaway profile, never in the production Desktop profile. Replace `<profile>` with your own name and pick ports that no running instance uses (`8765`, `3082`, `3084` and `3088` are commonly taken).
+
+```powershell
+# 1. Create the profile from a template WITHOUT starting a service (--dump-config prints and exits).
+$dsh = Read-Host 'path to the Desktop runtime dsh.cmd'
+& $dsh <profile> --from-default-profile web --dump-config
+
+# 2. Link the plugin and the preset bundle into that profile only.
+& $dsh plugin --profile <profile> add "link:<repo>/plugins/dsh-control-bridge-host"
+& $dsh plugin --profile <profile> add "link:<repo or preset dir>"
+
+# 3. Add the Host row to the profile's cordis.patch.yml: bind 127.0.0.1, a free port,
+#    its own state dir, workspaceAutonomy: true, and an empty allowlist (no bootstrap files).
+
+# 4. Start the isolated profile, then read the policy from another terminal.
+& $dsh <profile> --no-open
+$env:DSH_BRIDGE_SECRET_FILE = '<state dir>/host.secret'
+python desktop.py health --port <port>     # expect workspace_autonomy.effective = true, operations = 0
+```
+
+Acceptance in the isolated profile: `workspace_autonomy.effective: true`; the empty allowlist file is still empty after startup (nothing pre-seeded); `create-workspace` with `task_id`+`purpose` on a directory outside `workspaceRoots` returns `started_task:false`; `create-session` with `access:"write"` and `agent_preset:"master-control"` returns a verified receipt; a replay with the same key returns `deduplicated:true`; `revoke-workspace` returns `directory_intact:true` and the directory still exists; a replay after the revoke returns `409 authorization_stale`.
+
+When it is effective, the behaviour that is **not** visible from the shapes alone:
+
+- Every autonomy write must carry `task_id` (1..200) and `purpose` (1..500) after trimming; blank or missing is `400 task_required`. `client_request_key` is optional and only buys replay protection.
+- A workspace request canonicalizes the path with `fs.realpathSync.native`, serializes per canonical path, resolves → creates → resolves again for the authoritative id, and takes a workspace grant (`source: 'autonomy'`). The **first** task that takes a workspace keeps it: a later task rewrites neither `task_id` nor `purpose` on the workspace grant (`grants.js:290-305`), and its ownership is recorded on its own Session grant.
+- `confirm_task: true` is the only way to take over a workspace owned by another task. It journals `workspace_task_confirmed` with `client_request_key: null` and `parent_key` pointing at the request, so the confirmation is evidence and never answers a later replay.
+- The first write Session in a workspace is allowed; `agentPresets.resolve` and the projection proof are never skipped, and the workspace must still carry a grant before a Session may join it (autonomy relaxes the first-write rule, not the grant). A busy Session is never cancelled or reused.
 - Retry semantics: a completed `client_request_key` replays its receipt (`deduplicated: true`) **only while the authorization behind it still exists**. A Session that was created but could not be granted is repaired by the same key (`500 grant_persist_failed` + `manual_reconcile`, then `repaired: true`) without creating a second Session; a workspace that was registered but could not be granted is repaired on the same path without a second registration; a Session create that failed after the path was registered is retried by the same key and creates the Session on that one workspace.
 - A key answers one operation with one set of arguments. Reusing it for a different operation (workspace vs session) or different `task_id`/`purpose`/`path`/`workspace_id`/`agent_preset`/`access`/`model`/`confirm_task` is `409 idempotency_key_reused` with `previous_operation` and `mismatched`, never a silent replay. The internal workspace registration performed for a Session request does **not** consume the Session's key: it records `client_request_key: null` and points back through `parent_key`.
 - A replay is refused when the grant it relied on changed: `409 authorization_stale` with `current` = `revoked` / `missing` / `access_changed` / `task_changed` and a `historical` summary of the old receipt. Withdrawing and replaying therefore cannot resurrect the grant, and a repair cannot re-authorize a revoked workspace.
+- The journal is read into memory once when the server is constructed; a damaged line is skipped and its neighbours still count (`autonomy.js:361-375`). A failed append is reported as `recorded:false` with `record_error` and never rolls back a grant that is already durable.
 
 The guarded 0.2.0 path is untouched: without `workspaceAutonomy` every request and response keeps its exact old shape.
 
@@ -170,7 +256,7 @@ The pairing window is a file, not process state. `bootstrap.json` (secret, expir
 
 ## Compatibility
 
-Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-controller` `prompt(request, signal)`, `list(request, signal)`, and `sessionQuery.readSession`, as documented for the 0.2.2 controller. The operator-observed CLI is 0.2.2-rc.5. The installed 0.2.2-rc.5 sources were reviewed for this release; the API-level findings and the fixture-only gaps are in `docs/official-host-contract.md`. Host 0.1.5 had one authorized existing-session resume on that Desktop. The anonymous record and the items still unverified are in `docs/verified-scope.md`. In-process fixtures are not that machine.
+Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-controller` `prompt(request, signal)`, `list(request, signal)`, and `sessionQuery.readSession`, as documented for the 0.2.2 controller. The operator-observed CLI is 0.2.2-rc.5. The installed 0.2.2-rc.5 sources were reviewed for this release; the API-level findings and the fixture-only gaps are in `docs/official-host-contract.md`. Host 0.1.5 had one authorized existing-session resume on that Desktop. The anonymous record and the items still unverified are in `docs/verified-scope.md`. In-process fixtures are not that machine. Workspace autonomy from this branch has fixture evidence only: the live row is stated separately in `docs/verified-scope.md` and is **not** a pass.
 
 ## Install and rollback
 
@@ -180,8 +266,20 @@ Quit Desktop from the tray first. The bridge does not quit it. The tray's **Quit
 dsh plugin --profile desktop add dsh-control-bridge-host-0.2.2.tgz
 ```
 
-`Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable, and it keeps an existing host secret instead of rotating it. An empty allowlist with no armed bootstrap does not open the port. After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy. To pair another session later, `Rearm-DesktopHostBootstrap.ps1` arms a fresh window; Desktop does not need to be quit or restarted.
+`Prepare-DesktopHost.ps1` writes secrets and a 20-minute bootstrap file under `desktop-host-local` in the unpacked tree. It does not set a machine environment variable, and it keeps an existing host secret instead of rotating it. An empty allowlist with no armed bootstrap does not open the port, unless the operator's workspace autonomy policy is effective (see **First start** above). After Desktop is open, `Pair-DesktopHost.ps1` lists sessions by title, directory, busy flag, and model. `Pair-DesktopHost.ps1 -Index 1` writes one read grant and revokes the bootstrap secret. That choice does not start a task. Write is refused while the session is busy. To pair another session later, `Rearm-DesktopHostBootstrap.ps1` arms a fresh window; Desktop does not need to be quit or restarted.
 
 Rollback: quit Desktop, run `dsh plugin --profile desktop remove dsh-control-bridge-host`, delete that patch row if one remains, restore the previous `allowlist.json` only if the grants written by this install must be discarded, and reopen Desktop. Never restore an older profile backup over changes the operator made afterwards. Host 0.2.2 was exercised on Windows Desktop. The Codex skill created two verified master-control sessions in the same paired workspace, dispatched a local fixture to one and observed official completion. An existing session also resumed. See the anonymized results in `docs/verified-scope.md` in the source repository.
 
 The listener binds to `127.0.0.1`. Outbound completion webhooks are opt-in.
+
+## Rerun the regression
+
+CI runs exactly these eight files, and the autonomy and first-start suites are loaded by `create.test.js` through `import './autonomy-cases.js'` and `import './startup-cases.js'`. Re-running the same command therefore executes them too — a local run with a different file list would not prove what CI proves:
+
+```text
+node --test --test-force-exit plugins/dsh-control-bridge-host/test/host.test.js plugins/dsh-control-bridge-host/test/official-contract.test.js plugins/dsh-control-bridge-host/test/lifecycle.test.js plugins/dsh-control-bridge-host/test/rearm.test.js plugins/dsh-control-bridge-host/test/control.test.js plugins/dsh-control-bridge-host/test/create.test.js plugins/dsh-control-bridge-host/test/paths.test.js plugins/dsh-control-bridge-host/test/webhook.test.js
+python -m pytest tests -q
+python examples/e2e_fake.py
+```
+
+`*-cases.js` files are not `--test` entry points: they are modules that register tests when imported, the same pattern as `first-turn-cases.js`.

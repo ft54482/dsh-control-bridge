@@ -2,6 +2,35 @@
 
 本文记录 Windows Desktop 上的匿名验收和隔离测试。会话标识、路径、业务名称及凭据保存在本机。
 
+<a id="version-map"></a>
+
+## 先分清四处“0.2.2”
+
+文档里出现的 `0.2.2` 不是同一个东西，读证据前先对上号：
+
+| 说法 | 指什么 | 怎么核对 |
+|---|---|---|
+| 目标契约 `0.2.2` / `0.2.2-rc.5` | 本插件按官方 session controller 的 `0.2.2` 形状实现与核对 | `docs/official-host-contract.md`；`plugins/dsh-control-bridge-host/package.json` 的 `dsh.compat.sessionController` |
+| 隔离 Host 的 runtime | 启动那个隔离 profile 的 CLI 版本，由操作者选，不由插件决定 | 启动命令用的那个 `dsh.cmd`：`& $dsh --version`。本机有两条入口——Desktop 自带 CLI 0.2.3-alpha.2 与全局 npm `@deepseek-ai/dsh` 0.2.1-rc.3（`& "$env:APPDATA\npm\dsh.cmd" --version`）。lab 准备阶段用的是后者，主控本轮口径为 `0.2.2-rc.5`，两者不一致时以实际启动命令为准 |
+| Desktop 应用 / 自带 CLI | 操作者正在用的 DeepSeek Harness Desktop 及 `resources\runtime\cli` 里的 CLI | 0.2.3-alpha.2（`& "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" --version`） |
+| 全局 npm 包 | `npm i -g @deepseek-ai/dsh` 装的 CLI，和 Desktop 自带的不是一份 | 0.2.1-rc.3（`package.json` 的 `version`） |
+
+结论：`0.2.2` 说的是**目标 API 形状**，不是“这台机器上每个 runtime 都是 0.2.2”。真机验收必须写明用的是哪一条入口。
+
+<a id="workspace-autonomy-scope"></a>
+
+## 工作区自主（`workspaceAutonomy`，本分支，未发布）
+
+三态分开写，不许合并：
+
+| 态 | 范围 | 证据 | 结论 |
+| --- | --- | --- | --- |
+| **implemented**（已实现） | 任务范围登记/复用工作区与写授权、按任务归属与 `confirm_task` 接管、忙会话不抢占、`revoke-workspace` 只撤授权、幂等键按 operation 绑定、撤销/降权后 `authorization_stale`、空授权首启门禁、helper 的 health 门禁与回执校验、17 固定键操作记录 | `plugins/dsh-control-bridge-host/test/autonomy-cases.js`、`test/startup-cases.js`（含子进程真监听的 `startup-probe.js`，两者由 `test/create.test.js` 导入）、`tests/test_desktop_skill.py`；CI 原样 8 文件命令 169 通过，`python -m pytest tests -q` 145 通过 4 跳过，`python examples/e2e_fake.py` ok（2026-11-25 本机复跑，只跑不改） | 代码与夹具层已实现 |
+| **mock**（隔离/夹具） | 上述全部行为都在进程内假服务上验证：官方 `workspaceRegistry` / `sessionController` / `sessionQuery` 是夹具形状；`startup-cases.js` 的子进程会在空闲端口上真监听并真发 `GET /v1/health`，但它连的仍是夹具 Host，不是 Desktop | 同上测试文件 | 夹具通过**不等于**真机通过 |
+| **live**（真机） | 装进真实 Desktop profile、真实创建会话、真实派工 | 隔离 Host 验收进行中，证据见任务目录 `.agent/master-control/tasks/bridge-workspace-autonomy-20261125/lab/`（主控侧记录，不在本仓库内） | **未通过**：真机 `health` 的 `workspace_autonomy.effective`、真机建会话与 `revoke-workspace` 都还没有证据 |
+
+同时明确三件事：本分支**未合并**、**未发布**（`plugins/dsh-control-bridge-host/package.json` 仍是 `0.2.2`，与 `pyproject.toml`、`src/` 版本绑定）、**未安装**到任何在用 profile。不要因为隔离回归全绿就把它当成已在 Windows Desktop 上验收。
+
 ## 驾驶舱 0.1.3
 
 在 Windows 上用 Harness Desktop 随附的 CLI（0.2.3-alpha.2）将发布 TGZ 安装到全新隔离 profile，核对了包版本和 bundle 登记。对解包后的代码运行了六项离线回归。在同一画面输入五项登记任务、十个任务槽和空闲的四个引擎执行器时，组件分别显示 5/10 与 0/4。移除 Harness 会话来源后，该项显示未知。此验证覆盖安装、组件渲染和本机聚合协议；其他 Desktop 版本及新 profile 内的完整图形交互仍待验证。[安装与各项数据来源](../plugins/dsh-superagent-cockpit/README.md)
