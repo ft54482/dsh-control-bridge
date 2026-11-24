@@ -2,7 +2,7 @@
 
 # DSH Control Bridge
 
-[![简体中文](https://img.shields.io/badge/%E7%AE%80%E4%BD%93%E4%B8%AD%E6%96%87-2563eb?style=flat-square)](README.md) [![English](https://img.shields.io/badge/English-2563eb?style=flat-square)](README.en.md) [![Français](https://img.shields.io/badge/Fran%C3%A7ais-2563eb?style=flat-square)](README.fr.md) [![日本語](https://img.shields.io/badge/%E6%97%A5%E6%9C%AC%E8%AA%9E-2563eb?style=flat-square)](README.ja.md) [![한국어](https://img.shields.io/badge/%ED%95%9C%EA%B5%AD%EC%96%B4-2563eb?style=flat-square)](README.ko.md) [![Deutsch](https://img.shields.io/badge/Deutsch-2563eb?style=flat-square)](README.de.md)
+[<img src="docs/assets/languages/zh.png" alt="简体中文" height="26">](README.md) [<img src="docs/assets/languages/en.png" alt="English" height="26">](README.en.md) [<img src="docs/assets/languages/fr.png" alt="Français" height="26">](README.fr.md) [<img src="docs/assets/languages/ja.png" alt="日本語" height="26">](README.ja.md) [<img src="docs/assets/languages/ko.png" alt="한국어" height="26">](README.ko.md) [<img src="docs/assets/languages/de.png" alt="Deutsch" height="26">](README.de.md)
 
 Codex, Grok Bot 또는 직접 만든 조정 프로그램에서 지정한 DeepSeek Harness 작업 공간으로 작업을 보내고 실행 결과를 추적할 수 있습니다. **같은 컴퓨터에서 Codex와 Harness Desktop을 사용한다면 Codex skill과 Desktop Host부터 시작하세요.** 로컬 Host에 연결하며, 설치 후에는 Codex에서 자연어로 조작할 수 있습니다.
 
