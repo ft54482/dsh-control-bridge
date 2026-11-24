@@ -177,7 +177,7 @@ Codex Skill 默认在选定的工作区新建 `master-control` 会话。该预�
 
 ### 操作记录
 
-`workspace-autonomy.jsonl`，一行一个 JSON 对象，固定 17 个键：`at`、`op`、`operation`、`workspace_id`、`path`、`task_id`、`purpose`、`session_id`、`preset`、`access`、`client_request_key`、`parent_key`、`request_hash`、`request`、`phase`、`result`、`reason`（不适用写 `null`），成功行再加 `receipt`，撤销行加 `revoked`。`operation` 取值 `workspace` / `session` / `null`：绑定行必是前两者；`workspace_revoke` 行、以及「用 `workspace_id` 建会话时写的 `workspace_task_confirmed`」行是 `null`（按路径确认的那行记 `workspace`）。行分两类：**绑定行**（`workspace_create`/`workspace_reuse`/`workspace_grant_failed`、`session_create`/`session_grant`/`session_grant_failed`）回答调用方并占有 key；**证据行**（`workspace_task_confirmed`、`workspace_revoke`）只记录发生过什么，既不绑定 key 也不降级已有绑定。记录不含 bearer、密钥、提示词正文。追加失败只报 `recorded:false` + `record_error`，不回滚已落盘的授权。`purpose` 原样保存。
+`workspace-autonomy.jsonl`，一行一个 JSON 对象，固定 17 个键：`at`、`op`、`operation`、`workspace_id`、`path`、`task_id`、`purpose`、`session_id`、`preset`、`access`、`client_request_key`、`parent_key`、`request_hash`、`request`、`phase`、`result`、`reason`（不适用写 `null`），成功行再加 `receipt`，撤销行加 `revoked`。`operation` 取值 `workspace` / `session` / `null`：工作区相关行是 `workspace`（`workspace_task_confirmed` 无论按路径还是按 `workspace_id` 触发都记 `workspace`，见 `server.js:528`、`server.js:840`），`session_*` 行是 `session`，只有 `workspace_revoke` 行是 `null`。行分两类：**绑定行**（`workspace_create`/`workspace_reuse`/`workspace_grant_failed`、`session_create`/`session_grant`/`session_grant_failed`）回答调用方并占有 key；**证据行**（`workspace_task_confirmed`、`workspace_revoke`）只记录发生过什么，既不绑定 key 也不降级已有绑定。记录不含 bearer、密钥、提示词正文。追加失败只报 `recorded:false` + `record_error`，不回滚已落盘的授权。`purpose` 原样保存。
 
 ### 首次启动门禁
 

@@ -37,7 +37,7 @@
 
 | 证据点 | 真机回执 |
 | --- | --- |
-| 首启（空授权、无配对窗口、无预灌） | `health` 200：`workspace_autonomy.effective:true`、`grants_count:0`、`bootstrap_status:"unconfigured"`、`allowlist_warnings:[]`；启动 stderr 空 |
+| 首启（空授权、无配对窗口、无预灌） | `health` 200：`workspace_autonomy.effective:true`、`grants_count:0`、`bootstrap_status:"unconfigured"`、`allowlist_warnings:[]`；启动时无 tool-office / preset broken 告警，随后 stderr 仅一行 `[llm-deepseek-account] model listing …`（`host022-run1.err.txt`，110 B） |
 | roots 外两个新工作区（`alpha2` / `beta2`） | `create-workspace` 200：`created:true`、`created_directory:true`、`started_task:false`；`create-session` 200：`agent_preset:"master-control"`、`agent_preset_source:"session_projection"`、`grant.access:"write"`、`started_task:false`；投影回读各 1 条；发提示前无 `requests.json` |
 | 首轮派工 | 合成提示 202 接受 → `wait` 得 `phase:"terminal"`、`terminal_scope:"official"`、`completed:true`、`text:"OK"`、`turn:1`，`route_match` / `effort_match` / `model_match` 全 true；`history` 回读请求与回答一致 |
 | 复用（B） | 同工作区再登记 `reused:true`、`created:false`、`created_directory:false`；`/v1/workspaces` 只有 1 条、该工作区 sessions 只有 1 条；第二个提示照样 official 完成（`turn:2`），未新建工作区/会话 |

@@ -223,11 +223,14 @@ $profile = 'ws-autonomy-lab'
 
 ### 4. 启动并读 health
 
+先按[安装 Codex skill](#codex-desktop-setup) 把 skill 放到 `$skill`，然后：
+
 ```powershell
 & $dsh $profile --no-open
-# 另一个终端
+# 另一个终端（从仓库根目录也能跑：用绝对路径指向 helper，不要写裸 desktop.py）
+$client = Join-Path $skill 'scripts/desktop.py'
 $env:DSH_BRIDGE_SECRET_FILE = '<状态目录>/host.secret'
-python desktop.py health --port 8766
+python $client health --port 8766
 ```
 
 判定只看三个值：`workspace_autonomy.effective` 为 `true`、`configured`/`enabled` 为 `true`、`operations` 为 `0`。若 `effective` 为 `false`，`reason` 会指出缺什么（`not_configured` / `disabled` / `allowlist_file_missing` / `workspace_create_unavailable` / `session_create_unavailable` / `session_projections_unavailable`），按它补配置，不要改成别的路径绕过。
@@ -235,19 +238,21 @@ python desktop.py health --port 8766
 ### 5. 端到端验收（示例路径都是合成值）
 
 ```powershell
+$client = Join-Path $skill 'scripts/desktop.py'   # 或写完整路径：C:\...\scripts\desktop.py
+
 # 登记并授权一个根外目录（只登记，不建会话、不发提示词）
-python desktop.py create-workspace --port 8766 --data ws.json
+python $client create-workspace --port 8766 --data ws.json
 # ws.json: {"path":"D:\\ws-lab\\outside\\alpha","task_id":"TASK-A","purpose":"验收","create_directory":true,"client_request_key":"lab-ws-0001"}
 
 # 同一 key 重放：应 200 且 deduplicated:true
-python desktop.py create-workspace --port 8766 --data ws.json
+python $client create-workspace --port 8766 --data ws.json
 
 # 建第一个写会话（还不会派任务）
-python desktop.py create-session --port 8766 --data sess.json
+python $client create-session --port 8766 --data sess.json
 # sess.json: {"path":"D:\\ws-lab\\outside\\alpha","task_id":"TASK-A","purpose":"验收","access":"write","agent_preset":"master-control","client_request_key":"lab-sess-0001"}
 
 # 撤销授权：只撤授权，不删目录
-python desktop.py revoke-workspace --port 8766 --data revoke.json
+python $client revoke-workspace --port 8766 --data revoke.json
 # revoke.json: {"workspace_id":"<上一步返回的 workspace_id>"}
 ```
 
@@ -264,7 +269,7 @@ helper 对回执自己也会校验：回执不一致时退出码 1，并报 `wor
 | 项 | 实测 |
 | --- | --- |
 | 实例 | profile `ws-autonomy-lab`，Host `127.0.0.1:8766`、web `3096`，runtime 0.2.2-rc.5（本机 `dsh-022` 安装），独立状态目录；对照 profile `ws-autonomy-off`（8767）跑完即停 |
-| 首启 | 空 allowlist + 无 bootstrap：`health` `effective:true`、`grants_count:0`、`bootstrap_status:"unconfigured"`，启动 stderr 空，未预灌任何授权 |
+| 首启 | 空 allowlist + 无 bootstrap：`health` `effective:true`、`grants_count:0`、`bootstrap_status:"unconfigured"`；启动时无 tool-office / preset broken 告警，随后 stderr 仅一行 `[llm-deepseek-account] model listing …`（110 B）；未预灌任何授权 |
 | 主路径 | 两个 roots 外目录：`create-workspace` 200（`created:true`、`started_task:false`）→ `create-session` 200（`master-control` + `session_projection` + `access:write`）→ 合成提示 202 → `wait` `phase:terminal / terminal_scope:official / completed:true / text:"OK"`，route、effort、model 三项 match |
 | 复用 | 同工作区再登记 `reused:true`，工作区与会话各仍只 1 条，第二个提示照样 official 完成 |
 | 反例 | 4 并发同路径 → 同一 workspace id（1 created + 3 reused）；未知预设 409 `agent-preset/invalid`；换任务无 confirm → 409 `workspace_task_mismatch`，加 `confirm_task:true` → 200；`running:true` 时 `resume` → 409 `busy` 且长任务未被取消；策略关闭 → 400 `outside_allowed_roots` 等旧拒绝；`revoke-workspace` → 200 `directory_intact:true`，随后 `resume` → 409 `workspace_not_allowlisted` |

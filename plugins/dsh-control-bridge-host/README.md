@@ -145,7 +145,7 @@ Error codes this flow can answer, beyond the pre-existing ones:
 
 ### Operation record
 
-Every operation is appended to `workspace-autonomy.jsonl` with 17 fixed keys: `at`, `op`, `operation`, `workspace_id`, `path`, `task_id`, `purpose`, `session_id`, `preset`, `access`, `client_request_key`, `parent_key`, `request_hash`, `request`, `phase`, `result`, `reason` (null when a field does not apply), plus `receipt` on a success line and `revoked` on a revoke line. `operation` is `workspace` or `session` on the binding lines, and `null` on the lines that carry no operation of their own — `workspace_revoke` and the `workspace_task_confirmed` line written when a Session request names an existing `workspace_id` (the path-based confirmation does record `operation: "workspace"`). Lines split into **bindings** (`workspace_create`/`workspace_reuse`/`workspace_grant_failed`, `session_create`/`session_grant`/`session_grant_failed`) that answer a caller's request and own its key, and **evidence** (`workspace_task_confirmed`, `workspace_revoke`) that never binds a key and never downgrades a binding. No bearer, no secret, no message text. A failed append never rolls back a durable grant: the response reports `recorded: false` with `record_error`. `purpose` is stored verbatim, so callers must not put confidential material in it.
+Every operation is appended to `workspace-autonomy.jsonl` with 17 fixed keys: `at`, `op`, `operation`, `workspace_id`, `path`, `task_id`, `purpose`, `session_id`, `preset`, `access`, `client_request_key`, `parent_key`, `request_hash`, `request`, `phase`, `result`, `reason` (null when a field does not apply), plus `receipt` on a success line and `revoked` on a revoke line. `operation` is `workspace` on every workspace line — including `workspace_task_confirmed`, whether a path or a `workspace_id` triggered it (`server.js:528`, `server.js:840`; asserted in `test/autonomy-cases.js`) — `session` on every `session_*` line, and `null` only on `workspace_revoke`. Lines split into **bindings** (`workspace_create`/`workspace_reuse`/`workspace_grant_failed`, `session_create`/`session_grant`/`session_grant_failed`) that answer a caller's request and own its key, and **evidence** (`workspace_task_confirmed`, `workspace_revoke`) that never binds a key and never downgrades a binding. No bearer, no secret, no message text. A failed append never rolls back a durable grant: the response reports `recorded: false` with `record_error`. `purpose` is stored verbatim, so callers must not put confidential material in it.
 
 ### First start
 
@@ -178,10 +178,14 @@ $dsh = Read-Host 'path to the Desktop runtime dsh.cmd'
 #    its own state dir, workspaceAutonomy: true, and an empty allowlist (no bootstrap files).
 
 # 4. Start the isolated profile, then read the policy from another terminal.
+#    Point at the helper by path: a bare helper filename does not resolve from the repo root.
+$client = Join-Path $skill 'scripts/desktop.py'    # $skill = the installed deepseek-harness-bridge directory
 & $dsh <profile> --no-open
 $env:DSH_BRIDGE_SECRET_FILE = '<state dir>/host.secret'
-python desktop.py health --port <port>     # expect workspace_autonomy.effective = true, operations = 0
+python $client health --port <port>     # expect workspace_autonomy.effective = true, operations = 0
 ```
+
+The acceptance bodies are UTF-8 JSON files written in the current directory (`ws.json`, `sess.json`, `revoke.json`); `python $client create-workspace --port <port> --data ws.json` and the same shape for the other commands, so every line above can be replayed from the repository root.
 
 Acceptance in the isolated profile: `workspace_autonomy.effective: true`; the empty allowlist file is still empty after startup (nothing pre-seeded); `create-workspace` with `task_id`+`purpose` on a directory outside `workspaceRoots` returns `started_task:false`; `create-session` with `access:"write"` and `agent_preset:"master-control"` returns a verified receipt; a replay with the same key returns `deduplicated:true`; `revoke-workspace` returns `directory_intact:true` and the directory still exists; a replay after the revoke returns `409 authorization_stale`.
 
