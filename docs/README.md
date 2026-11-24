@@ -7,6 +7,7 @@
 | 我想做什么 | 从这里开始 | 按需查阅 |
 | --- | --- | --- |
 | 在 Codex 操作同机 Harness Desktop | [Windows 安装、配对与连接检查](windows-delivery.md#codex-desktop-setup) | [独立 skill](../skills/deepseek-harness-bridge/SKILL.md) · [会话命令](../skills/deepseek-harness-bridge/references/desktop.md) |
+| 在 Desktop 查看主控任务和工单执行器 | [驾驶舱安装与数据说明](../plugins/dsh-superagent-cockpit/README.md) | [可安装插件下载](https://github.com/ft54482/dsh-control-bridge/releases/tag/cockpit-v0.1.3) |
 | 升级或回滚 Host | [安装与回滚步骤](windows-delivery.md#host-install) | [插件说明](../plugins/dsh-control-bridge-host/README.md) · [真机验收范围](verified-scope.md) |
 | 给 Bot 接入 CLI、收件箱或 MCP | [协调桥操作指南](coordinator.md) | [MCP 工具目录（JSON）](mcp-tools.json) · [多实例配置](local-harness.md) |
 | 在独立 profile 运行命令行任务 | [Headless CLI 的进程、凭据与续接](headless-cli.md) | [隔离配置](../examples/headless-cli.example.toml) · [复用已有 home](../examples/headless-shared.example.toml) |
