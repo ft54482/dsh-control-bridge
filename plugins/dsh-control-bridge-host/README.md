@@ -94,6 +94,8 @@ A fresh workspace cannot be bootstrapped by the guarded create endpoints above: 
 
 `effective` is the conjunction `enabled && allowlistFile configured && workspaceRegistry.create callable && sessionController.create callable && sessionController.projections callable`. `GET /v1/health` always declares the truth (`configured`, `enabled`, `effective`, `reason`, `roots_mode`, `grant_store`, `record_file`, `operations`), and a configured-but-ineffective policy **fails closed**: a write request that carries `task_id` gets `403 workspace_autonomy_not_effective` instead of silently falling back to the standard mode.
 
+**First start.** A profile that has never paired anything has an empty or absent allowlist, and the Host only starts a listener for that when the policy is `effective` — nothing is pre-seeded, and the grant file is created by the first grant. Without an effective policy an empty allowlist still leaves the Host silent (the only other way in is an armed bootstrap window), a zero-byte or corrupt allowlist file is still `allowlist_unreadable`, and a missing secret, missing Desktop services or a non-loopback bind are still refused with their original reasons. The startup result also reports `autonomy: {configured, enabled, effective, reason}`.
+
 When it is effective:
 
 - Every autonomy write must carry `task_id` (1..200) and `purpose` (1..500); missing or blank is `400 task_required`. `client_request_key` (optional, `^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$`) makes a retry idempotent.
