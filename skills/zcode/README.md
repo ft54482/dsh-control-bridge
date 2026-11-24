@@ -2,6 +2,9 @@
 
 给 ZCode 用的两个技能，和本项目的 Codex 技能出自同一套客户端，基于它的发布版 v0.2.3（标签 `skill-v0.2.3`）。**状态：已完成（2026-11-25）。** 能装、能自检；SuperAgent 派工和 Desktop 主控会话（新建、发送提示词、取回结果）都在一台运行两个实例的 Windows 电脑上真机跑通。哪些验证过、哪些没有，见下面的[完成情况](#完成情况)和 [Windows 真机验收](../../docs/verified-scope.md)。
 
+> [!IMPORTANT]
+> **装之前先读[权限与授权](../../docs/permissions.md)。** 这个技能替 Agent 去动你的 DeepSeek Harness 和 GitHub 账号，能做什么取决于你授了什么。配对、把工作区加进 Host 的创建名单，都要你本人对那一项点头。代为安装的 Agent 遇到 `403`、`409` 时应当停下报给你，而不是自己改 Host 配置把路打通。
+
 ## 两个技能
 
 | 目录 | 管什么 | 什么时候用 |
@@ -27,9 +30,18 @@
 
 - **同名技能只加载一个。** ZCode 按发现顺序取第一个同名的技能，`~/.zcode/skills/` 排在 `~/.agents/skills/` 之前。Codex 和 ZCode 都用的话，两边各装各的即可；在 ZCode 里生效的是 `~/.zcode/skills/` 下那一份。
 
+## 负责安装的是 Agent 时
+
+你是代为安装和操作的一方，放行的是用户。完整的规矩在[权限与授权](../../docs/permissions.md#for-the-installing-agent)，要点：
+
+- 配对、改 Host 配置、改任何允许名单之前，先把要改的那一行原文和影响告诉用户，等用户针对这一项明确同意。「先做通」「你看着办」不算同意。
+- 被拒绝就停，把工作区、错误码和要改的那一行原样报给用户。不为了通过而放宽 `workspaceRoots`、不改允许名单、不用 `--skip-precheck`。
+- 改 Desktop profile 的 `cordis.patch.yml` 之前，确认 Desktop 里没有任务在跑：文件一改它会自动重启。
+- `send --yes` 和任何往 GitHub 写的命令，只在用户要这件活做的时候执行。
+
 ## 安装
 
-前提：Python 3.11 或更新；Harness Desktop 里已装 Host 插件并配对，做法和 [Codex 路径](../../docs/windows-delivery.md#codex-desktop-setup)完全相同。要派 SuperAgent 工单，还需要一台已部署的 SuperAgent 和已登录的 GitHub CLI。要在某个工作区里新建会话，这个工作区还得在 Host 的创建范围里（在 `workspaceRoots` 之下，或把它的编号列进 `presetSessionWorkspaceIds`），否则返回 `403 outside_allowed_roots`。
+前提：Python 3.11 或更新；Harness Desktop 里已装 Host 插件并配对，做法和 [Codex 路径](../../docs/windows-delivery.md#codex-desktop-setup)完全相同。要派 SuperAgent 工单，还需要一台已部署的 SuperAgent 和已登录的 GitHub CLI。要在某个工作区里新建会话，这个工作区还得在 Host 的创建范围里（在 `workspaceRoots` 之下，或把它的编号列进 `presetSessionWorkspaceIds`），否则返回 `403 outside_allowed_roots`。这几项授权都由用户本人决定，不是装好就有的。
 
 1. **装日常派工技能。** 把 `deepseek-harness-bridge/` 整个目录拷进 `~/.zcode/skills/`。
 2. **填本机配置。** 把其中的 `connection.example.json` 复制成 `connection.json`，按自己的电脑填写。它只放凭据**文件**的路径、端口和 SuperAgent 实例对照，凭据本身仍由 Host 保管。`superagent_instances` 里每个实例一行，写着它监听的仓库和端口。
@@ -87,3 +99,5 @@ python ~/.zcode/skills/dsh-control-bridge/dsh-bridge.py --version
 ## English
 
 Two skills for ZCode, built on the same clients as the Codex skill in this repository. `deepseek-harness-bridge` handles everyday dispatch to Desktop master-control sessions and to SuperAgent tickets; `dsh-control-bridge` wraps the `dsh-bridge` CLI. Install by copying each directory into `~/.zcode/skills/` and filling in the example configuration files. SuperAgent dispatch and a Desktop master-control session round trip (create the session, send a prompt, read the official completion) were verified on a Windows machine on 2026-11-24 and 25; the sections above list what was and was not verified.
+
+Before installing, read [Permissions and authorization](../../docs/permissions.md) (in Chinese). Every grant, from pairing a session to adding a workspace to the Host's creation list, is the user's to give. An Agent installing on the user's behalf must stop and ask instead of widening the Host configuration.

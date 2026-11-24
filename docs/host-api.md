@@ -85,7 +85,7 @@
 
 Codex Skill 默认在选定的工作区新建 `master-control` 会话。该预设需由操作者安装到 Harness。在原有任务上继续工作时，Skill 直接续接原会话。
 
-从 0.2.2 起，带预设的新会话必须使用已配对工作区的 ID。Host 比对授权目录和 Desktop 实际登记的目录。若工作区在已有 `workspaceRoots` 之外，可以在 Host 插件配置中添加 `presetSessionWorkspaceIds: ["WORKSPACE_ID"]`，仅允许在该工作区创建预设会话。新会话申请写入时，该工作区还需有现存的可写会话授权。这项配置只用于预设会话创建，原有的打开路径与创建工作区边界继续生效。
+从 0.2.2 起，带预设的新会话必须使用已配对工作区的 ID。Host 比对授权目录和 Desktop 实际登记的目录。若工作区在已有 `workspaceRoots` 之外，可以在 Host 插件配置中添加 `presetSessionWorkspaceIds: ["WORKSPACE_ID"]`，仅允许在该工作区创建预设会话。新会话申请写入时，该工作区还需有现存的可写会话授权。这项配置只用于预设会话创建，原有的打开路径与创建工作区边界继续生效。往这份名单里加工作区，是在扩大 Host 的创建范围，由操作者本人决定；代为安装的 Agent 要先问，见[权限与授权](permissions.md)。
 
 1. `GET /v1/health` 的 `preset_create_verified: true` 表明 Host 能查询预设、创建会话并读取会话当前的预设。工作区的创建权限仍单独检查。
 2. 向 `POST /v1/sessions` 提交 `{"workspace_id":"WORKSPACE","agent_preset":"master-control"}`。Host 先在 Harness 注册表里解析预设，再比对创建回执和会话投影，成功后才为新会话保存桥接授权。

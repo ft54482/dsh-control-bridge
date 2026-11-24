@@ -22,6 +22,7 @@ license: MIT
 - 适配器的真实状态：`fake` 在进程内演练，不发任何网络请求；`harness` 能起草，发送一律被拒；`headless_cli` 和 `desktop_host` 默认 `spawn = false`，不启动进程，也不拨号。
 - 所以 `--mode send` 只在 `fake` 上真的会“发送”。拿它排练流程、做契约测试、跑 CI 都合适，但不要把它说成已经连上了 Harness。
 - SuperAgent 管理面的状态不能当派工依据。出站的完成 webhook 只有 mock 结果，没有端到端接通，默认关闭。
+- 放行只来自人。发送要带一份人批准的 mandate，不要替人写 mandate，配置里也不能写 `auto_send`。整套桥哪些事必须由人点头、代为安装的 Agent 要守什么规矩，见仓库的[权限与授权](https://github.com/ft54482/dsh-control-bridge/blob/main/docs/permissions.md#for-the-installing-agent)。
 
 ## 调用约定
 

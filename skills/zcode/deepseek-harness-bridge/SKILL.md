@@ -10,6 +10,14 @@ license: MIT
 
 来源是开源项目 [ft54482/dsh-control-bridge](https://github.com/ft54482/dsh-control-bridge) v0.2.3 的 `skills/deepseek-harness-bridge`。`scripts/desktop.py`、`scripts/superagent.py`、`scripts/github_source.py`、`references/desktop.md`、`references/superagent.md` 是上游原文件，和官方发布包内容相同（换行符是 LF），命令与参数以它们为准。其余文件是 ZCode 适配。
 
+## 授权红线（先读）
+
+授权只能由用户给。这个技能能做什么，取决于用户亲自放行了什么，完整的说明在仓库的[权限与授权](https://github.com/ft54482/dsh-control-bridge/blob/main/docs/permissions.md#for-the-installing-agent)。
+
+- 配对、改 Host 配置（`presetSessionWorkspaceIds`、`workspaceRoots`、`allowCreateSession` 等）、改 SuperAgent 实例的允许名单：先把要改的那一行原文、它放开什么、有什么副作用告诉用户，等用户针对**这一项**明确说同意。「先做通」「你看着办」不算同意。
+- 被拒绝（403、409、预检不过）就停下，如实报阻塞。不为了让它通过而放宽配置、改名单、换 `gh` 的登录账号，或者用 `--skip-precheck`。
+- 改 Desktop profile 的 `cordis.patch.yml` 之前，确认 Desktop 里没有任务在跑：文件一改，Desktop 会自动重启。
+
 ## 调用约定
 
 - `<skill>` 指加载本技能时显示的 Base directory，也就是 `~/.zcode/skills/deepseek-harness-bridge`。所有命令先 `cd "<skill>"` 再跑，下文省略这一步。

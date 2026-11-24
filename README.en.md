@@ -12,6 +12,9 @@ Let Codex, Grok Bot or your own coordinator assign work to a specific DeepSeek H
 
 **The ZCode skills are finished (2026-11-25).** See the ZCode quick start below for installation and for what has been verified.
 
+> [!IMPORTANT]
+> **Read this before installing: [Permissions and authorization](docs/permissions.md) (in Chinese).** Freshly installed, this bridge can do nothing. Pairing, enabling session creation and adding your workspace to the Host's list each need your own consent. An Agent installing it on your behalf must not make these changes on its own, and editing the Host configuration restarts Harness Desktop. Read that page whether you install it yourself or let an Agent do it.
+
 ## Choose an entry point
 
 | Your environment and goal | What to install or run | First check |
@@ -29,7 +32,7 @@ See [components and runtime locations](docs/README.md#仓库里的几个名字) 
 ## Codex Desktop quick start
 
 1. **Install the skill.** Extract the standalone skill ZIP into your personal `~/.agents/skills/` directory. Paired users can reuse their existing Host and grants. A first installation also needs the compatible v0.2.2 Host TGZ and the portable source ZIP containing the Windows installation scripts, or an existing source checkout. [Skill ZIP](https://github.com/ft54482/dsh-control-bridge/releases/download/skill-v0.2.3/deepseek-harness-bridge-0.2.3-skill.zip) · [Host, portable package and SHA-256](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2)
-2. **Install the Host and pair.** Use Python 3.11+. Follow the Windows guide to install the Host into the desktop profile you actually use, choose an idle session in the target workspace, and configure the skill with the path to the long-lived credential file. Choose `read` for history access or `write` for dispatch. [Setup and pairing](docs/windows-delivery.md#codex-desktop-setup)
+2. **Install the Host and pair.** Use Python 3.11+. Follow the Windows guide to install the Host into the desktop profile you actually use, choose an idle session in the target workspace, and configure the skill with the path to the long-lived credential file. Choose `read` for history access or `write` for dispatch. [Setup and pairing](docs/windows-delivery.md#codex-desktop-setup) Pairing is a grant you give yourself; see [Permissions and authorization](docs/permissions.md) (in Chinese).
 3. **Check the connection.** Ask Codex to “use `$deepseek-harness-bridge` to check the local connection and list authorized sessions.” To create master-control sessions, also confirm that the same profile has the `master-control` preset installed, the Host allows session creation, and `health` returns `preset_create_verified=true`. Tell Codex about any custom port. [Non-default port example](docs/ports.md#desktop-host)
 4. **Choose the session for the task.** Ask to “find the earlier export-fix session and continue the failing cases,” or “open a new master-control session in the same workspace for this independent task.” After creation, the skill reads back the preset from the actual session, dispatches the task and tracks the official terminal state by request ID. [Session commands and acceptance fields](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
 
@@ -37,7 +40,7 @@ See [components and runtime locations](docs/README.md#仓库里的几个名字) 
 
 **Status: finished (2026-11-25).** SuperAgent dispatch and Desktop master-control sessions were both verified on a Windows machine running two instances: a first SuperAgent ticket and a follow-up on the same ticket both ended `completed`, and on the Desktop path a new session was created, sent a prompt and read back `completed` in under half a minute. The repository was left unchanged. Not yet verified: the new-Issue dispatch path. The full list is in [Windows live acceptance](docs/verified-scope.md).
 
-1. **Prerequisites.** Python 3.11+. The Host plugin is installed and paired in Harness Desktop, exactly as on the Codex path. Dispatching SuperAgent tickets also needs a deployed SuperAgent and a GitHub CLI that is logged in. To create sessions in a workspace, that workspace must be in the Host's creation scope; otherwise the answer is `403 outside_allowed_roots`.
+1. **Prerequisites.** Python 3.11+. The Host plugin is installed and paired in Harness Desktop, exactly as on the Codex path. Dispatching SuperAgent tickets also needs a deployed SuperAgent and a GitHub CLI that is logged in. To create sessions in a workspace, that workspace must be in the Host's creation scope; otherwise the answer is `403 outside_allowed_roots`. Each of these grants is yours to give; see [Permissions and authorization](docs/permissions.md) (in Chinese).
 2. **Install the dispatch skill.** Copy `skills/zcode/deepseek-harness-bridge/` into `~/.zcode/skills/`, copy its `connection.example.json` to `connection.json`, and fill in the paths, ports and SuperAgent instances of your machine. The file holds paths and ports only; the credential itself stays with the Host.
 3. **Install the coordinator skill (optional).** Clone this repository outside every skills directory, copy `skills/zcode/dsh-control-bridge/` into `~/.zcode/skills/`, and copy `local.example.json` to `local.json` with the path of that checkout.
 4. **Check, then use it.** Start a new ZCode session. Run `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`, then the three behaviour tests in the skill's `tests/` directory; all of them must pass. After that you can ask ZCode to “dispatch this task to SuperAgent”, or to “find the session that did such-and-such last time and continue it”.
@@ -67,4 +70,4 @@ dsh-bridge --config examples/config.example.toml check
 
 The example deliberately gives both `local-desktop` and `lab-server` a `broadcast-cs` workspace. Dispatch targets are identified by both instance and workspace. Task records distinguish ordinary sessions, `ordinary_session`, and long-running tasks, `superagent`. The default is `draft`; sending requires an operator-provided `mandate`. The fake ticket/run identifiers demonstrate the flow. Track real Assignments through the corresponding SuperAgent management service. [Coordinator commands and approval](docs/coordinator.md) · [Adapter capabilities](docs/adapters.md)
 
-[Development and contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [MIT license](LICENSE)
+[Development and contributing](CONTRIBUTING.md) · [Security](SECURITY.md) · [Permissions and authorization](docs/permissions.md) (in Chinese) · [MIT license](LICENSE)

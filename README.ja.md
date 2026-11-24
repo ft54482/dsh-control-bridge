@@ -12,6 +12,9 @@ Codex、Grok Bot、独自の調整プログラムから、指定した DeepSeek 
 
 **ZCode 用の skill は完成しました（2026-11-25）。** インストール手順と検証済みの範囲は下記の「ZCode のクイックスタート」を参照してください。
 
+> [!IMPORTANT]
+> **インストール前に読む：[権限と承認](docs/permissions.md)（中国語）。** インストール直後のこのブリッジには何もできません。ペアリング、セッション作成の許可、Host の名簿へのワークスペース追加は、どれも本人の同意が要ります。代わりにインストールする Agent が勝手に変更してはいけません。Host の設定を変更すると Harness Desktop が再起動します。自分で入れる場合も Agent に任せる場合も、先にこのページを読んでください。
+
 ## 利用方法を選ぶ
 
 | 環境と目的 | インストール・起動するもの | 最初の確認 |
@@ -29,7 +32,7 @@ Codex、Grok Bot、独自の調整プログラムから、指定した DeepSeek 
 ## Codex デスクトップのクイックスタート
 
 1. **skill をインストール。** 独立 skill ZIP を個人用の `~/.agents/skills/` に展開します。ペアリング済みなら既存の Host と権限を利用できます。初回は互換性のある v0.2.2 Host TGZ と、Windows インストールスクリプトを含むポータブルソース ZIP もダウンロードしてください。ソースをチェックアウト済みの場合はそれを使えます。[Skill ZIP](https://github.com/ft54482/dsh-control-bridge/releases/download/skill-v0.2.3/deepseek-harness-bridge-0.2.3-skill.zip) · [Host、ポータブル版、SHA-256](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2)
-2. **Host をインストールしてペアリング。** Python 3.11+ が必要です。Windows ガイドに従って実際に使用する desktop profile に Host をインストールし、対象ワークスペースの空いている会話を選び、長期認証情報ファイルのパスを skill に設定します。履歴の参照には `read`、タスクの送信には `write` を選びます。[インストールとペアリング](docs/windows-delivery.md#codex-desktop-setup)
+2. **Host をインストールしてペアリング。** Python 3.11+ が必要です。Windows ガイドに従って実際に使用する desktop profile に Host をインストールし、対象ワークスペースの空いている会話を選び、長期認証情報ファイルのパスを skill に設定します。履歴の参照には `read`、タスクの送信には `write` を選びます。[インストールとペアリング](docs/windows-delivery.md#codex-desktop-setup) ペアリングは本人が与える許可です。[権限と承認](docs/permissions.md)（中国語）を参照してください。
 3. **接続を確認。** Codex に「`$deepseek-harness-bridge` でローカル接続を確認し、許可済み会話を一覧表示して」と入力します。主制御会話を新規作成する場合は、同じ profile に `master-control` プリセットが入り、Host の会話作成が有効で、`health` が `preset_create_verified=true` を返すことを確認してください。独自のポートも Codex に伝えます。[既定以外のポートの例](docs/ports.md#desktop-host)
 4. **タスクに合う会話を選ぶ。** 「前回のエクスポート修正の会話を探して、失敗ケースの対応を続けて」、または「同じワークスペースに新しい主制御会話を作り、この独立したタスクを処理して」と依頼できます。作成後、skill は実際の会話からプリセットを読み戻してタスクを送り、リクエスト ID で公式の終了状態を追跡します。[会話コマンドと検証フィールド](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
 
@@ -37,7 +40,7 @@ Codex、Grok Bot、独自の調整プログラムから、指定した DeepSeek 
 
 **状態：完了（2026-11-25）。** SuperAgent へのタスク送信と、デスクトップの主制御会話の両方を、2 つのインスタンスを動かす Windows マシンで実機検証済みです。SuperAgent では、最初のチケットも、同じチケットへの追加タスクも `completed` で終了しました。Desktop では、新しい会話を作成し、プロンプトを送り、30 秒ほどで `completed` を受け取りました。リポジトリは変更されていません。未検証の項目は、新規 Issue からの送信です。完全な一覧は [Windows 実機検証](docs/verified-scope.md) を参照してください。
 
-1. **前提。** Python 3.11 以上。Harness Desktop に Host プラグインをインストールし、ペアリングを済ませておきます。手順は Codex の経路と同じです。SuperAgent にチケットを送るには、導入済みの SuperAgent とログイン済みの GitHub CLI も必要です。ワークスペースで会話を新規作成するには、そのワークスペースが Host の作成対象範囲に入っていなければなりません。入っていない場合は `403 outside_allowed_roots` が返ります。
+1. **前提。** Python 3.11 以上。Harness Desktop に Host プラグインをインストールし、ペアリングを済ませておきます。手順は Codex の経路と同じです。SuperAgent にチケットを送るには、導入済みの SuperAgent とログイン済みの GitHub CLI も必要です。ワークスペースで会話を新規作成するには、そのワークスペースが Host の作成対象範囲に入っていなければなりません。入っていない場合は `403 outside_allowed_roots` が返ります。これらの許可は本人が与えるものです。[権限と承認](docs/permissions.md)（中国語）を参照してください。
 2. **送信用 skill をインストール。** `skills/zcode/deepseek-harness-bridge/` を `~/.zcode/skills/` にコピーし、その中の `connection.example.json` を `connection.json` として複製して、自分のマシンのパス、ポート、SuperAgent インスタンスの対応を記入します。このファイルにはパスとポートだけを書き、認証情報自体は Host が管理します。
 3. **調整ブリッジ用 skill をインストール（任意）。** このリポジトリを skill ディレクトリの外にクローンしてから、`skills/zcode/dsh-control-bridge/` を `~/.zcode/skills/` にコピーし、`local.example.json` を `local.json` として複製してクローン先のパスを記入します。
 4. **確認して使い始める。** 新しい ZCode セッションを開きます。`python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health` を実行し、次に skill の `tests/` にある 3 つの動作テストを実行します。すべて通る必要があります。その後は「このタスクを SuperAgent に送って」や「前回これをした会話を探して続けて」と依頼できます。
@@ -67,4 +70,4 @@ dsh-bridge --config examples/config.example.toml check
 
 サンプルでは `local-desktop` と `lab-server` の両方に `broadcast-cs` ワークスペースを置いています。タスク送信先はインスタンスとワークスペースを組み合わせて指定します。タスク記録は通常会話 `ordinary_session` と長期タスク `superagent` を区別し、既定は `draft` です。送信には操作者が用意した `mandate` が必要です。fake が生成する ticket/run はデモ用です。実際の Assignment は対応する SuperAgent 管理サービスで追跡します。[調整ブリッジのコマンドと承認](docs/coordinator.md) · [アダプターの機能](docs/adapters.md)
 
-[開発・貢献](CONTRIBUTING.md) · [セキュリティ](SECURITY.md) · [MIT ライセンス](LICENSE)
+[開発・貢献](CONTRIBUTING.md) · [セキュリティ](SECURITY.md) · [権限と承認](docs/permissions.md)（中国語） · [MIT ライセンス](LICENSE)
