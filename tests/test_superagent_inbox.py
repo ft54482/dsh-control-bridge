@@ -444,6 +444,39 @@ def test_triage_unknown_for_a_failed_report_that_cannot_be_retried(world):
     assert "unclassified" in item["triage_reason"]
 
 
+def test_triage_ended_record_without_outcome_stays_terminal_not_retryable(world):
+    data, _, superagent = world
+    # Older data: an ended record with terminal evidence but no outcome, plus a
+    # failed, retryable Assignment. It must not read as retryable_failed.
+    data["add"](ticket("legacy-1", state="ended", stage="ended", action=None, inputs=[],
+                       actions={"retry": True, "stop": False},
+                       ended={"at": "2026-01-01T00:30:00Z", "by": "executor"},
+                       assignments=[assignment("assignment-1", state="ended", report_state="failed",
+                                              summary="an earlier attempt failed",
+                                              ended="2026-01-01T00:20:00Z")]))
+    # Control: with an outcome the same shape still reports `ended` first.
+    data["add"](ticket("legacy-2", state="ended", stage="ended", action=None, inputs=[],
+                       actions={"retry": True, "stop": False},
+                       ended={"at": "2026-01-01T00:30:00Z", "by": "executor", "outcome": "completed"},
+                       assignments=[assignment("assignment-1", state="ended", report_state="failed",
+                                              summary="an earlier attempt failed",
+                                              ended="2026-01-01T00:20:00Z")]))
+
+    missing = payload(superagent("detail", "legacy-1"))
+    assert missing["triage"] == "unknown"
+    assert missing["triage"] != "retryable_failed"
+    reason = missing["triage_reason"]
+    assert "without outcome" in reason
+    assert "at=2026-01-01T00:30:00Z" in reason
+    assert "by=executor" in reason
+    assert missing["ended"] == {"at": "2026-01-01T00:30:00Z", "by": "executor"}
+    assert missing["actions"]["retry"] is True
+
+    control = payload(superagent("detail", "legacy-2"))
+    assert control["triage"] == "ended"
+    assert "completed" in control["triage_reason"]
+
+
 # --------------------------------------------------------------------------- #
 # R5.2  paging follows every next_offset
 # --------------------------------------------------------------------------- #

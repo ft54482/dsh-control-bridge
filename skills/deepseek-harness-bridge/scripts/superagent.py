@@ -182,16 +182,30 @@ def newest_assignment(rows: list[dict]) -> dict | None:
 def triage_of(detail: dict, latest: dict | None = None) -> tuple[str, str]:
     """Classify what the operator has to do next, and why.
 
-    Order matters: a ready report is reviewable even when the Assignment still
-    says `running`, so `review_ready` must be decided before `running`.
+    Order matters twice over:
+
+    * a present `ended` record is terminal evidence, so it is decided before any
+      Assignment is looked at. A record without `outcome` (older data) is still
+      terminal: it must never read as reviewable, retryable or running;
+    * a ready report is reviewable even when the Assignment still says `running`,
+      so `review_ready` must be decided before `running`.
     """
     actions = detail.get("actions") if isinstance(detail.get("actions"), dict) else {}
     rows = assignment_rows(detail)
     any_ready = any(isinstance(row.get("report"), dict) and row["report"].get("state") == "ready" for row in rows)
     ended = detail.get("ended") if isinstance(detail.get("ended"), dict) else None
-    if ended and ended.get("outcome"):
-        by = f" by {ended.get('by')}" if ended.get("by") else ""
-        return "ended", f"ticket ended: {ended.get('outcome')}{by}"
+    if ended is not None:
+        if ended.get("outcome"):
+            by = f" by {ended.get('by')}" if ended.get("by") else ""
+            at = f" at {ended.get('at')}" if ended.get("at") else ""
+            return "ended", f"ticket ended: {ended.get('outcome')}{by}{at}"
+        evidence = ", ".join(part for part in (f"at={ended.get('at')}" if ended.get("at") else None,
+                                               f"by={ended.get('by')}" if ended.get("by") else None)
+                             if part) or "no at or by recorded"
+        # Terminal evidence is kept even though the outcome is missing, and no
+        # retryable/reviewable/running state may be inferred from the assignments.
+        return "unknown", (f"ticket has an ended record ({evidence}) without outcome; "
+                           f"terminal evidence kept, outcome unknown")
     if latest is None:
         latest = assignment_view(newest_assignment(rows)) if rows else None
     if latest is None:

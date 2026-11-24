@@ -116,7 +116,7 @@ python $g reply poll --ticket TICKET_ID --port $port --watch --interval 30 --wai
 - 游标落 `~/.codex/state/deepseek-harness-bridge/reply/cursors/<ticket>.json`（原子写、0600），字段：`submitted_comment_id`、`delivered_input_id`、`delivered_at`、`read_at`、`report_at`、`terminal_outcome`、`pull_request_state`。
 - 同一游标重复轮询输出 `changed=false`、`new=[]`，不重复报「新结果」，也不会重复评论。
 - `--resume` 额外回显 `resumed_from`（上次保存的游标），便于跨进程续跑。
-- `--watch`/`--wait` 是**客户端轮询**。事件订阅默认关闭：上游管理 API 的路由表（`src/app/api.ts` 第 12–46 行的 `Api` 接口）里没有事件流或订阅路由，`/orchestrator/api` 只有请求-响应式路由（含少数 POST 控制操作，如 `sources/:id/labels`、`threads/:key/unsubscribe`、`triggers/:id/requeue`、`decisions/:id/dismiss`、`executor/pause`、`tickets/:id/retry|stop`）；没有可订阅的事件来源，证据不足，不启用。
+- `--watch`/`--wait` 是**客户端轮询**。事件订阅默认关闭：上游管理 API 的路由表（`src/app/api.ts` 第 20–46 行的 `Api` 接口）里没有事件流或订阅路由，`/orchestrator/api` 只有请求-响应式路由（含少数 POST 控制操作，如 `sources/:id/labels`、`threads/:key/unsubscribe`、`triggers/:id/requeue`、`decisions/:id/dismiss`、`executor/pause`、`tickets/:id/retry|stop`）；没有可订阅的事件来源，证据不足，不启用。
 
 ### 5.1 生命周期对照
 
