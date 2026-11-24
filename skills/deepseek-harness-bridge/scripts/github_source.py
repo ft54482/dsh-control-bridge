@@ -24,6 +24,11 @@ from urllib.parse import quote
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from superagent import (assignment_rows as sa_assignment_rows, assignment_view as sa_assignment_view,
+                        delivered_to_ticket as sa_delivered_to_ticket, delivery_view as sa_delivery_view,
+                        newest_assignment as sa_newest_assignment, pull_requests as sa_pull_requests,
+                        source_thread as sa_source_thread, ticket_detail as sa_ticket_detail)
+
 DEFAULT_STATE = Path(os.environ.get("DSH_BRIDGE_SKILL_STATE", Path.home() / ".codex" / "state" / "deepseek-harness-bridge")) / "github"
 API_HEADERS = {"x-orchestrator-request": "1"}
 TOKEN_RE = re.compile(r"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|Bearer\s+\S+)")
@@ -820,6 +825,622 @@ def trace(args) -> int:
     return 0 if latest and latest.get("stage") == "correlated" else 4
 
 
+# --------------------------------------------------------------------------- #
+# Reply on the source thread, and follow the result
+# --------------------------------------------------------------------------- #
+REPO_URL_RE = re.compile(r"https://github\.com/([^/\s]+)/([^/\s]+)/(?:issues|pull)/\d+")
+STOP_MARKERS = ("stopped", "stop", "cancelled", "canceled")
+
+
+def skill_root() -> Path:
+    return Path(os.environ.get("DSH_BRIDGE_SKILL_STATE", Path.home() / ".codex" / "state" / "deepseek-harness-bridge")).expanduser()
+
+
+def reply_plans_dir() -> Path:
+    return skill_root() / "reply" / "plans"
+
+
+def reply_cursors_dir() -> Path:
+    return skill_root() / "reply" / "cursors"
+
+
+def verdicts_path() -> Path:
+    return skill_root() / "local" / "verdicts.jsonl"
+
+
+def repo_from_url(url: object) -> str | None:
+    match = REPO_URL_RE.search(str(url or ""))
+    return f"{match.group(1)}/{match.group(2)}" if match else None
+
+
+def write_state(value: dict, path: Path) -> None:
+    """Atomic 0600 local state file; same writer as the send plan."""
+    write_plan(value, path)
+
+
+def read_state(path: Path) -> dict | None:
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def reply_evidence(detail: dict, source: dict | None, issue: int | None) -> dict:
+    """What was checked before replying: the delivery basis, captured as of now."""
+    row = sa_newest_assignment(sa_assignment_rows(detail))
+    latest = sa_assignment_view(row) if row else None
+    delivery = sa_delivery_view(detail)
+    ended = detail.get("ended") if isinstance(detail.get("ended"), dict) else None
+    return {
+        "captured_at": now_iso(),
+        "ticket": detail.get("id"),
+        "engine_state": {"state": detail.get("state"), "stage": detail.get("stage"),
+                         "action": detail.get("action"), "ended": ended},
+        "latest_assignment": latest,
+        "report_cursor": {"assignment": (latest or {}).get("id"),
+                          "report_state": (latest or {}).get("report_state"),
+                          "report_at": (latest or {}).get("report_at")},
+        "delivery": delivery,
+        "delivered_to_ticket": sa_delivered_to_ticket(detail),
+        "undelivered": delivery.get("undelivered"),
+        "source_thread": source,
+        "issue": issue,
+        "note": "a ready report, an accepted decision and a stop are each recorded as-is; none of them is a pass",
+    }
+
+
+def reply_prepare(args) -> int:
+    if not args.request or not args.request.strip():
+        print(json.dumps({"ok": False, "reason": "empty_request"}))
+        return 2
+    if len(args.request) > 8000:
+        print(json.dumps({"ok": False, "reason": "request_too_long"}))
+        return 2
+    if TOKEN_RE.search(args.request):
+        print(json.dumps({"ok": False, "reason": "request_contains_credential_like_text"}))
+        return 2
+    try:
+        detail = sa_ticket_detail(args.port, args.ticket)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(json.dumps({"ok": False, "reason": "ticket_unreadable", "ticket": args.ticket,
+                          "detail": sanitise(error, 200)}))
+        return 1
+    source = sa_source_thread(detail)
+    issue = args.issue or (source or {}).get("issue_number")
+    if not issue:
+        print(json.dumps({"ok": False, "reason": "no_source_thread", "ticket": args.ticket,
+                          "note": "this ticket has no GitHub Issue thread; a Pull Request thread is not a reply target"}))
+        return 2
+    repo = args.repo or repo_from_url((source or {}).get("url"))
+    if not repo:
+        for channel in detail.get("channels") or []:
+            repo = repo_from_url(channel.get("url") if isinstance(channel, dict) else channel)
+            if repo:
+                break
+    if not repo:
+        print(json.dumps({"ok": False, "reason": "repo_unknown", "ticket": args.ticket,
+                          "note": "pass --repo or use a ticket whose Issue thread names the repository"}))
+        return 2
+    issue_url = ((source or {}).get("url") if (source or {}).get("issue_number") == issue
+                 else f"https://github.com/{repo}/issues/{issue}")
+    actor = args.actor or gh_authenticated_login(args.gh) or str(
+        ((detail.get("mandate") or {}).get("basis") or {}).get("sender") or "")
+    agent = args.agent
+    evidence = reply_evidence(detail, source, issue)
+    if not args.skip_precheck:
+        checked = precheck_data(argparse.Namespace(port=args.port, repo=repo, actor=actor, agent=agent, gh=args.gh))
+        if not checked["ok"]:
+            print(json.dumps({"ok": False, "reason": "precheck_failed", "precheck": checked,
+                              "note": "dispatch refused; repository_matches=false means this profile's Source is bound "
+                                      "to another repository and cannot take this event"},
+                             ensure_ascii=True))
+            return 1
+        agent = checked.get("agent") or agent
+    if not agent:
+        print(json.dumps({"ok": False, "reason": "agent_unknown",
+                          "note": "pass --agent or use a profile whose GitHub Source names an agent"}))
+        return 2
+    marker = args.marker or marker_new()
+    if not re.fullmatch(r"dsb-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}", marker):
+        print(json.dumps({"ok": False, "reason": "invalid_marker"}))
+        return 2
+    body = f"@{agent} [dsh-bridge:{marker}] {args.request}"
+    plan = {
+        "version": 1,
+        "reply": True,
+        "ticket": args.ticket,
+        "marker": marker,
+        "port": args.port,
+        "repo": repo,
+        "actor": actor,
+        "agent": agent,
+        "kind": "comment",
+        "issue": issue,
+        "issue_url": issue_url,
+        "body": body,
+        "title": None,
+        "created_at": now_iso(),
+        "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=args.ttl_minutes))
+        .isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "status": "prepared",
+        "evidence": evidence,
+        "gh_command": f"gh issue comment {issue} --repo {repo} --body-file <plan-body>",
+    }
+    path = Path(args.out) if args.out else reply_plans_dir() / f"{marker}.json"
+    write_plan(plan, path)
+    print(json.dumps({
+        "ok": True,
+        "ticket": args.ticket,
+        "source_thread": source,
+        "target_issue_url": issue_url,
+        "marker": marker,
+        "body": body,
+        "plan": str(path),
+        "instance": {"port": args.port, "repo": repo, "actor": actor, "agent": agent},
+        "latest_assignment": evidence["latest_assignment"],
+        "report_cursor": evidence["report_cursor"],
+        "delivery": evidence["delivery"],
+        "send_command": f"python github_source.py reply send --plan \"{path}\" --yes",
+        "note": "prepared only; no GitHub write was made. send --yes writes once.",
+    }, ensure_ascii=True, indent=2))
+    return 0
+
+
+def reply_send(args) -> int:
+    try:
+        plan = load_plan(Path(args.plan).expanduser())
+    except (OSError, RuntimeError, ValueError) as error:
+        print(json.dumps({"ok": False, "reason": "plan_unreadable", "detail": sanitise(error, 200)}))
+        return 2
+    if not plan.get("reply") or not plan.get("ticket"):
+        print(json.dumps({"ok": False, "reason": "not_a_reply_plan",
+                          "note": "use reply prepare; the generic send path is unchanged"}))
+        return 2
+    # The single sender, duplicate check, lock and unknown handling stay in send().
+    return send(args)
+
+
+def reply_plan_for(args) -> tuple[dict | None, Path | None]:
+    if getattr(args, "plan", None):
+        path = Path(args.plan).expanduser()
+        return load_plan(path), path
+    ticket = getattr(args, "ticket", None)
+    if not ticket:
+        raise RuntimeError("plan_or_ticket_required")
+    found = []
+    if reply_plans_dir().is_dir():
+        for path in sorted(reply_plans_dir().glob("*.json")):
+            plan = read_state(path)
+            if plan and str(plan.get("ticket")) == str(ticket):
+                found.append((str(plan.get("created_at") or ""), plan, path))
+    if not found:
+        return None, None
+    _, plan, path = max(found, key=lambda item: item[0])
+    return plan, path
+
+
+def pr_checks(gh_path: str, repo: str, number: int, sha: str | None) -> dict:
+    """Checks by `gh pr checks`, else commit check-runs + commit status.
+
+    GitHub's REST API has no `GET /repos/{repo}/pulls/{number}/checks` (it is a
+    404); these three reads are the ones that exist. An empty list is not a pass.
+    """
+    result = gh(["pr", "checks", str(number), "--repo", repo, "--json", "name,state,bucket,link"], gh_path, 60)
+    if (result.stdout or "").strip().startswith("["):
+        try:
+            rows = [row for row in json.loads(result.stdout) if isinstance(row, dict)]
+            buckets: dict[str, int] = {}
+            for row in rows:
+                label = str(row.get("bucket") or row.get("state") or "unknown")
+                buckets[label] = buckets.get(label, 0) + 1
+            return {"source": "gh_pr_checks", "total": len(rows), "by_bucket": buckets,
+                    "exit_code": result.returncode, "note": "an empty check list is not a pass"}
+        except ValueError:
+            pass
+    if sha:
+        try:
+            runs = gh_json(["api", f"repos/{repo}/commits/{sha}/check-runs"], gh_path)
+            status = gh_json(["api", f"repos/{repo}/commits/{sha}/status"], gh_path)
+            return {"source": "commit_check_runs+status", "total": runs.get("total_count", 0),
+                    "state": status.get("state"), "statuses": status.get("total_count", 0),
+                    "note": "0 checks is not a pass"}
+        except RuntimeError as error:
+            return {"source": "unavailable", "error": sanitise(error, 200)}
+    return {"source": "unavailable", "note": "gh pr checks returned no JSON and there is no head sha"}
+
+
+def pr_state(gh_path: str, repo: str, number: int) -> dict:
+    """Read-only Pull Request state: open/merged/closed/draft, mergeStateStatus, checks."""
+    owner, name = repo.split("/", 1)
+    query = ("query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){"
+             "pullRequest(number:$number){number url state merged isDraft mergeStateStatus reviewDecision "
+             "baseRefName headRefOid}}}")
+    record: dict = {}
+    try:
+        data = gh_json(["api", "graphql", "-f", f"query={query}", "-f", f"owner={owner}",
+                        "-f", f"name={name}", "-F", f"number={number}"], gh_path)
+        pull = (((data or {}).get("data") or {}).get("repository") or {}).get("pullRequest") or {}
+        if pull:
+            record = {"source": "graphql", "number": pull.get("number") or number, "url": pull.get("url"),
+                      "state": pull.get("state"), "merged": bool(pull.get("merged")),
+                      "draft": bool(pull.get("isDraft")), "mergeStateStatus": pull.get("mergeStateStatus"),
+                      "reviewDecision": pull.get("reviewDecision"), "base_ref": pull.get("baseRefName"),
+                      "head_sha": pull.get("headRefOid")}
+    except (OSError, RuntimeError, ValueError) as error:
+        record = {"graphql_error": sanitise(error, 200)}
+    if "number" not in record:
+        rest = gh_json(["api", f"repos/{repo}/pulls/{number}"], gh_path)
+        record = {"source": "rest", "number": number, "url": rest.get("html_url"), "state": rest.get("state"),
+                  "merged": bool(rest.get("merged")), "draft": bool(rest.get("draft")),
+                  "mergeStateStatus": rest.get("mergeable_state"), "reviewDecision": rest.get("reviewDecision"),
+                  "base_ref": (rest.get("base") or {}).get("ref"), "head_sha": (rest.get("head") or {}).get("sha")}
+    record["checks"] = pr_checks(gh_path, repo, number, record.get("head_sha"))
+    record["note"] = ("REST GET /repos/{repo}/pulls/{number}/checks does not exist (404); "
+                      "checks come from gh pr checks or commit check-runs/status")
+    return record
+
+
+def reply_snapshot(detail: dict, plan: dict | None, gh_path: str, check_pr: bool = False) -> dict:
+    """One read-only view of 'what happened after the reply'."""
+    source = sa_source_thread(detail)
+    marker = (plan or {}).get("marker")
+    repo = (plan or {}).get("repo") or repo_from_url((source or {}).get("url"))
+    issue = (plan or {}).get("issue") or (source or {}).get("issue_number")
+    submitted: dict = {"submitted": None, "marker": marker}
+    if plan and marker and repo and issue:
+        try:
+            comments = issue_comments(repo, int(issue), gh_path)
+            found = find_marker(comments, marker)
+            submitted = {"submitted": bool(found), "marker": marker, "marker_count": len(found),
+                         "comment_id": found[0].get("id") if found else None,
+                         "comment_url": found[0].get("html_url") if found else None,
+                         "comment_at": found[0].get("created_at") if found else None}
+        except (OSError, RuntimeError, ValueError) as error:
+            submitted = {"submitted": None, "marker": marker, "read_error": sanitise(error, 200)}
+    proof = sa_delivered_to_ticket(detail, marker) if marker else sa_delivered_to_ticket(detail)
+    if marker and not proof.get("delivered"):
+        sent_at = str((plan or {}).get("sent_at") or (plan or {}).get("created_at") or "")
+        fallback = sa_delivered_to_ticket(detail)
+        if fallback.get("delivered") and str(fallback.get("delivered_at") or "") >= sent_at:
+            proof = {**fallback, "matched": "any_input_after_plan"}
+    if proof.get("delivered"):
+        delivery_state = "delivered_to_ticket"
+    elif submitted.get("submitted"):
+        delivery_state = "pending_delivery"
+    elif plan:
+        delivery_state = "not_delivered"
+    else:
+        delivery_state = "unknown"
+    row = sa_newest_assignment(sa_assignment_rows(detail))
+    latest = sa_assignment_view(row) if row else None
+    decision = detail.get("decision") if isinstance(detail.get("decision"), dict) else {}
+    decision_at = str(decision.get("at") or "")
+    delivered_at = str(proof.get("delivered_at") or "")
+    report_at = str((latest or {}).get("report_at") or "")
+    ended = detail.get("ended") if isinstance(detail.get("ended"), dict) else None
+    pull_request = None
+    if check_pr and repo:
+        numbers = [row.get("number") for row in sa_pull_requests(detail) if row.get("number")]
+        if numbers:
+            pulls, problems = [], []
+            for number in numbers:
+                try:
+                    pulls.append(pr_state(gh_path, repo, int(number)))
+                except (OSError, RuntimeError, ValueError) as error:
+                    problems.append({"number": number, "error": sanitise(error, 200)})
+            pull_request = {"pull_requests": pulls, "errors": problems}
+    return {
+        "ticket": {"id": detail.get("id"), "state": detail.get("state"), "stage": detail.get("stage"),
+                   "action": detail.get("action"), "ended": ended},
+        "source_thread": source,
+        "issue": issue,
+        "marker": marker,
+        "submitted": submitted,
+        "delivery": delivery_state,
+        "delivered_to": proof,
+        "worker_read": bool(proof.get("read_at")),
+        "report": {"assignment": (latest or {}).get("id"), "assignments": len(sa_assignment_rows(detail)),
+                   "report_state": (latest or {}).get("report_state"), "report_at": (latest or {}).get("report_at"),
+                   "report_new_since_delivery": bool(report_at and delivered_at and report_at >= delivered_at)},
+        "acceptance": {"accepted": decision.get("outcome") == "accept", "outcome": decision.get("outcome"),
+                       "at": decision.get("at")},
+        "new_decision_after_input": bool(decision_at and delivered_at and decision_at >= delivered_at),
+        "pull_request": pull_request,
+        "delivery_scope": {
+            "assignments": [{"id": item.get("id"), "state": item.get("state_effective"),
+                             "ref": item.get("ref"), "report_state": item.get("report_state")}
+                            for item in (sa_assignment_view(r) for r in sa_assignment_rows(detail))],
+            "threads": [{"key": row.get("key"), "subscriptions": row.get("subscriptions"), "stage": row.get("stage")}
+                        for row in (detail.get("threads") or []) if isinstance(row, dict)],
+        },
+        "rule": "delivered_to_ticket means this Ticket took the message; a new Decision is not required",
+    }
+
+
+def reply_stage(snapshot: dict) -> str:
+    if (snapshot.get("ticket") or {}).get("ended"):
+        return "ticket_terminal"
+    if snapshot.get("delivery") == "delivered_to_ticket":
+        return "delivered"
+    if (snapshot.get("submitted") or {}).get("submitted"):
+        return "submitted"
+    if snapshot.get("delivery") == "pending_delivery":
+        return "pending_delivery"
+    return "pending"
+
+
+def reply_trace(args) -> int:
+    try:
+        plan, plan_path = reply_plan_for(args)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(json.dumps({"ok": False, "reason": "plan_unreadable", "detail": sanitise(error, 200)}))
+        return 2
+    ticket = getattr(args, "ticket", None) or (plan or {}).get("ticket")
+    if not ticket:
+        print(json.dumps({"ok": False, "reason": "plan_or_ticket_required"}))
+        return 2
+    port = args.port or int((plan or {}).get("port") or 3084)
+    deadline = time.monotonic() + max(0, args.wait)
+    snapshot: dict = {}
+    while True:
+        try:
+            detail = sa_ticket_detail(port, ticket)
+            snapshot = reply_snapshot(detail, plan, args.gh, args.check_pr)
+        except (OSError, RuntimeError, ValueError) as error:
+            snapshot = {"error": "read_failed", "detail": sanitise(error, 200)}
+        stage = reply_stage(snapshot) if "error" not in snapshot else "read_failed"
+        if stage in ("delivered", "ticket_terminal", "read_failed") or time.monotonic() >= deadline:
+            break
+        time.sleep(max(1, min(args.interval, 60)))
+    output = {"ok": "error" not in snapshot, "port": port, "ticket": ticket,
+              "stage": reply_stage(snapshot) if "error" not in snapshot else "read_failed",
+              "plan": str(plan_path) if plan_path else None,
+              **snapshot}
+    print(json.dumps(output, ensure_ascii=True, indent=2))
+    return 0 if output["ok"] else 1
+
+
+def reply_cursor(snapshot: dict, previous: dict | None = None) -> dict:
+    proof = snapshot.get("delivered_to") or {}
+    submitted = snapshot.get("submitted") or {}
+    report = snapshot.get("report") or {}
+    ended = (snapshot.get("ticket") or {}).get("ended") or {}
+    pull = snapshot.get("pull_request") or {}
+    states = "/".join(str(item.get("state")) for item in pull.get("pull_requests") or []) or ""
+    return {
+        "ticket": (snapshot.get("ticket") or {}).get("id"),
+        "updated_at": now_iso(),
+        "marker": snapshot.get("marker"),
+        "stage": reply_stage(snapshot),
+        "submitted_comment_id": submitted.get("comment_id") or (previous or {}).get("submitted_comment_id"),
+        "delivered_input_id": proof.get("input_id") or (previous or {}).get("delivered_input_id"),
+        "delivered_at": proof.get("delivered_at") or (previous or {}).get("delivered_at"),
+        "read_at": proof.get("read_at") or (previous or {}).get("read_at"),
+        "report_at": report.get("report_at") or (previous or {}).get("report_at"),
+        "terminal_outcome": ended.get("outcome") or (previous or {}).get("terminal_outcome"),
+        "pull_request_state": states or (previous or {}).get("pull_request_state"),
+    }
+
+
+def poll_changes(previous: dict, snapshot: dict) -> list[str]:
+    """Only states that moved since the saved cursor. The same cursor reports nothing."""
+    changes: list[str] = []
+    submitted = snapshot.get("submitted") or {}
+    proof = snapshot.get("delivered_to") or {}
+    report = snapshot.get("report") or {}
+    ended = (snapshot.get("ticket") or {}).get("ended") or {}
+    pull = snapshot.get("pull_request") or {}
+    if submitted.get("submitted") and str(submitted.get("comment_id")) != str(previous.get("submitted_comment_id")):
+        changes.append("submitted")
+    if proof.get("delivered") and str(proof.get("input_id")) != str(previous.get("delivered_input_id")):
+        changes.append("delivered")
+    if snapshot.get("worker_read") and str(proof.get("read_at")) != str(previous.get("read_at")):
+        changes.append("worker_read")
+    if report.get("report_at") and str(report.get("report_at")) != str(previous.get("report_at")):
+        changes.append("report_new")
+    if ended.get("outcome") and str(ended.get("outcome")) != str(previous.get("terminal_outcome")):
+        changes.append("ticket_terminal")
+    states = "/".join(str(item.get("state")) for item in pull.get("pull_requests") or [])
+    if states and states != str(previous.get("pull_request_state")):
+        changes.append("pull_request_state")
+    return changes
+
+
+def reply_poll(args) -> int:
+    try:
+        plan, _ = reply_plan_for(args)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(json.dumps({"ok": False, "reason": "plan_unreadable", "detail": sanitise(error, 200)}))
+        return 2
+    ticket = args.ticket or (plan or {}).get("ticket")
+    if not ticket:
+        print(json.dumps({"ok": False, "reason": "plan_or_ticket_required"}))
+        return 2
+    port = args.port or int((plan or {}).get("port") or 3084)
+    cursor_path = reply_cursors_dir() / f"{ticket}.json"
+    previous = read_state(cursor_path) or {}
+    deadline = time.monotonic() + max(0, args.wait)
+    snapshot: dict = {}
+    changes: list[str] = []
+    cursor: dict = previous
+    while True:
+        detail = sa_ticket_detail(port, ticket)
+        snapshot = reply_snapshot(detail, plan, args.gh, args.check_pr)
+        changes = poll_changes(previous, snapshot)
+        cursor = reply_cursor(snapshot, previous)
+        write_state(cursor, cursor_path)
+        if changes or not (args.watch or args.wait) or time.monotonic() >= deadline:
+            break
+        time.sleep(max(1, min(args.interval, 300)))
+    output = {"ok": True, "ticket": ticket, "port": port, "marker": snapshot.get("marker"),
+              "changed": bool(changes), "new": changes, "stage": reply_stage(snapshot),
+              "cursor": cursor, "cursor_path": str(cursor_path), "snapshot": snapshot,
+              "note": "poll only; event subscription is not enabled (the management API has no event route)"}
+    if args.resume:
+        output["resumed_from"] = previous or None
+    print(json.dumps(output, ensure_ascii=True, indent=2))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Local verdict (never writes engine state)
+# --------------------------------------------------------------------------- #
+def engine_state_of(detail: dict) -> dict:
+    ended = detail.get("ended") if isinstance(detail.get("ended"), dict) else None
+    decision = detail.get("decision") if isinstance(detail.get("decision"), dict) else {}
+    row = sa_newest_assignment(sa_assignment_rows(detail))
+    latest = sa_assignment_view(row) if row else None
+    delivery = sa_delivery_view(detail)
+    stopped = bool(ended and str(ended.get("by")) == "human"
+                   and str(ended.get("outcome") or "") in STOP_MARKERS)
+    report_ready = bool(latest and latest.get("report_state") == "ready")
+    label = "stopped_by_human" if stopped else (
+        "ended" if ended else f"{detail.get('stage')}/{detail.get('action')}")
+    return {
+        "label": label,
+        "state": detail.get("state"),
+        "stage": detail.get("stage"),
+        "action": detail.get("action"),
+        "ended": ended,
+        "stopped_by_human": stopped,
+        "latest_assignment": latest,
+        "report_ready": report_ready,
+        "report_at": (latest or {}).get("report_at"),
+        "undelivered": delivery.get("undelivered"),
+        "delivery_proven": bool(report_ready and delivery.get("undelivered") == 0),
+        "delivery_note": "a ready worker report with nothing undelivered is delivery evidence; "
+                         "an accepted Decision is not",
+        "acceptance": {"accepted": decision.get("outcome") == "accept", "outcome": decision.get("outcome"),
+                       "at": decision.get("at")},
+        "stop_is_not_pass": True,
+    }
+
+
+def remote_state(args, detail: dict) -> dict:
+    source = sa_source_thread(detail)
+    repo = args.repo or repo_from_url((source or {}).get("url"))
+    pulls, errors = [], []
+    if repo:
+        for row in sa_pull_requests(detail):
+            try:
+                pulls.append(pr_state(args.gh, repo, int(row["number"])))
+            except (OSError, RuntimeError, ValueError) as error:
+                errors.append({"number": row.get("number"), "error": sanitise(error, 200)})
+    issue = None
+    if repo and source and source.get("issue_number"):
+        try:
+            record = gh_json(["api", f"repos/{repo}/issues/{source['issue_number']}"], args.gh)
+            issue = {"number": source["issue_number"], "state": record.get("state"),
+                     "url": record.get("html_url")}
+        except (OSError, RuntimeError, ValueError) as error:
+            issue = {"number": source["issue_number"], "error": sanitise(error, 200)}
+    return {"repo": repo, "pull_requests": pulls, "errors": errors, "issue": issue, "read_only": True}
+
+
+def append_verdict(record: dict) -> Path:
+    path = verdicts_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(handle, (json.dumps(record, ensure_ascii=True) + "\n").encode("utf-8"))
+        os.fsync(handle)
+    finally:
+        os.close(handle)
+    return path
+
+
+def verdict_set(args) -> int:
+    if not args.evidence or not args.evidence.strip():
+        print(json.dumps({"ok": False, "reason": "evidence_required",
+                          "note": "a local verdict needs a path or URL that shows what was checked"}))
+        return 2
+    try:
+        detail = sa_ticket_detail(args.port, args.ticket)
+    except (OSError, RuntimeError, ValueError) as error:
+        print(json.dumps({"ok": False, "reason": "ticket_unreadable", "detail": sanitise(error, 200)}))
+        return 1
+    engine = engine_state_of(detail)
+    if args.result == "pass" and engine["stopped_by_human"]:
+        print(json.dumps({"ok": False, "reason": "engine_state_stopped_by_human",
+                          "local_verdict": args.result, "engine_state": engine,
+                          "note": "a human stop ends the ticket as stopped; it is never a pass"}, ensure_ascii=True, indent=2))
+        return 2
+    if args.result == "pass" and not engine["delivery_proven"] and not args.force:
+        print(json.dumps({"ok": False, "reason": "delivery_not_proven",
+                          "local_verdict": args.result, "engine_state": engine,
+                          "note": "no ready worker report with nothing undelivered; an accepted Decision is not a "
+                                  "delivery. Record fail/hold, or pass --force to override explicitly."},
+                         ensure_ascii=True, indent=2))
+        return 2
+    warnings = []
+    if engine["acceptance"]["accepted"] and not engine["delivery_proven"]:
+        warnings.append("acceptance_is_not_delivery")
+    if args.result == "pass" and not engine["delivery_proven"]:
+        warnings.append("forced_pass_without_delivery")
+    record = {
+        "id": secrets.token_hex(6),
+        "at": now_iso(),
+        "ticket": args.ticket,
+        "port": args.port,
+        "local_verdict": args.result,
+        "evidence": args.evidence.strip(),
+        "note": args.note,
+        "engine_state": engine,
+        "remote": remote_state(args, detail) if args.check_remote else None,
+        "warnings": warnings,
+        "writer": "deepseek-harness-bridge local verdict file; no engine write",
+    }
+    path = append_verdict(record)
+    print(json.dumps({"ok": True, "local_verdict": record["local_verdict"], "engine_state": engine,
+                      "record": record, "path": str(path)}, ensure_ascii=True, indent=2))
+    return 0
+
+
+def verdict_rows() -> list[dict]:
+    path = verdicts_path()
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(value, dict):
+            rows.append(value)
+    return rows
+
+
+def verdict_list(args) -> int:
+    rows = verdict_rows()
+    if args.ticket:
+        rows = [row for row in rows if str(row.get("ticket")) == str(args.ticket)]
+    rows = rows[-max(1, args.limit):]
+    print(json.dumps({"ok": True, "path": str(verdicts_path()), "count": len(rows), "items": rows},
+                     ensure_ascii=True, indent=2))
+    return 0
+
+
+def verdict_show(args) -> int:
+    rows = verdict_rows()
+    match = next((row for row in reversed(rows) if str(row.get("id")) == str(args.target)), None)
+    if match is None:
+        match = next((row for row in reversed(rows) if str(row.get("ticket")) == str(args.target)), None)
+    if match is None:
+        print(json.dumps({"ok": False, "reason": "verdict_not_found", "target": args.target}))
+        return 1
+    print(json.dumps({"ok": True, "local_verdict": match.get("local_verdict"),
+                      "engine_state": match.get("engine_state"), "record": match,
+                      "path": str(verdicts_path())}, ensure_ascii=True, indent=2))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--gh", default=os.environ.get("DSH_BRIDGE_GH", "gh"))
@@ -876,6 +1497,64 @@ def parser() -> argparse.ArgumentParser:
     compare_cmd.add_argument("--actor")
     compare_cmd.add_argument("--issues", required=True)
     compare_cmd.add_argument("--show-body", action="store_true")
+
+    reply_cmd = sub.add_parser("reply", help="reply on the ticket's source Issue and follow the result")
+    reply_sub = reply_cmd.add_subparsers(dest="reply_command", required=True)
+
+    reply_prep = reply_sub.add_parser("prepare")
+    reply_prep.add_argument("--ticket", required=True)
+    reply_prep.add_argument("--port", type=int, default=3084)
+    reply_prep.add_argument("--repo")
+    reply_prep.add_argument("--actor")
+    reply_prep.add_argument("--agent")
+    reply_prep.add_argument("--issue", type=int)
+    reply_prep.add_argument("--request", default="")
+    reply_prep.add_argument("--marker", default="")
+    reply_prep.add_argument("--out")
+    reply_prep.add_argument("--ttl-minutes", type=int, default=60)
+    reply_prep.add_argument("--skip-precheck", action="store_true")
+
+    reply_send_cmd = reply_sub.add_parser("send")
+    reply_send_cmd.add_argument("--plan", required=True)
+    reply_send_cmd.add_argument("--yes", action="store_true")
+    reply_send_cmd.add_argument("--timeout", type=float, default=30.0)
+    reply_send_cmd.add_argument("--skip-precheck", action="store_true")
+    reply_send_cmd.add_argument("--reconcile", action="store_true")
+
+    reply_trace_cmd = reply_sub.add_parser("trace")
+    reply_trace_cmd.add_argument("--plan")
+    reply_trace_cmd.add_argument("--ticket")
+    reply_trace_cmd.add_argument("--port", type=int, default=None)
+    reply_trace_cmd.add_argument("--wait", type=int, default=0)
+    reply_trace_cmd.add_argument("--interval", type=int, default=15)
+    reply_trace_cmd.add_argument("--check-pr", action="store_true")
+
+    reply_poll_cmd = reply_sub.add_parser("poll")
+    reply_poll_cmd.add_argument("--ticket", required=True)
+    reply_poll_cmd.add_argument("--plan")
+    reply_poll_cmd.add_argument("--port", type=int, default=None)
+    reply_poll_cmd.add_argument("--wait", type=int, default=0)
+    reply_poll_cmd.add_argument("--interval", type=int, default=30)
+    reply_poll_cmd.add_argument("--watch", action="store_true")
+    reply_poll_cmd.add_argument("--resume", action="store_true")
+    reply_poll_cmd.add_argument("--check-pr", action="store_true")
+
+    verdict_cmd = sub.add_parser("verdict", help="local acceptance verdict; never writes engine state")
+    verdict_sub = verdict_cmd.add_subparsers(dest="verdict_command", required=True)
+    verdict_set_cmd = verdict_sub.add_parser("set")
+    verdict_set_cmd.add_argument("--ticket", required=True)
+    verdict_set_cmd.add_argument("--port", type=int, default=3084)
+    verdict_set_cmd.add_argument("--result", required=True, choices=("pass", "fail", "hold"))
+    verdict_set_cmd.add_argument("--evidence", required=True)
+    verdict_set_cmd.add_argument("--note", default=None)
+    verdict_set_cmd.add_argument("--repo")
+    verdict_set_cmd.add_argument("--check-remote", action="store_true")
+    verdict_set_cmd.add_argument("--force", action="store_true")
+    verdict_list_cmd = verdict_sub.add_parser("list")
+    verdict_list_cmd.add_argument("--ticket")
+    verdict_list_cmd.add_argument("--limit", type=int, default=20)
+    verdict_show_cmd = verdict_sub.add_parser("show")
+    verdict_show_cmd.add_argument("target")
     return root
 
 
@@ -894,6 +1573,19 @@ def main() -> int:
         return trace(args)
     if args.command == "compare":
         return compare_issues(args)
+    if args.command == "reply":
+        return {
+            "prepare": reply_prepare,
+            "send": reply_send,
+            "trace": reply_trace,
+            "poll": reply_poll,
+        }[args.reply_command](args)
+    if args.command == "verdict":
+        return {
+            "set": verdict_set,
+            "list": verdict_list,
+            "show": verdict_show,
+        }[args.verdict_command](args)
     return 2
 
 
