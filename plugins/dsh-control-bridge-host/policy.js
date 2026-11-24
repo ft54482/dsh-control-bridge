@@ -192,14 +192,16 @@ export function selectGrant(catalog, choice) {
 }
 
 export function visibleWorkspaces(grants, workspaces) {
-  const allowed = new Set((grants.workspaceAllowlist || []).map((item) => item.id))
+  const byId = new Map((grants.workspaceAllowlist || []).map((item) => [item.id, item]))
   return (workspaces || [])
-    .filter((item) => allowed.has(item.id))
+    .filter((item) => byId.has(item.id))
     .map((item) => ({
       id: item.id,
       title: redactText(item.title || item.id),
       cwd: item.path || item.cwd || '',
       profile: 'desktop',
+      // Task ownership is readable for reconciliation; it is not a secret.
+      task_id: byId.get(item.id).task_id || null,
     }))
 }
 
