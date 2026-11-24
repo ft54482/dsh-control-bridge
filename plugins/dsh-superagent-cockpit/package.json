@@ -1,0 +1,46 @@
+{
+  "name": "dsh-superagent-cockpit",
+  "version": "0.1.3",
+  "description": "Super Agent 驾驶舱：DSH Web UI 侧栏入口 + 一页看板，实时显示执行器占用、24h 流量、会话、需要人处理的异常与最近决策。",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "superagent",
+    "dashboard"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "fleet.mjs",
+    "masterctl.mjs"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ft54482/dsh-control-bridge.git",
+    "directory": "plugins/dsh-superagent-cockpit"
+  }
+}

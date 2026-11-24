@@ -4,7 +4,7 @@
 
 让 Codex、Grok Bot 或自己的协调程序把任务交给指定的 DeepSeek Harness 工作区，并跟踪执行结果。**已经在同一台电脑使用 Codex 和 Harness Desktop？从 Codex skill 和 Desktop Host 开始。** 这条路径只连接本机 Host，安装好后即可在 Codex 里用自然语言操作。
 
-[Codex 技能 v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [文档目录](docs/README.md) · [端口配置与排错](docs/ports.md) · [Windows 真机验收](docs/verified-scope.md)
+[Super Agent 驾驶舱](plugins/dsh-superagent-cockpit/README.md) · [Codex 技能 v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [文档目录](docs/README.md) · [端口配置与排错](docs/ports.md) · [Windows 真机验收](docs/verified-scope.md)
 
 ## 选一个入口
 
@@ -14,6 +14,7 @@
 | 自己的 Bot 或脚本，需要多实例、收件箱、任务审批和审计 | 安装 Python **协调桥**，用 `dsh-bridge` CLI 操作。需要接收签名 HTTP 事件时再开 `serve` | 先用 fake 跑完一次起草、发送和交卷。[协调桥指南](docs/coordinator.md) |
 | 已有工具客户端，希望用 MCP 读收件箱或起草任务 | 由客户端启动同一个 Python 协调桥的 `mcp` 子命令。v0.2.2 使用 `Content-Length` 消息帧，客户端需支持此格式 | 用兼容客户端调用 `tools/list`。仅支持逐行 JSON 的客户端可先用 CLI。[MCP 配置与工具](docs/coordinator.md) |
 | 在终端或 CI 运行独立的 Harness 普通会话 | 给 Python 协调桥配置 `headless_cli` 适配器和独立的 headless profile | 先用默认的 `spawn = false` 核对配置。[Headless CLI](docs/headless-cli.md) |
+| 想在 Harness Desktop 查看任务槽和各实例工单 | 安装可选的 **Super Agent 驾驶舱**，多实例时启动随包聚合器 | 上方按主控登记表显示任务，旁边是活会话数，各实例卡片显示工单执行器占用。[下载与安装](plugins/dsh-superagent-cockpit/README.md) |
 | 已部署 SuperAgent，希望从 Codex 派发和追踪工单 | 用技能自带的 `github_source.py` 核对目标实例、GitHub 仓库和发件账号 | 从 `precheck` 开始。发送获授权的 Issue 或评论后，用同一份计划追踪 Ticket、Assignment 和 worker 结果。[操作指南](skills/deepseek-harness-bridge/references/superagent.md#github-source) |
 
 目录对应关系可看[组件与运行位置](docs/README.md#仓库里的几个名字)。

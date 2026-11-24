@@ -2,6 +2,10 @@
 
 本文记录 Windows Desktop 上的匿名验收和隔离测试。会话标识、路径、业务名称及凭据保存在本机。
 
+## 驾驶舱 0.1.3
+
+在 Windows 上用 Harness Desktop 随附的 CLI（0.2.3-alpha.2）将发布 TGZ 安装到全新隔离 profile，核对了包版本和 bundle 登记。对解包后的代码运行了六项离线回归。在同一画面输入五项登记任务、十个任务槽和空闲的四个引擎执行器时，组件分别显示 5/10 与 0/4。移除 Harness 会话来源后，该项显示未知。此验证覆盖安装、组件渲染和本机聚合协议；其他 Desktop 版本及新 profile 内的完整图形交互仍待验证。[安装与各项数据来源](../plugins/dsh-superagent-cockpit/README.md)
+
 ## Codex 技能 0.2.3 · GitHub Source 派工
 
 一次获授权的合成 Issue 触发了目标实例接单。实测观察到排队、一个执行槽被占用、worker 交回报告，随后同一张 Ticket 以 `completed` 结束。技能用同一份计划从 Issue 查回了对应的 Assignment 和 worker 会话。GitHub 的第一条机器人评论是接单回执，完成时间取自引擎记录。验证覆盖这台实例的新 Issue 路径；其他实例的 Source 配置须分别核对。[派工和追踪](../skills/deepseek-harness-bridge/references/superagent.md#github-source)

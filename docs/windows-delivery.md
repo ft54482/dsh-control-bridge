@@ -10,6 +10,10 @@
 
 在运行 DeepSeek Harness Desktop 的同一台机器上，以本地执行环境打开 Codex。需要 Python 3.11+ 和一个已初始化的 Harness Desktop profile。技能脚本仅依赖 Python 标准库。
 
+### 在 Desktop 安装驾驶舱
+
+需要图形面板时，将独立的驾驶舱 TGZ 安装到正在使用的 Desktop profile。在左侧打开「Super Agent 驾驶舱」可查看主控任务、活会话和实例执行器。[驾驶舱下载、安装与核对](../plugins/dsh-superagent-cockpit/README.md)
+
 ### 安装或升级 Codex skill
 
 个人安装可用于多个项目，目标为 `~/.agents/skills/deepseek-harness-bridge`。只在一个仓库使用时，可将目标改为该仓库内的 `.agents/skills/deepseek-harness-bridge`。已有自定义技能目录的用户可在 Codex 的技能列表核对实际加载位置，更新同一份安装。[OpenAI 技能目录说明](https://developers.openai.com/codex/skills/)

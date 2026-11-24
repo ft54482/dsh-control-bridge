@@ -46,6 +46,10 @@ dsh-bridge --config examples/config.example.toml --data-dir ./data serve --host 
 
 在另一个终端运行 `Invoke-RestMethod http://127.0.0.1:18887/health` 检查监听。发送方相应改用 `http://127.0.0.1:18887/v1/events`，用对应实例的事件密钥签名。Windows 便携启动脚本对应用 `-Serve -Port 18887`。Host 可选的出站通知使用独立的 HTTPS 接收协议；接收端契约见 [Host API](host-api.md)。
 
+## 驾驶舱
+
+驾驶舱可直接读取一个引擎的管理地址（默认 3082）。多实例模式默认读取本机 3090 聚合服务；用 `DSH_COCKPIT_INSTANCES` 设置实例清单，用 `FLEET_PORT` 与插件的 `config.fleet` 同步更改聚合端口。可选仿真服务默认在 8770。主控任务登记表来自本地文件，活会话来自当前 Harness 宿主。[驾驶舱配置](../plugins/dsh-superagent-cockpit/README.md)
+
 ## SuperAgent 与 MCP
 
 - **SuperAgent 管理面。** helper 默认查本机 `3082`。若你的已授权 profile 实际监听 `13082`，从仓库根运行 `python skills/deepseek-harness-bridge/scripts/superagent.py --port 13082 state`。这里 `--port` 放在子命令前。查询针对该 profile 的状态，新派工要通过它的 Source。[SuperAgent 命令](../skills/deepseek-harness-bridge/references/superagent.md)

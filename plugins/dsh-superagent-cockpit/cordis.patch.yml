@@ -1,0 +1,10 @@
+# dsh-superagent-cockpit 的 profile 补丁层：插入一行 Host 插件。
+# Client 半由 package.json 的 dsh.client 声明随包加载。
+# api 指向 dsh-superagent 的管理 API 基址，只读代理，默认本机 3082。
+- insert:
+    - id: dsh-superagent-cockpit
+      name: dsh-superagent-cockpit
+      # config:
+      #   api: http://127.0.0.1:3082
+      #   fleet: http://127.0.0.1:3090
+      #   sparring: http://127.0.0.1:8770
