@@ -39,3 +39,34 @@ python $source trace --plan $plan --wait 300
 仅在获准向该仓库发送指定内容后执行 `send`。发送超时可以用 `send --plan $plan --reconcile` 只读核对。沿用原计划可避免重复发单。
 
 验收时核对同一事件的 Ticket、Assignment、worker 报告和 Ticket 最终结果。驾驶舱的执行器数字表示实时占用，任务结束后可以回到零。票在 `person/review` 时，即使 worker 已交报告，也可能继续等待人审。GitHub 回帖还需核对其用途；接单回执本身不足以证明执行完成。Desktop 主控会话和它的子代理由 Desktop 单独跟踪。
+
+## 待办、原线程答复与本地裁决
+
+完整说明见 [SuperAgent 待办：分流、答复与裁决](https://github.com/ft54482/dsh-control-bridge/blob/main/docs/superagent-todo-inbox.md)。只读边界：`superagent.py` 只发 GET；答复只向来源 Issue 发一次评论；裁决只写本地文件。
+
+```powershell
+$port = 3082                                # 该 profile 的管理端口
+$sa = 'scripts/superagent.py'
+$g  = 'scripts/github_source.py'
+python $sa --port $port inbox --all          # 待办队列（别名 todos）；默认只取 person
+python $sa --port $port detail TICKET_ID     # 全量详情 + next_actions
+python $g reply prepare --port $port --ticket TICKET_ID --request '...'
+python $g reply send --plan '<plan>' --yes
+python $g reply trace --plan '<plan>' --check-pr
+python $g reply poll --ticket TICKET_ID --port $port --resume
+python $g verdict set --port $port --ticket TICKET_ID --result pass|fail|hold --evidence '<path/url>'
+python $g verdict list
+```
+
+判定口径（都是实测形态，不是推测）：
+
+- 最新有效 Assignment 按 `createdAt` 取最新；`state=running` 但 `turnEndedAt` 有值且报告不是 `progress` 时算 `state_effective=ended`。本机五张 person 票就是 `running + report.state=ready`，必须判 `review_ready`，不能判 running。
+- `triage` 六态：`review_ready` / `review_reported` / `blocked_missing_info` / `retryable_failed` / `running` / `unknown`，终态票另给 `ended`。
+- **Delivered to Ticket**：`inputs[].delivered=true` 且 `deliveredTo` 命中该票任一 `assignment.id`（或 `ref`，或 `ticket.id`）即算已投递，输出 `delivery: delivered_to_ticket` 与 `delivered_to_kind`。本机实测 `deliveredTo` 是 Assignment id（5/5），不是 ticket id。`undelivered=0` 只作旁证。**不需要出现新的 Decision**，不能把「需要新 Decision」写成通过条件。
+- `stop` 是人为停止（`ended.by=human`、`outcome=stopped`），终态标签 `stopped_by_human`，永远不算通过；`--result pass` 会被拒绝。
+- `acceptance.accepted=true` 只是接单授权；没有「ready 报告且 `undelivered=0`」的交付证据时 `pass` 被拒（`delivery_not_proven`，可用 `--force` 显式覆盖并留 warning）。
+- 答复超时记 `unknown`；只有 `--reconcile` 只读核对，绝不重发。重复 marker 返回 `duplicate`，不二次评论。
+- PR 检查项只能取 `gh pr checks` 或 `commits/<sha>/check-runs` + `commits/<sha>/status`；REST `pulls/<n>/checks` 是 404。空检查列表（0/0）和 `report.state=ready` 都不是验收通过。
+- 事件订阅未启用：上游管理 API 没有事件流/订阅路由（`src/app/api.ts` 的 `Api` 接口只列请求-响应路由），因此 `poll` 是客户端轮询。
+- 历史票（本机没有派单计划）也能读：列表/详情不依赖本地 plan。
+
