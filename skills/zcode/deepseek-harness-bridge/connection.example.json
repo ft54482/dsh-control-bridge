@@ -1,0 +1,13 @@
+{
+  "secret_file": "C:/Users/<name>/path/to/desktop-host-local/host.secret",
+  "host_port": 8765,
+  "bridge_root": "C:/Users/<name>/path/to/the-tree-used-to-install-the-host",
+  "desktop_cli": "<Harness Desktop 安装目录>/resources/runtime/cli/bin/dsh.cmd",
+  "desktop_workspaces": [
+    {"cwd": "D:/work/my-project", "workspace_id": "WORKSPACE_ID", "paired": "YYYY-MM-DD"}
+  ],
+  "superagent_instances": [
+    {"repo": "OWNER/REPO", "port": 3082, "profile": "superagent", "workspace": "D:/work/my-project"}
+  ],
+  "superagent_state_dir": "C:/Users/<name>/.zcode/state/deepseek-harness-bridge"
+}
