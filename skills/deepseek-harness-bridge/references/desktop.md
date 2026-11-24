@@ -59,7 +59,7 @@ The Codex helper adds `agent_preset: "master-control"` even if its `create-sessi
 
 ## Task-scoped autonomy
 
-This section applies only when the operator has enabled `workspaceAutonomy` in the Host plugin and `GET /v1/health` reports `workspace_autonomy.effective: true`. Without the policy, every command below keeps its 0.2.2 behaviour and the extra body fields are ignored by the guarded path.
+This section applies only when the operator has enabled `workspaceAutonomy` in the Host plugin and `GET /v1/health` reports `workspace_autonomy.effective: true`. Without an effective policy the commands keep their 0.2.2 behaviour for callers that carry no task intent; a call that carries `task_id`/`purpose` on such a Host is refused with `403 workspace_autonomy_not_effective` (including a Host that never configured the switch), so the task fields are not "ignored" by the guarded path.
 
 ### Health gate
 
@@ -71,7 +71,7 @@ This section applies only when the operator has enabled `workspaceAutonomy` in t
   "record_file": "<state dir>/workspace-autonomy.jsonl", "operations": 0}
 ```
 
-`effective` is the conjunction `enabled && allowlistFile configured && workspaceRegistry.create callable && sessionController.create callable && sessionController.projections callable`. `reason` names the first missing piece: `not_configured`, `disabled`, `allowlist_file_missing`, `workspace_create_unavailable`, `session_create_unavailable`, `session_projections_unavailable`. The helper refuses a task-scoped `create-workspace`/`create-session` when `effective` is not `true` and exits 1 with `workspace_autonomy_not_effective` before sending a write.
+`effective` is the conjunction `enabled && allowlistFile configured && workspaceRegistry.create callable && sessionController.create callable && sessionController.projections callable`. `reason` names the first missing piece: `not_configured`, `disabled`, `allowlist_file_missing`, `workspace_create_unavailable`, `session_create_unavailable`, `session_projections_unavailable`. A task-intent write is refused with `403 workspace_autonomy_not_effective` whenever `effective` is not `true` — `not_configured` included. The helper checks the same thing and exits 1 with `workspace_autonomy_not_effective` before sending a write.
 
 ### `create-workspace` with a task
 
@@ -109,11 +109,11 @@ Removes the workspace grant and every Session grant under it in one atomic write
 
 - A different `task_id` on a workspace that already belongs to one is `409 workspace_task_mismatch` (`existing_task_id`, `task_id`); pass `confirm_task:true` to take it over. The takeover journals `workspace_task_confirmed`, the workspace grant keeps the first task, and the new task is recorded on the Session grant.
 - A busy Session is never cancelled or reused.
-- `client_request_key` is global and bound to one operation plus one argument set (`task_id`, `purpose`, `path`, `workspace_id`, `agent_preset`, `access`, `model`, `confirm_task`). Same key with another operation or other arguments → `409 idempotency_key_reused`. Same key, same arguments, authorization intact → `200` with `deduplicated:true`. Same key after revoke / downgrade / task change → `409 authorization_stale` with `historical` and `current.reason`.
+- `client_request_key` is global and bound to one operation plus one argument set (`task_id`, `purpose`, `path`, `workspace_id`, `agent_preset`, `access`, `model`, `confirm_task`). Same key with another operation or other arguments → `409 idempotency_key_reused`. Same key, same arguments, authorization intact → `200` with `deduplicated:true`. Same key after revoke / downgrade / task change → `409 authorization_stale` with `historical` and a top-level `current` string.
 
 ### Error codes and exit codes
 
-Host reasons this flow can return: `task_required`, `invalid_client_request_key`, `workspace_autonomy_not_effective`, `workspace_task_mismatch`, `workspace_grant_failed`, `grant_persist_failed`, `workspace_revoke_failed`, `agent-preset/invalid`, `agent_preset_unverified`, `idempotency_key_reused`, `authorization_stale`, plus the pre-existing path/registry codes. The full table is in [host-api.md](../../../docs/host-api.md).
+Host reasons this flow can return: `task_required`, `invalid_client_request_key`, `workspace_autonomy_not_effective`, `workspace_task_mismatch`, `workspace_grant_failed`, `grant_persist_failed`, `missing_workspace_id`, `workspace_revoke_failed`, `agent-preset/invalid`, `agent_preset_unverified`, `idempotency_key_reused`, `authorization_stale`, plus the pre-existing path/registry codes. The full table is in [host-api.md](../../../docs/host-api.md).
 
 `desktop.py` exit codes: `0` success, `1` an HTTP error / `ok:false` / an unverified receipt, `2` invalid local input or a transport error. Every response is one JSON object on stdout; a 2xx body that fails receipt verification is rewritten into the failure shape above.
 

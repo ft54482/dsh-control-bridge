@@ -98,7 +98,7 @@ Codex Skill 默认在选定的工作区新建 `master-control` 会话。该预�
 
 ## Workspace autonomy（本分支，未发布）
 
-操作者开关 `workspaceAutonomy`，默认关闭。关闭时下列端点与字段都不参与：旧路径的请求与响应逐字节不变。开启且**生效**时，带 `task_id`+`purpose` 的调用可以把任意绝对目录登记成工作区、取得任务范围的写授权，并在还没有写会话的工作区里建第一个写会话。Host 不对目录做可写性检查（只做 realpath 归一，必要时建一层），真正能写什么由该账号的文件系统权限决定——这就是为什么它必须由操作者显式开启。语义与安全边界见[插件说明](../plugins/dsh-control-bridge-host/README.md#workspace-autonomy-opt-in-per-operator-this-release)和[安装与回退](windows-delivery.md#workspace-autonomy)。
+操作者开关 `workspaceAutonomy`，默认关闭。关闭时不会有任何自主流程被触发：不带任务意图的旧调用语义不变，但响应是**增量**的（`health.workspace_autonomy` 恒在、`workspaces[].task_id` 恒在，旧字段一个不改）；带任务意图的请求必须显式开启并生效，否则 403 `workspace_autonomy_not_effective`。开启且**生效**时，带 `task_id`+`purpose` 的调用可以把任意绝对目录登记成工作区、取得任务范围的写授权，并在还没有写会话的工作区里建第一个写会话。Host 不对目录做可写性检查（只做 realpath 归一，必要时建一层），真正能写什么由该账号的文件系统权限决定——这就是为什么它必须由操作者显式开启。语义与安全边界见[插件说明](../plugins/dsh-control-bridge-host/README.md#workspace-autonomy-opt-in-per-operator-this-release)和[安装与回退](windows-delivery.md#workspace-autonomy)。
 
 ### 生效判定
 
@@ -148,15 +148,17 @@ Codex Skill 默认在选定的工作区新建 `master-control` 会话。该预�
 | 400 | `task_required` | `task_id`/`purpose` 缺失、空白或超长；也表示「这个旧形状请求只有新流程能服务，请补任务」 |
 | 400 | `invalid_client_request_key` | `client_request_key` 不符合 `^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$` |
 | 400 | `missing_path` / `invalid_path` / `missing_directory` / `missing_parent` / `not_a_directory` / `unreadable_path` / `create_failed` | 路径解析失败：非绝对、不存在且未要求创建、父目录不存在（只允许建一层）、不是目录等 |
+| 400 | `missing_workspace_id` | `/v1/workspaces/revoke` 没带 `workspace_id`（或空白） |
 | 403 | `workspace_autonomy_not_effective` | 带任务意图但策略未生效（附 `autonomy_reason`） |
 | 403 | `workspace_not_allowlisted` | 工作区没有授权（含撤销后） |
 | 409 | `workspace_task_mismatch` | 工作区已属于另一个任务且未传 `confirm_task:true`（附 `existing_task_id`） |
 | 409 | `idempotency_key_reused` | 同一 key 换了 operation 或换了参数（`previous_operation`、`mismatched`） |
-| 409 | `authorization_stale` | 重放时的授权已被撤销、降权、移除或被别的任务接管（`historical` + `current.reason`） |
+| 409 | `authorization_stale` | 重放时的授权已被撤销、降权、移除或被别的任务接管（`historical` + 顶层 `current` 字符串） |
 | 409 | `agent-preset/invalid` | 预设 id 不能解析成该确切 id |
 | 409 | `agent_preset_unverified` | 会话已建，但投影没有回读该预设；去 Desktop 核对该会话，不要重试创建 |
 | 409 | `session_already_granted` | 修复请求发现该会话已授权 |
 | 500 | `grant_persist_failed` | 会话已建但授权落盘失败；用同一 key 重试即修复 |
+| 500 | `workspace_revoke_failed` | 撤销写盘失败（`saved:false`），授权未变 |
 | 502 | `workspace_grant_failed` | 工作区已登记但授权落盘失败（`manual_reconcile`） |
 | 502 | `workspace_unresolved` / `create_returned_no_session_id` / `session/workspace-attach-failed` | 官方调用半成功；先对账再决定重试 |
 
@@ -169,13 +171,13 @@ Codex Skill 默认在选定的工作区新建 `master-control` 会话。该预�
 | 同 key、同 operation、同参数，授权仍有效 | `200`，回执加 `deduplicated:true` |
 | 同 key，operation 不同（workspace ↔ session） | `409 idempotency_key_reused`，带 `previous_operation`，**不重放** |
 | 同 key，operation 相同但参数不同 | `409 idempotency_key_reused`，带 `mismatched`（差异字段名） |
-| 同 key、同参数，但授权已撤销/降权/任务变更 | `409 authorization_stale`：`historical` 是旧成功摘要，`current.reason` ∈ `revoked`、`missing`、`access_changed`、`task_changed` |
+| 同 key、同参数，但授权已撤销/降权/任务变更 | `409 authorization_stale`：`historical` 是旧成功摘要，顶层 `current` 是字符串 `revoked` / `missing` / `access_changed` / `task_changed` |
 
 补充约束：一次 Session 请求内部为路径做的登记**不消费**调用方的 key（记录 `client_request_key:null`、`parent_key` 指向该请求），所以 Session 重试不会重放 workspace 回执；`confirm_task` 的接管记录同样只作证据、不绑定 key；修复路径（`repaired:true`）在重放前重新核验授权，撤销过的 workspace 不会被重试复活。
 
 ### 操作记录
 
-`workspace-autonomy.jsonl`，一行一个 JSON 对象，固定 17 个键：`at`、`op`、`operation`（`workspace` 或 `session`）、`workspace_id`、`path`、`task_id`、`purpose`、`session_id`、`preset`、`access`、`client_request_key`、`parent_key`、`request_hash`、`request`、`phase`、`result`、`reason`（不适用写 `null`），成功行再加 `receipt`，撤销行加 `revoked`。行分两类：**绑定行**（`workspace_create`/`workspace_reuse`/`workspace_grant_failed`、`session_create`/`session_grant`/`session_grant_failed`）回答调用方并占有 key；**证据行**（`workspace_task_confirmed`、`workspace_revoke`）只记录发生过什么，既不绑定 key 也不降级已有绑定。记录不含 bearer、密钥、提示词正文。追加失败只报 `recorded:false` + `record_error`，不回滚已落盘的授权。`purpose` 原样保存。
+`workspace-autonomy.jsonl`，一行一个 JSON 对象，固定 17 个键：`at`、`op`、`operation`、`workspace_id`、`path`、`task_id`、`purpose`、`session_id`、`preset`、`access`、`client_request_key`、`parent_key`、`request_hash`、`request`、`phase`、`result`、`reason`（不适用写 `null`），成功行再加 `receipt`，撤销行加 `revoked`。`operation` 取值 `workspace` / `session` / `null`：绑定行必是前两者；`workspace_revoke` 行、以及「用 `workspace_id` 建会话时写的 `workspace_task_confirmed`」行是 `null`（按路径确认的那行记 `workspace`）。行分两类：**绑定行**（`workspace_create`/`workspace_reuse`/`workspace_grant_failed`、`session_create`/`session_grant`/`session_grant_failed`）回答调用方并占有 key；**证据行**（`workspace_task_confirmed`、`workspace_revoke`）只记录发生过什么，既不绑定 key 也不降级已有绑定。记录不含 bearer、密钥、提示词正文。追加失败只报 `recorded:false` + `record_error`，不回滚已落盘的授权。`purpose` 原样保存。
 
 ### 首次启动门禁
 
@@ -272,9 +274,9 @@ def finish(port, secret, request_id, last_seq=0):
 | 创建工作区 / 新建会话 / 授权 / 打开目录 | 隔离回归（官方 API） | `create.test.js`、`paths.test.js` |
 | 路径安全（穿越/前缀/根/符号链接） | 隔离回归 | `paths.test.js` |
 | 配对窗口重新布防、单次使用、失败关闭 | 隔离回归 | `rearm.test.js` |
-| 工作区自主：任务范围登记/复用/写授权、任务归属与 `confirm_task`、忙会话不抢占、撤销只撤授权 | 隔离回归（本分支，未发布） | `test/autonomy-cases.js`（经 `test/create.test.js` 导入） |
-| 工作区自主：幂等键按 operation 绑定、`idempotency_key_reused`、撤销/降权后 `authorization_stale`、修复不复活撤销 | 隔离回归（本分支，未发布） | `test/autonomy-cases.js` |
-| 工作区自主：空授权首启门禁（生效即监听、未生效仍拒、零字节仍拒、不预灌） | 隔离回归（本分支，未发布） | `test/startup-cases.js`、`test/startup-probe.js` |
+| 工作区自主：任务范围登记/复用/写授权、任务归属与 `confirm_task`、忙会话不抢占、撤销只撤授权 | 隔离回归 + 隔离 Host 真机（0.2.2-rc.5） | `test/autonomy-cases.js`（经 `test/create.test.js` 导入）；真机见 [验收范围](verified-scope.md#workspace-autonomy-scope) |
+| 工作区自主：幂等键按 operation 绑定、`idempotency_key_reused`、撤销/降权后 `authorization_stale`、修复不复活撤销 | 隔离回归（真机未演练） | `test/autonomy-cases.js` |
+| 工作区自主：空授权首启门禁（生效即监听、未生效仍拒、零字节仍拒、不预灌） | 隔离回归 + 隔离 Host 真机（0.2.2-rc.5） | `test/startup-cases.js`、`test/startup-probe.js`；真机见 [验收范围](verified-scope.md#workspace-autonomy-scope) |
 | 真机安装、发现、创建、打开、配对、短任务终态与 SSE 续读 | Windows Desktop 实测 | 见 [真机验收](verified-scope.md) |
 
 ## 已知边界

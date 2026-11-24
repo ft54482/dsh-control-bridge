@@ -6,16 +6,18 @@
 
 ## 先分清四处“0.2.2”
 
-文档里出现的 `0.2.2` 不是同一个东西，读证据前先对上号：
+文档里出现的 `0.2.2` 不是同一个东西，读证据前先对上号。本机有**三条 CLI 入口**，版本各不相同：
 
-| 说法 | 指什么 | 怎么核对 |
+| 说法 | 指什么 | 版本与核对方式 |
 |---|---|---|
-| 目标契约 `0.2.2` / `0.2.2-rc.5` | 本插件按官方 session controller 的 `0.2.2` 形状实现与核对 | `docs/official-host-contract.md`；`plugins/dsh-control-bridge-host/package.json` 的 `dsh.compat.sessionController` |
-| 隔离 Host 的 runtime | 启动那个隔离 profile 的 CLI 版本，由操作者选，不由插件决定 | 启动命令用的那个 `dsh.cmd`：`& $dsh --version`。本机有两条入口——Desktop 自带 CLI 0.2.3-alpha.2 与全局 npm `@deepseek-ai/dsh` 0.2.1-rc.3（`& "$env:APPDATA\npm\dsh.cmd" --version`）。lab 准备阶段用的是后者，主控本轮口径为 `0.2.2-rc.5`，两者不一致时以实际启动命令为准 |
-| Desktop 应用 / 自带 CLI | 操作者正在用的 DeepSeek Harness Desktop 及 `resources\runtime\cli` 里的 CLI | 0.2.3-alpha.2（`& "D:\DeepSeek Harness\resources\runtime\cli\bin\dsh.cmd" --version`） |
-| 全局 npm 包 | `npm i -g @deepseek-ai/dsh` 装的 CLI，和 Desktop 自带的不是一份 | 0.2.1-rc.3（`package.json` 的 `version`） |
+| 目标契约 `0.2.2` / `0.2.2-rc.5` | 本插件按官方 session controller 的 `0.2.2` 形状实现与核对；这是 API 形状，不是某个 CLI | `docs/official-host-contract.md`；`plugins/dsh-control-bridge-host/package.json` 的 `dsh.compat.sessionController` |
+| 隔离 Host 的 runtime（入口 1） | 启动隔离 profile 的 CLI，由操作者选，本轮用本机的 `dsh-022` 安装 | **0.2.2-rc.5**：`node C:\Users\Administrator\dsh-022\node_modules\@deepseek-ai\dsh\lib\bin.js -V`（`-V` 实测）；准备阶段曾用全局 npm 入口，真机阶段换成这条，结论以真机启动命令为准 |
+| Desktop 随附 CLI（入口 2） | `D:\DeepSeek Harness` 的 Desktop 及其 `resources\runtime\cli` | 0.2.3-alpha.2（可执行文件 FileVersion；核心在 `app.asar` 内，不能直读版本号） |
+| 全局 npm 包（入口 3，web 实例 3082/3084/3088） | `npm i -g @deepseek-ai/dsh`，和 Desktop 自带的不是一份 | 0.2.1-rc.3（`& "$env:APPDATA\npm\dsh.cmd" --version`） |
 
-结论：`0.2.2` 说的是**目标 API 形状**，不是“这台机器上每个 runtime 都是 0.2.2”。真机验收必须写明用的是哪一条入口。
+结论：`0.2.2` 说的是**目标 API 形状**，不是“这台机器上每个 runtime 都是 0.2.2”。三条入口分别是 Desktop 0.2.3-alpha.2、全局 npm 0.2.1-rc.3、隔离 `dsh-022` 0.2.2-rc.5；真机验收必须写明用的是哪一条入口，本轮是第三条。
+
+模型 provider `orange-pro` 也不是内置能力：它由第三方 bundle `chengzipro-dsh-plugin@0.4.7` 的 patch 插入，本轮只装进隔离 lab profile，未改进正式 Desktop、也未改全局 npm 的三个实例。
 
 <a id="workspace-autonomy-scope"></a>
 
@@ -26,10 +28,43 @@
 | 态 | 范围 | 证据 | 结论 |
 | --- | --- | --- | --- |
 | **implemented**（已实现） | 任务范围登记/复用工作区与写授权、按任务归属与 `confirm_task` 接管、忙会话不抢占、`revoke-workspace` 只撤授权、幂等键按 operation 绑定、撤销/降权后 `authorization_stale`、空授权首启门禁、helper 的 health 门禁与回执校验、17 固定键操作记录 | `plugins/dsh-control-bridge-host/test/autonomy-cases.js`、`test/startup-cases.js`（含子进程真监听的 `startup-probe.js`，两者由 `test/create.test.js` 导入）、`tests/test_desktop_skill.py`；CI 原样 8 文件命令 169 通过，`python -m pytest tests -q` 145 通过 4 跳过，`python examples/e2e_fake.py` ok（2026-11-25 本机复跑，只跑不改） | 代码与夹具层已实现 |
-| **mock**（隔离/夹具） | 上述全部行为都在进程内假服务上验证：官方 `workspaceRegistry` / `sessionController` / `sessionQuery` 是夹具形状；`startup-cases.js` 的子进程会在空闲端口上真监听并真发 `GET /v1/health`，但它连的仍是夹具 Host，不是 Desktop | 同上测试文件 | 夹具通过**不等于**真机通过 |
-| **live**（真机） | 装进真实 Desktop profile、真实创建会话、真实派工 | 隔离 Host 验收进行中，证据见任务目录 `.agent/master-control/tasks/bridge-workspace-autonomy-20261125/lab/`（主控侧记录，不在本仓库内） | **未通过**：真机 `health` 的 `workspace_autonomy.effective`、真机建会话与 `revoke-workspace` 都还没有证据 |
+| **mock**（隔离/夹具） | 上述全部行为都在进程内假服务上验证：官方 `workspaceRegistry` / `sessionController` / `sessionQuery` 是夹具形状；`startup-cases.js` 的子进程会在空闲端口上真监听并真发 `GET /v1/health`，但它连的仍是夹具 Host，不是 Desktop | 同上测试文件 | 夹具通过本身不等于真机通过，但下面的 isolated live 另算一条 |
+| **live**（真机） | 装进隔离 Host 的真实 0.2.2-rc.5 运行时（profile `ws-autonomy-lab`）：真建工作区、真建会话、真派合成提示、真撤销 | **isolated live PASS (0.2.2-rc.5), 2026-11-25**；证据见任务目录 `.agent/master-control/tasks/bridge-workspace-autonomy-20261125/lab/report.md` 与 `A-*`/`B-*`/`C*`/`D-*`（主控侧记录，不在本仓库内） | **通过的是隔离 Host 验收**，不是生产 Desktop 验收，也不是发布验收 |
 
-同时明确三件事：本分支**未合并**、**未发布**（`plugins/dsh-control-bridge-host/package.json` 仍是 `0.2.2`，与 `pyproject.toml`、`src/` 版本绑定）、**未安装**到任何在用 profile。不要因为隔离回归全绿就把它当成已在 Windows Desktop 上验收。
+### 真机看到了什么（isolated，0.2.2-rc.5）
+
+实例：profile `ws-autonomy-lab`，Host `127.0.0.1:8766`、web `3096`，runtime 0.2.2-rc.5（本机 `dsh-022` 安装），独立状态目录，空 allowlist + 无 bootstrap 首启。
+
+| 证据点 | 真机回执 |
+| --- | --- |
+| 首启（空授权、无配对窗口、无预灌） | `health` 200：`workspace_autonomy.effective:true`、`grants_count:0`、`bootstrap_status:"unconfigured"`、`allowlist_warnings:[]`；启动 stderr 空 |
+| roots 外两个新工作区（`alpha2` / `beta2`） | `create-workspace` 200：`created:true`、`created_directory:true`、`started_task:false`；`create-session` 200：`agent_preset:"master-control"`、`agent_preset_source:"session_projection"`、`grant.access:"write"`、`started_task:false`；投影回读各 1 条；发提示前无 `requests.json` |
+| 首轮派工 | 合成提示 202 接受 → `wait` 得 `phase:"terminal"`、`terminal_scope:"official"`、`completed:true`、`text:"OK"`、`turn:1`，`route_match` / `effort_match` / `model_match` 全 true；`history` 回读请求与回答一致 |
+| 复用（B） | 同工作区再登记 `reused:true`、`created:false`、`created_directory:false`；`/v1/workspaces` 只有 1 条、该工作区 sessions 只有 1 条；第二个提示照样 official 完成（`turn:2`），未新建工作区/会话 |
+| C1 并发 | 4 个并发 `create-workspace` 全 200 且同一 id（1 个 `created:true` + 3 个 `reused:true`），列表仍只 1 条 |
+| C2 未知预设 | 新路径上 409 `agent-preset/invalid`（带 `detail`），目录未创建、无授权 |
+| C3 任务归属 | 换 `task_id` 无 confirm → 409 `workspace_task_mismatch`（带 `existing_task_id`）；加 `confirm_task:true` → 200 且 journal 出现 `workspace_task_confirmed` |
+| C4 忙会话 | 长任务 `running:true / busy:true` 时再 `resume` → 409 `busy`（`existing desktop turn was not cancelled`）、`started_task:false`；长任务随后 official completed，未被 cancel |
+| C5 策略关闭对照 | 对照 profile `effective:false / reason:"disabled"`：roots 外 `create-workspace` → 400 `outside_allowed_roots`；指向 roots 外的 preset session → 400 `existing_workspace_required`；无授权工作区的 preset 写会话 → 403 `workspace_not_allowlisted`；allowlist 全程未变 |
+| C6 撤销 | `revoke-workspace` 200：`revoked{workspace:true, sessions:1}`、`directory_intact:true`，目录仍在；随后对原会话 `resume` → **409 `workspace_not_allowlisted`** |
+| 旁证 | 3082/3084/3088/8765 的 pid 与 StartTime 前后一致（未重启），四个在用 profile 的 `cordis.patch.yml` sha256 未变；journal 16 行；收尾 `health` `grants_count:4 / operations:16 / effective:true`；全程只监听 `127.0.0.1`、只用合成文本、无 CUA、无客户数据；正式 Desktop 8765 **零写入**（连只读 health 都没打） |
+
+PR：[#17](https://github.com/ft54482/dsh-control-bridge/pull/17)（base `main`，head `agent/workspace-autonomy`，**未合并**）。
+
+### 这次仍然没有真机证据（不许并进上面的 PASS）
+
+- **C7 部分失败/重试**（授权落盘失败、修复路径、`projection_unverified`）：**mock-only**，真机按任务书不制造权限故障。
+- **幂等键冲突 / 回放**：409 `idempotency_key_reused`、 撤销后回放 409 `authorization_stale` 只有夹具证据，真机未演练（C1 并发用的是同参数同键，不是冲突场景）。
+- 只读（`access:"read"`）会话在忙时的行为、`workspaceAutonomy:{enabled:true}` 对象形态、自定义 `autonomyRecordFile`、`allowOpenPath` 写入路径、出站 webhook/outbox（`outbox_enabled:false`）、符号链接/前缀路径守卫反例：未演练，仍只有夹具。
+- 生产 Desktop 8765 的 `/v1/health` 刻意未读，生产 profile **未启用**该策略。
+
+### 与任务书不一致的地方（照实写）
+
+1. **C6 状态码**：任务书写 `403 workspace_not_allowlisted`，实测 **409**（`resume` 走请求冲突状态码族）；语义一致，码不同。
+2. **C5 的 `workspace_write_not_granted` 未复现**：同一意图的请求被更早的拒绝先挡住（`outside_allowed_roots` / `existing_workspace_required` / `workspace_not_allowlisted`），不臆造该 reason 的真机证据。
+3. **C4 第一版用例没触发 busy**：长任务 3 秒内完成，第二次 `resume` 落在空档被 202 接受（未取消、未抢占）；真正的 409 `busy` 只在 `running:true` 窗口内取得。两种观察都保留：**拒绝只出现在运行窗口内，空档不是拒绝**。
+
+同时明确三件事：本分支**未合并**、**未发布**（`plugins/dsh-control-bridge-host/package.json` 仍是 `0.2.2`，与 `pyproject.toml`、`src/` 版本绑定）、**生产未启用**（未装进任何在用 profile）。isolated live PASS 覆盖的是“隔离 Host + 真实 0.2.2-rc.5 运行时”，不要把它写成生产通过。
 
 ## 驾驶舱 0.1.3
 

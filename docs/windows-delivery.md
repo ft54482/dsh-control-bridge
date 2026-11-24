@@ -169,7 +169,15 @@ $profile = 'ws-autonomy-lab'
 & $dsh $profile --from-default-profile web --dump-config
 ```
 
-`--dump-config` 只生成 profile 并打印组合树后退出，不会挂载或监听；不要照抄成不带该开关的命令，否则会真的起一个 web 服务。隔离 profile 必须用自己的状态目录和端口，不复用 8765 以及 3082/3084/3088 等在用端口。用哪条 CLI 启动，就决定了这个隔离 Host 的 runtime 版本（Desktop 自带 CLI 是 0.2.3-alpha.2，全局 npm 包是 0.2.1-rc.3）；文档里四处“0.2.2”的区别见[验收范围](verified-scope.md#version-map)。
+`--dump-config` 只生成 profile 并打印组合树后退出，不会挂载或监听；不要照抄成不带该开关的命令，否则会真的起一个 web 服务。隔离 profile 必须用自己的状态目录和端口，不复用 8765 以及 3082/3084/3088 等在用端口。用哪条 CLI 启动，就决定了这个隔离 Host 的 runtime 版本。本机有三条入口，别混用：
+
+| 入口 | 版本 | 用途 |
+| --- | --- | --- |
+| Desktop 自带 CLI（`resources\runtime\cli`） | 0.2.3-alpha.2 | 正式 Desktop 及其 profile |
+| 全局 npm `@deepseek-ai/dsh` | 0.2.1-rc.3 | 3082/3084/3088 三个 web 实例 |
+| 本机隔离安装 `dsh-022` | 0.2.2-rc.5 | 本轮隔离验收用的就是这条 |
+
+文档里四处“0.2.2”的区别见[验收范围](verified-scope.md#version-map)。
 
 ```powershell
 & $dsh --version   # 记下这次验收用的 runtime 版本
@@ -199,7 +207,7 @@ $profile = 'ws-autonomy-lab'
     allowCreateWorkspace: true
     allowCreateSession: true
     allowOpenPath: false
-    busyPolicy: refuse
+    busyPolicy: refuse                          # 保留键：当前恒为拒绝忙会话，改它不会放开抢占
     workspaceRoots: [ "D:/ws-lab/roots" ]
     bootstrapFile: ""                           # 显式写明：没有配对窗口
     bootstrapSecretFile: ""
@@ -247,6 +255,22 @@ python desktop.py revoke-workspace --port 8766 --data revoke.json
 
 helper 对回执自己也会校验：回执不一致时退出码 1，并报 `workspace_receipt_unverified` / `task_receipt_unverified` / `agent_preset_unverified` / `revoke_receipt_unverified`。退出码 `0` 成功、`1` 业务失败或回执未证实、`2` 本地输入或传输错误。
 
+<a id="workspace-autonomy-lab-record"></a>
+
+### 5bis. 隔离验收记录（2026-11-25，isolated live PASS，runtime 0.2.2-rc.5）
+
+上面这套步骤已经在一台隔离 Host 上真跑过一次，结论是 **isolated live PASS (0.2.2-rc.5)**，不是生产通过。记录：`lab/report.md`（任务目录 `.agent/master-control/tasks/bridge-workspace-autonomy-20261125/lab/`，证据 `A-*`/`B-*`/`C*`/`D-*` 与之同目录）；开发 PR 为 [#17](https://github.com/ft54482/dsh-control-bridge/pull/17)（未合并）。同一轮的证据分级见[验收范围](verified-scope.md#workspace-autonomy-scope)。
+
+| 项 | 实测 |
+| --- | --- |
+| 实例 | profile `ws-autonomy-lab`，Host `127.0.0.1:8766`、web `3096`，runtime 0.2.2-rc.5（本机 `dsh-022` 安装），独立状态目录；对照 profile `ws-autonomy-off`（8767）跑完即停 |
+| 首启 | 空 allowlist + 无 bootstrap：`health` `effective:true`、`grants_count:0`、`bootstrap_status:"unconfigured"`，启动 stderr 空，未预灌任何授权 |
+| 主路径 | 两个 roots 外目录：`create-workspace` 200（`created:true`、`started_task:false`）→ `create-session` 200（`master-control` + `session_projection` + `access:write`）→ 合成提示 202 → `wait` `phase:terminal / terminal_scope:official / completed:true / text:"OK"`，route、effort、model 三项 match |
+| 复用 | 同工作区再登记 `reused:true`，工作区与会话各仍只 1 条，第二个提示照样 official 完成 |
+| 反例 | 4 并发同路径 → 同一 workspace id（1 created + 3 reused）；未知预设 409 `agent-preset/invalid`；换任务无 confirm → 409 `workspace_task_mismatch`，加 `confirm_task:true` → 200；`running:true` 时 `resume` → 409 `busy` 且长任务未被取消；策略关闭 → 400 `outside_allowed_roots` 等旧拒绝；`revoke-workspace` → 200 `directory_intact:true`，随后 `resume` → 409 `workspace_not_allowlisted` |
+| 旁证 | 8765/3082/3084/3088 进程未重启、四个 profile 的 patch sha256 未变；全程只监听 loopback、只用合成文本、无客户数据；正式 Desktop 8765 零写入 |
+| 没做的 | 部分失败/重试（mock-only）、幂等键冲突与撤销后回放的 409、只读忙会话、`allowOpenPath`、出站 webhook、符号链接守卫反例——见[验收范围](verified-scope.md#workspace-autonomy-scope) |
+
 ### 6. 回退
 
 1. 把 `workspaceAutonomy` 改成 `false`（或整项删掉），重启该 profile。授权仍在 `allowlist.json` 里，只是重新走旧规则：根外目录与"新写授权需要已有写会话"的限制恢复。
@@ -255,7 +279,7 @@ helper 对回执自己也会校验：回执不一致时退出码 1，并报 `wor
 
 ### 7. 生产启用前的门槛
 
-任意有 OS 权限的路径都能被登记，且登记时不做可写性检查；授权本身把一个工作区的写权限交给带 bearer 的调用方，权限级别与同账号的 shell 相同。因此：
+任意有 OS 权限的路径都能被登记，且登记时不做可写性检查；授权本身把一个工作区的写权限交给带 bearer 的调用方，权限级别与同账号的 shell 相同。隔离验收已于 2026-11-25 通过（见上文 5bis，runtime 0.2.2-rc.5），但生产是否开启仍由操作者决定，且生产 Desktop 是另一份 runtime。因此：
 
 - 先隔离 profile 全过，再由操作者明确决定是否对生产 Desktop 打开；
 - 打开后仍只监听 `127.0.0.1`，不要把 bearer 交给其他机器或别的用户；

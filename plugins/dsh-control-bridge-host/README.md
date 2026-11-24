@@ -99,14 +99,15 @@ Filesystem paths are realpath-checked inside `workspaceRoots`: the root itself, 
     autonomyRecordFile: <file>         # optional; default dirname(allowlistFile)/workspace-autonomy.jsonl
     allowCreateWorkspace: true         # still the capability switch for POST /v1/workspaces
     allowCreateSession: true           # still the capability switch for POST /v1/sessions
-    busyPolicy: refuse                 # default; a busy Session is never preempted
+    busyPolicy: refuse                 # reserved key; the Host currently always refuses a busy Session
 ```
 
-- `workspaceAutonomy` accepts `true` or `{ enabled: true }`. Absent, `false`, `null`, or any other value means **disabled**; every request and response then keeps its exact old shape.
+- `workspaceAutonomy` accepts `true` or `{ enabled: true }`. Absent, `false`, `null`, or any other value means **disabled**: no autonomy flow runs. For a caller that carries no task intent the guarded path then answers as before, but the response surface is **additive, not byte-identical** — `GET /v1/health` always carries the `workspace_autonomy` block and `GET /v1/workspaces` rows always carry `task_id`. A caller that carries task intent on a disabled (or otherwise ineffective) Host is refused with `403 workspace_autonomy_not_effective`.
 - `autonomyRecordFile` is optional. Without it the journal is `dirname(allowlistFile)/workspace-autonomy.jsonl`.
+- `busyPolicy` is a **reserved key**: the Host today always refuses a busy Session (`409 busy`, the running turn is never cancelled) and no configuration value turns preemption on. The key is accepted — and `Prepare-DesktopHost.ps1` writes it — so a future value can be added without breaking existing configs.
 - `allowCreateWorkspace` / `allowCreateSession` are still required: the policy relaxes *who may be granted*, not whether the capability is switched on. Both gates answer `403 create_workspace_disabled` / `403 create_session_disabled` before the policy is consulted.
 
-**Effective determination.** `effective` is exactly the conjunction `enabled && allowlistFile configured && workspaceRegistry.create callable && sessionController.create callable && sessionController.projections callable` (`autonomy.js:166-201`). `reason` names the first missing piece: `not_configured`, `disabled`, `allowlist_file_missing`, `workspace_create_unavailable`, `session_create_unavailable`, `session_projections_unavailable`. A configured-but-ineffective policy **fails closed**: a write request that carries task intent gets `403 workspace_autonomy_not_effective` (with `autonomy_reason`) instead of silently falling back to the standard mode.
+**Effective determination.** `effective` is exactly the conjunction `enabled && allowlistFile configured && workspaceRegistry.create callable && sessionController.create callable && sessionController.projections callable` (`autonomy.js:166-201`). `reason` names the first missing piece: `not_configured`, `disabled`, `allowlist_file_missing`, `workspace_create_unavailable`, `session_create_unavailable`, `session_projections_unavailable`. **Every** request that carries task intent on a Host whose policy is not effective — including one that never configured the switch (`reason: "not_configured"`) — fails closed with `403 workspace_autonomy_not_effective` and `autonomy_reason`; it never silently falls back to the guarded path.
 
 `GET /v1/health` always declares the truth in `workspace_autonomy` (`configured`, `enabled`, `effective`, `reason`, `require_task`, `roots_mode`, `grant_store`, `record_file`, `operations`). `roots_mode` is `unrestricted` whenever the switch is enabled and `configured_roots` otherwise; that field is a declaration, not an extra capability.
 
@@ -128,21 +129,23 @@ Error codes this flow can answer, beyond the pre-existing ones:
 | --- | --- | --- |
 | 400 | `task_required` | `task_id`/`purpose` missing, blank or too long; also the "this call needs a task" answer for an old-shaped request that only the policy can serve |
 | 400 | `invalid_client_request_key` | `client_request_key` does not match `^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$` |
-| 403 | `workspace_autonomy_not_effective` | task intent arrived but the policy is configured and not effective (`autonomy_reason` says why) |
+| 403 | `workspace_autonomy_not_effective` | task intent arrived and `effective` is not `true` — `not_configured` included (`autonomy_reason` says which) |
 | 409 | `workspace_task_mismatch` | the workspace already belongs to another task and `confirm_task` was not set |
 | 409 | `idempotency_key_reused` | the key is bound to another operation or other arguments (`previous_operation`, `mismatched`) |
-| 409 | `authorization_stale` | the replay's authorization was revoked, downgraded, removed or taken over (`historical` + `current.reason`) |
+| 409 | `authorization_stale` | the replay's authorization was revoked, downgraded, removed or taken over (`historical` + a top-level `current` string) |
 | 409 | `agent-preset/invalid` | the requested preset does not resolve to that exact id |
 | 409 | `agent_preset_unverified` | the Session exists but its projection does not read back the preset; do not retry creation |
 | 409 | `session_already_granted` | a repair found the Session already granted |
 | 500 | `grant_persist_failed` | the Session exists but the grant write failed; retry with the same key to repair |
+| 500 | `workspace_revoke_failed` | the revoke write failed (`saved:false`); the grant is unchanged |
 | 502 | `workspace_grant_failed` | the workspace is registered but the grant write failed (`manual_reconcile`) |
 | 502 | `workspace_unresolved`, `create_returned_no_session_id`, `session/workspace-attach-failed` | the official call half-succeeded; reconcile before retrying |
+| 400 | `missing_workspace_id` | `/v1/workspaces/revoke` without a nonempty `workspace_id` |
 | 400 | `missing_path`, `invalid_path`, `missing_directory`, `missing_parent`, `not_a_directory`, `unreadable_path`, `create_failed` | path resolution (`autonomy.js:210-259`) |
 
 ### Operation record
 
-Every operation is appended to `workspace-autonomy.jsonl` with 17 fixed keys: `at`, `op`, `operation` (`workspace` or `session`), `workspace_id`, `path`, `task_id`, `purpose`, `session_id`, `preset`, `access`, `client_request_key`, `parent_key`, `request_hash`, `request`, `phase`, `result`, `reason` (null when a field does not apply), plus `receipt` on a success line and `revoked` on a revoke line. Lines split into **bindings** (`workspace_create`/`workspace_reuse`/`workspace_grant_failed`, `session_create`/`session_grant`/`session_grant_failed`) that answer a caller's request and own its key, and **evidence** (`workspace_task_confirmed`, `workspace_revoke`) that never binds a key and never downgrades a binding. No bearer, no secret, no message text. A failed append never rolls back a durable grant: the response reports `recorded: false` with `record_error`. `purpose` is stored verbatim, so callers must not put confidential material in it.
+Every operation is appended to `workspace-autonomy.jsonl` with 17 fixed keys: `at`, `op`, `operation`, `workspace_id`, `path`, `task_id`, `purpose`, `session_id`, `preset`, `access`, `client_request_key`, `parent_key`, `request_hash`, `request`, `phase`, `result`, `reason` (null when a field does not apply), plus `receipt` on a success line and `revoked` on a revoke line. `operation` is `workspace` or `session` on the binding lines, and `null` on the lines that carry no operation of their own — `workspace_revoke` and the `workspace_task_confirmed` line written when a Session request names an existing `workspace_id` (the path-based confirmation does record `operation: "workspace"`). Lines split into **bindings** (`workspace_create`/`workspace_reuse`/`workspace_grant_failed`, `session_create`/`session_grant`/`session_grant_failed`) that answer a caller's request and own its key, and **evidence** (`workspace_task_confirmed`, `workspace_revoke`) that never binds a key and never downgrades a binding. No bearer, no secret, no message text. A failed append never rolls back a durable grant: the response reports `recorded: false` with `record_error`. `purpose` is stored verbatim, so callers must not put confidential material in it.
 
 ### First start
 
@@ -154,7 +157,7 @@ A profile that has never paired anything has an empty or absent allowlist (`{"ve
 4. the bind is `127.0.0.1`;
 5. the allowlist file is either absent or a valid, empty one — a zero-byte, unparseable or structurally invalid file stays `allowlist_unreadable`.
 
-Nothing is pre-seeded: the first start writes no grant, and the allowlist file is created by the first successful grant. No armed bootstrap window is needed and none is implied; an armed window still opens the port without a policy, exactly as before, and it is **not** a way to bypass an ineffective policy (`policy.js:51-56`, `index.js:22-47`).
+Nothing is pre-seeded: the first start writes no grant, and the allowlist file is created by the first successful grant. No armed bootstrap window is needed and none is implied; an armed window still opens the port without a policy, exactly as before, and it is **not** a way to bypass an ineffective policy (`policy.js:53-79`, `index.js:83-91`).
 
 Every other refusal keeps its original reason: default off with an empty allowlist → `no steady allowlist and no armed bootstrap`; missing secret, missing services, non-loopback bind → their existing messages; unreadable allowlist → `allowlist_unreadable`. The startup result (the value `apply` returns, visible in the Desktop log) also reports `autonomy: {configured, enabled, effective, reason}`.
 
@@ -193,7 +196,7 @@ When it is effective, the behaviour that is **not** visible from the shapes alon
 - A replay is refused when the grant it relied on changed: `409 authorization_stale` with `current` = `revoked` / `missing` / `access_changed` / `task_changed` and a `historical` summary of the old receipt. Withdrawing and replaying therefore cannot resurrect the grant, and a repair cannot re-authorize a revoked workspace.
 - The journal is read into memory once when the server is constructed; a damaged line is skipped and its neighbours still count (`autonomy.js:361-375`). A failed append is reported as `recorded:false` with `record_error` and never rolls back a grant that is already durable.
 
-The guarded 0.2.0 path is untouched: without `workspaceAutonomy` every request and response keeps its exact old shape.
+The guarded 0.2.0 flow is untouched: without an effective policy a caller that carries no task intent gets the old answers, with two additive fields (`health.workspace_autonomy`, `workspaces[].task_id`); a caller that carries task intent is refused with `403 workspace_autonomy_not_effective` rather than falling back.
 
 ## Outbound completion webhook (0.2.0, off by default)
 
@@ -256,7 +259,7 @@ The pairing window is a file, not process state. `bootstrap.json` (secret, expir
 
 ## Compatibility
 
-Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-controller` `prompt(request, signal)`, `list(request, signal)`, and `sessionQuery.readSession`, as documented for the 0.2.2 controller. The operator-observed CLI is 0.2.2-rc.5. The installed 0.2.2-rc.5 sources were reviewed for this release; the API-level findings and the fixture-only gaps are in `docs/official-host-contract.md`. Host 0.1.5 had one authorized existing-session resume on that Desktop. The anonymous record and the items still unverified are in `docs/verified-scope.md`. In-process fixtures are not that machine. Workspace autonomy from this branch has fixture evidence only: the live row is stated separately in `docs/verified-scope.md` and is **not** a pass.
+Target shape: Desktop profile whose host exposes `@deepseek-ai/dsh-api-session-controller` `prompt(request, signal)`, `list(request, signal)`, and `sessionQuery.readSession`, as documented for the 0.2.2 controller. The operator-observed Desktop CLI is 0.2.3-alpha.2; the isolated Host that accepted the autonomy acceptance ran 0.2.2-rc.5. The installed 0.2.2-rc.5 sources were reviewed for this release; the API-level findings and the fixture-only gaps are in `docs/official-host-contract.md`. Host 0.1.5 had one authorized existing-session resume on that Desktop. The anonymous record and the items still unverified are in `docs/verified-scope.md`. In-process fixtures are not that machine. Workspace autonomy from this branch has **isolated live PASS (0.2.2-rc.5), 2026-11-25** — an isolated Host profile, real workspaces, real Sessions and synthetic prompts — while the production Desktop is untouched and the policy is not enabled there; what is still fixture-only (partial-failure repair, idempotency-key conflicts, revoke replay) is listed in the same file.
 
 ## Install and rollback
 

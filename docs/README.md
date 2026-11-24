@@ -12,7 +12,7 @@
 | 在 Desktop 查看主控任务和工单执行器 | [驾驶舱安装与数据说明](../plugins/dsh-superagent-cockpit/README.md) | [可安装插件下载](https://github.com/ft54482/dsh-control-bridge/releases/tag/cockpit-v0.1.3) |
 | 升级或回滚 Host | [安装与回滚步骤](windows-delivery.md#host-install) | [插件说明](../plugins/dsh-control-bridge-host/README.md) · [真机验收范围](verified-scope.md) |
 | 给 Bot 接入 CLI、收件箱或 MCP | [协调桥操作指南](coordinator.md) | [MCP 工具目录（JSON）](mcp-tools.json) · [多实例配置](local-harness.md) |
-| 让 Agent 按任务在任意可写目录建工作区（实验，默认关闭） | [工作区自主：安装、启用与回退](windows-delivery.md#workspace-autonomy) | [插件说明](../plugins/dsh-control-bridge-host/README.md#workspace-autonomy-opt-in-per-operator-this-release) · [未发布、真机待验收](verified-scope.md#workspace-autonomy-scope) |
+| 让 Agent 按任务在任意可写目录建工作区（实验，默认关闭） | [工作区自主：安装、启用与回退](windows-delivery.md#workspace-autonomy) | [插件说明](../plugins/dsh-control-bridge-host/README.md#workspace-autonomy-opt-in-per-operator-this-release) · [isolated live PASS（未发布）](verified-scope.md#workspace-autonomy-scope) |
 | 在独立 profile 运行命令行任务 | [Headless CLI 的进程、凭据与续接](headless-cli.md) | [隔离配置](../examples/headless-cli.example.toml) · [复用已有 home](../examples/headless-shared.example.toml) |
 | 查询 SuperAgent 工单和执行者 | [SuperAgent 命令与 Source 派工](../skills/deepseek-harness-bridge/references/superagent.md) | [连接契约](connector-contract.md) |
 | 处理“等你处理”的待办、回原线程、本地裁决 | [SuperAgent 待办：分流、答复与裁决](superagent-todo-inbox.md) | [SuperAgent 命令](../skills/deepseek-harness-bridge/references/superagent.md) |
@@ -40,7 +40,7 @@
 
 ## 验收与版本记录
 
-[Windows 真机验收](verified-scope.md) 按版本记录了现场观察、隔离测试和尚待验证的能力。以下是开发当时的记录，可用于排查旧安装。
+[Windows 真机验收](verified-scope.md) 按版本记录了现场观察、隔离测试和尚待验证的能力。以下是开发当时的记录，可用于排查旧安装。工作区自主那一节把 implemented / mock / **isolated live** 三态分开写，live 只到「隔离 Host 通过」，不写生产通过；本轮曾有两个中文文档被外部脚本写成双重编码，已从 HEAD 恢复并重写，当前 7 份文档无 BOM、无 U+FFFD（过程记录在任务目录 `docs-log.md`）。
 
 | 记录 | 适用范围 |
 | --- | --- |
