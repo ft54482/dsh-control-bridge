@@ -2,8 +2,8 @@ import http from 'node:http'
 import fs from 'node:fs'
 import { bootstrapSourceFromSecret, createStaticBootstrapSource, hashSecret, matchesSecretHash } from './bootstrap.js'
 import {
-  autonomyHealth, clientRequestKey, createAutonomyRecord, createKeyedLock, resolveAutonomyConfig,
-  resolveAutonomyPath, taskFields, taskIntent,
+  autonomyHealth, clientRequestKey, createAutonomyRecord, createKeyedLock, fingerprintDiff,
+  fingerprintHash, requestFingerprint, resolveAutonomyConfig, resolveAutonomyPath, taskFields, taskIntent,
 } from './autonomy.js'
 import { eventsSince, journalStart } from './journal.js'
 import { createOutbox } from './outbox.js'
@@ -185,7 +185,13 @@ export function createHostServer(ctx, config, secret) {
   /** Append one audit line. A failed append is reported, never rolled back. */
   function recordOp(entry) {
     if (!autonomyRecord) return { recorded: false, record_error: 'autonomy_not_effective' }
-    const written = autonomyRecord.append(entry)
+    // An absent key is written as null, never as an empty string: "this request
+    // carried no key" must not look like "it carried one".
+    const written = autonomyRecord.append({
+      ...entry,
+      client_request_key: entry.client_request_key ? entry.client_request_key : null,
+      parent_key: entry.parent_key ? entry.parent_key : null,
+    })
     return written.ok ? { recorded: true } : { recorded: false, record_error: written.error }
   }
 
@@ -257,16 +263,105 @@ export function createHostServer(ctx, config, secret) {
     return null
   }
 
+  // ---- idempotency and replay safety --------------------------------------
+  // A key answers exactly one operation with one set of arguments, and a replay
+  // is only honoured while the authorization it was based on still exists.
+
+  function idempotencyReused(bound, operation, mismatched) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        reason: 'idempotency_key_reused',
+        previous_operation: bound.operation,
+        operation,
+        mismatched: mismatched || [],
+        previous_recorded_at: bound.at || null,
+        previous_workspace_id: bound.workspace_id || null,
+        previous_session_id: bound.session_id || null,
+        started_task: false,
+        detail: 'this client_request_key is already bound to another operation or other request arguments; use a new key',
+      },
+    }
+  }
+
+  function staleAuthorization({ operation, bound, current }) {
+    const receipt = bound.receipt || {}
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        reason: 'authorization_stale',
+        workspace_id: receipt.workspace_id || bound.workspace_id || null,
+        ...(operation === 'session' ? { session_id: receipt.session_id || bound.session_id || null } : {}),
+        deduplicated: false,
+        historical: {
+          operation,
+          at: bound.at || null,
+          workspace_id: receipt.workspace_id || bound.workspace_id || null,
+          session_id: receipt.session_id || null,
+          task_id: receipt.task_id || bound.task_id || null,
+          path: receipt.path || bound.path || null,
+          access: receipt.access || null,
+        },
+        current,
+        started_task: false,
+        detail: 'the authorization this receipt was based on is no longer in effect; create a new request instead of replaying it',
+      },
+    }
+  }
+
+  /** Why a recorded workspace grant no longer authorizes its receipt, or null. */
+  function workspaceAuthorizationProblem(receipt) {
+    const workspaceId = receipt && receipt.workspace_id
+    if (!workspaceId) return 'missing'
+    const row = registeredWorkspace(workspaceId)
+    if (!row) return 'missing'
+    const directory = canonicalDirectory(row.path)
+    if (!directory || canonicalDirectory(receipt.path) !== directory) return 'missing'
+    const grant = workspaceGrantOf(state(), workspaceId)
+    if (!grant) return 'revoked'
+    if (canonicalDirectory(grant.cwd) !== directory) return 'missing'
+    const taskId = receipt.task && receipt.task.task_id
+    if (grant.task_id && taskId && grant.task_id !== taskId
+      && !(receipt.task && receipt.task.confirmed === true)) return 'task_changed'
+    return null
+  }
+
+  /** Why a recorded Session grant no longer authorizes its receipt, or null. */
+  function sessionAuthorizationProblem(receipt, access) {
+    const current = state()
+    const grant = (current.sessionAllowlist || []).find((row) => row && row.sessionId === receipt.session_id)
+    if (!grant) return 'revoked'
+    if (grant.workspaceId !== receipt.workspace_id) return 'missing'
+    if (grant.access !== access) return 'access_changed'
+    const workspaceGrant = workspaceGrantOf(current, receipt.workspace_id)
+    if (!workspaceGrant) return 'revoked'
+    const row = registeredWorkspace(receipt.workspace_id)
+    const directory = row ? canonicalDirectory(row.path) : null
+    if (!directory) return 'missing'
+    if (canonicalDirectory(workspaceGrant.cwd) !== directory) return 'missing'
+    if (grant.cwd && canonicalDirectory(grant.cwd) !== directory) return 'missing'
+    return null
+  }
+
   /**
    * Register or reuse one workspace under the autonomy policy and take a
    * task-scoped workspace grant. Never creates a Session, never prompts.
+   *
+   * `options.ignore_request_key` is used by the Session flow: an internal
+   * registration must not consume the caller's key, or the Session retry would
+   * replay a workspace receipt. Such a record carries `parent_key` instead and
+   * stays idempotent by canonical path.
    * @returns `{ status, body }`; 200 bodies are the frozen 3.3 receipt.
    */
-  async function registerAutonomyWorkspace(body) {
+  async function registerAutonomyWorkspace(body, options = {}) {
     if (!autonomyConfig.effective) return autonomyNotEffective()
     const task = taskFields(body)
     if (!task.ok) return { status: 400, body: { ok: false, reason: task.reason, detail: task.detail, started_task: false } }
-    const key = clientRequestKey(body)
+    const key = options.ignore_request_key === true
+      ? { ok: true, key: '' }
+      : clientRequestKey(body)
     if (!key.ok) return { status: 400, body: { ok: false, reason: key.reason, detail: key.detail, started_task: false } }
     const resolved = resolveAutonomyPath(body.path, { createDirectory: body.create_directory === true })
     if (!resolved.ok) {
@@ -277,13 +372,23 @@ export function createHostServer(ctx, config, secret) {
     }
     const canonical = resolved.path
     const confirmTask = body.confirm_task === true
-    return withWorkspaceLock(canonical, async () => {
-      // One canonical directory is one queue: a concurrent duplicate waits here
-      // and then sees the workspace that the first call registered.
+    const fingerprint = requestFingerprint('workspace', { ...body, path: canonical })
+    const requestHash = fingerprintHash(fingerprint)
+    const parentKey = typeof options.parent_key === 'string' && options.parent_key ? options.parent_key : null
+
+    const run = async () => {
+      // A key is bound to one operation and one request: replay only the same.
       if (key.key) {
-        const replay = autonomyRecord.latest(key.key, 'workspace')
-        if (replay && replay.complete) {
-          return { status: 200, body: { ...replay.receipt, deduplicated: true } }
+        const bound = autonomyRecord.lookup(key.key)
+        if (bound) {
+          if (bound.operation !== 'workspace') return idempotencyReused(bound, 'workspace', [])
+          const mismatched = fingerprintDiff(bound.request, fingerprint)
+          if (mismatched.length) return idempotencyReused(bound, 'workspace', mismatched)
+          if (bound.complete) {
+            const current = workspaceAuthorizationProblem(bound.receipt)
+            if (current) return staleAuthorization({ operation: 'workspace', bound, current })
+            return { status: 200, body: { ...bound.receipt, deduplicated: true } }
+          }
         }
       }
       let existing = null
@@ -355,6 +460,7 @@ export function createHostServer(ctx, config, secret) {
         note(config, [detail])
         const failure = recordOp({
           op: 'workspace_grant_failed',
+          operation: 'workspace',
           workspace_id: workspaceId,
           path: directory,
           task_id: task.task_id,
@@ -363,6 +469,9 @@ export function createHostServer(ctx, config, secret) {
           result: 'failed',
           reason: 'workspace_grant_failed',
           client_request_key: key.key,
+          parent_key: parentKey,
+          request: fingerprint,
+          request_hash: requestHash,
         })
         return {
           status: 502,
@@ -399,6 +508,7 @@ export function createHostServer(ctx, config, secret) {
       }
       const recorded = recordOp({
         op: created ? 'workspace_create' : 'workspace_reuse',
+        operation: 'workspace',
         workspace_id: workspaceId,
         path: directory,
         task_id: task.task_id,
@@ -406,11 +516,15 @@ export function createHostServer(ctx, config, secret) {
         phase: null,
         result: 'ok',
         client_request_key: key.key,
+        parent_key: parentKey,
+        request: fingerprint,
+        request_hash: requestHash,
         receipt,
       })
       if (confirmTask && previousTask && previousTask !== task.task_id) {
         recordOp({
           op: 'workspace_task_confirmed',
+          operation: 'workspace',
           workspace_id: workspaceId,
           path: directory,
           task_id: task.task_id,
@@ -418,11 +532,19 @@ export function createHostServer(ctx, config, secret) {
           phase: null,
           result: 'ok',
           client_request_key: key.key,
+          parent_key: parentKey,
+          request: fingerprint,
+          request_hash: requestHash,
           reason: `previous_task_id=${previousTask}`,
         })
       }
       return { status: 200, body: { ...receipt, ...recorded } }
-    })
+    }
+
+    // One key is one queue; one canonical directory is another. The nesting is
+    // always key → path, so two flows cannot deadlock on each other.
+    if (key.key) return withRequestKeyLock(key.key, () => withWorkspaceLock(canonical, run))
+    return withWorkspaceLock(canonical, run)
   }
 
   /**
@@ -556,9 +678,51 @@ export function createHostServer(ctx, config, secret) {
     const task = taskFields(body)
     if (!task.ok) return { status: 400, body: { ok: false, reason: task.reason, detail: task.detail, started_task: false } }
     const preset = body.agent_preset
-    if (requestKey) {
-      const replay = autonomyRecord.latest(requestKey, 'session')
-      if (replay && replay.complete) return { status: 200, body: { ...replay.receipt, deduplicated: true } }
+    const wantedPath = typeof body.path === 'string' ? body.path.trim() : ''
+    const access = body.access === 'write' ? 'write' : 'read'
+    const canonicalPath = wantedPath ? (resolveAutonomyPath(wantedPath, { createDirectory: false }).path || wantedPath) : ''
+    const fingerprint = requestFingerprint('session', {
+      ...body,
+      path: canonicalPath || wantedPath || null,
+      workspace_id: wantedPath ? null : body.workspace_id,
+    })
+    const requestHash = fingerprintHash(fingerprint)
+    // A key is bound to one operation with one set of arguments; a replay is
+    // honoured only while the authorization behind the receipt still exists.
+    const bound = requestKey ? autonomyRecord.lookup(requestKey) : null
+    if (bound) {
+      if (bound.operation !== 'session') return idempotencyReused(bound, 'session', [])
+      // The path a receipt was recorded with is the canonical one; a caller may
+      // spell it differently, so compare the resolved form.
+      const mismatched = fingerprintDiff(bound.request, fingerprint)
+      if (mismatched.length) return idempotencyReused(bound, 'session', mismatched)
+      if (bound.complete) {
+        const current = sessionAuthorizationProblem(bound.receipt, access)
+        if (current) return staleAuthorization({ operation: 'session', bound, current })
+        return { status: 200, body: { ...bound.receipt, deduplicated: true } }
+      }
+      if (bound.phase === 'session_created' && bound.session_id) {
+        return repairAutonomySession(bound, task, requestKey)
+      }
+      if (bound.phase === 'projection_unverified') {
+        // The Session exists but its preset could not be proven. Replaying must
+        // not mint a second Session, and there is no grant to repair.
+        return {
+          status: 409,
+          body: {
+            ok: false,
+            reason: 'agent_preset_unverified',
+            session_id: bound.session_id,
+            workspace_id: bound.workspace_id,
+            saved: false,
+            started_task: false,
+            manual_reconcile: true,
+            note: 'inspect this Session in Desktop before continuing; do not retry creation',
+          },
+        }
+      }
+      // phase `create_failed` (or a grant failure recorded before the Session
+      // id was known): the flow continues below and is idempotent by path.
     }
     if (preset !== undefined) {
       if (typeof preset !== 'string' || !preset.trim() || preset !== preset.trim()) {
@@ -598,21 +762,24 @@ export function createHostServer(ctx, config, secret) {
         return officialErrorBody(error, 'agentPresets.resolve')
       }
     }
-    const partial = requestKey ? autonomyRecord.latest(requestKey, 'session') : null
-    if (partial && !partial.complete && partial.session_id) {
+    const partial = bound && !bound.complete && bound.session_id ? bound : null
+    if (partial) {
       return repairAutonomySession(partial, task, requestKey)
     }
-    const wantedPath = typeof body.path === 'string' ? body.path.trim() : ''
     let workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id : ''
     let workspaceCreated = false
     let workspaceReused = false
     if (wantedPath) {
+      // Register the workspace without consuming this request's key: the key
+      // belongs to the Session operation, so a Session retry re-enters the flow
+      // instead of replaying a workspace receipt.
       const registered = await registerAutonomyWorkspace({
         ...body,
         path: wantedPath,
         task_id: task.task_id,
         purpose: task.purpose,
-      })
+        client_request_key: null,
+      }, { ignore_request_key: true, parent_key: requestKey || null })
       if (registered.status !== 200) return registered
       workspaceId = registered.body.workspace_id
       workspaceCreated = registered.body.deduplicated === true ? false : registered.body.created === true
@@ -634,7 +801,6 @@ export function createHostServer(ctx, config, secret) {
       return { status: 404, body: { ok: false, reason: 'workspace_not_found', workspace_id: workspaceId, started_task: false } }
     }
     const directory = canonicalDirectory(workspace.path)
-    const access = body.access === 'write' ? 'write' : 'read'
     const options = { firstWriteAllowed: true, unrestrictedRoots: true }
     if (!wantedPath) {
       // Naming a workspace by id is not a takeover: the same ownership rule as
@@ -657,13 +823,18 @@ export function createHostServer(ctx, config, secret) {
       if (previousTask && previousTask !== task.task_id) {
         recordOp({
           op: 'workspace_task_confirmed',
+          operation: 'workspace',
           workspace_id: workspaceId,
           path: directory,
           task_id: task.task_id,
           purpose: task.purpose,
           phase: null,
           result: 'ok',
-          client_request_key: requestKey,
+          // This line belongs to the Session request, so it must not consume the
+          // Session's idempotency key: it points at it through parent_key.
+          client_request_key: null,
+          parent_key: requestKey || null,
+          request: requestFingerprint('workspace', { ...body, path: directory }),
           reason: `previous_task_id=${previousTask}`,
         })
       }
@@ -688,6 +859,26 @@ export function createHostServer(ctx, config, secret) {
     try {
       created = await ctx.sessionController.create(createRequest)
     } catch (error) {
+      // The workspace registration above may have succeeded; the Session was
+      // not created. Binding the key to this request is what lets the same key
+      // retry the Session instead of ever replaying a workspace receipt.
+      const failure = recordOp({
+        op: 'session_create',
+        operation: 'session',
+        workspace_id: workspaceId,
+        path: directory,
+        task_id: task.task_id,
+        purpose: task.purpose,
+        session_id: error.details?.sessionId ?? null,
+        preset,
+        access,
+        phase: 'create_failed',
+        result: 'failed',
+        reason: (error && error.code) || 'create_failed',
+        client_request_key: requestKey,
+        request: fingerprint,
+        request_hash: requestHash,
+      })
       if (error?.code === 'session/workspace-attach-failed') {
         return {
           status: 502,
@@ -699,16 +890,35 @@ export function createHostServer(ctx, config, secret) {
             saved: false,
             started_task: false,
             manual_reconcile: true,
+            ...failure,
           },
         }
       }
-      return officialErrorBody(error, 'sessionController.create', { workspace_id: workspaceId, manual_reconcile: true })
+      const outcome = officialErrorBody(error, 'sessionController.create', { workspace_id: workspaceId, manual_reconcile: true })
+      return { status: outcome.status, body: { ...outcome.body, ...failure } }
     }
     const sessionId = created?.sessionId ?? (preset === undefined ? createRequest.sessionId : null)
     if (typeof sessionId !== 'string' || !sessionId) {
+      const failure = recordOp({
+        op: 'session_create',
+        operation: 'session',
+        workspace_id: workspaceId,
+        path: directory,
+        task_id: task.task_id,
+        purpose: task.purpose,
+        session_id: null,
+        preset,
+        access,
+        phase: 'create_failed',
+        result: 'failed',
+        reason: 'create_returned_no_session_id',
+        client_request_key: requestKey,
+        request: fingerprint,
+        request_hash: requestHash,
+      })
       return {
         status: 502,
-        body: { ok: false, reason: 'create_returned_no_session_id', workspace_id: workspaceId, manual_reconcile: true },
+        body: { ok: false, reason: 'create_returned_no_session_id', workspace_id: workspaceId, manual_reconcile: true, ...failure },
       }
     }
     if (preset !== undefined) {
@@ -722,6 +932,7 @@ export function createHostServer(ctx, config, secret) {
         || projection?.kind !== 'sequenced' || projection.values?.agentPreset !== preset) {
         const recorded = recordOp({
           op: 'session_create',
+          operation: 'session',
           workspace_id: workspaceId,
           path: directory,
           task_id: task.task_id,
@@ -733,6 +944,8 @@ export function createHostServer(ctx, config, secret) {
           result: 'failed',
           reason: 'agent_preset_unverified',
           client_request_key: requestKey,
+          request: fingerprint,
+          request_hash: requestHash,
         })
         return {
           status: 409,
@@ -760,6 +973,8 @@ export function createHostServer(ctx, config, secret) {
       agentPreset: created.agentPreset,
       task,
       requestKey,
+      request: fingerprint,
+      requestHash,
       workspaceCreated,
       workspaceReused,
       plannedSelection: planned.plannedSelection,
@@ -801,6 +1016,51 @@ export function createHostServer(ctx, config, secret) {
     const preset = partial.preset || undefined
     const access = partial.access === 'write' ? 'write' : 'read'
     const directory = canonicalDirectory(workspace.path)
+    // Repair only a grant that is still authorized: a revoked workspace must not
+    // come back to life through a retry. The recorded receipt is the historical
+    // summary; the current state is what decides.
+    const previousTask = (workspaceGrantOf(state(), workspaceId) || {}).task_id || null
+    const historical = {
+      operation: 'session',
+      at: partial.at || null,
+      workspace_id: workspaceId,
+      session_id: sessionId,
+      task_id: partial.task_id || null,
+      path: directory,
+      access,
+    }
+    if (!previousTask && !workspaceGrantOf(state(), workspaceId)) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          reason: 'authorization_stale',
+          workspace_id: workspaceId,
+          session_id: sessionId,
+          deduplicated: false,
+          historical,
+          current: 'revoked',
+          started_task: false,
+          detail: 'the workspace grant is gone; a retry cannot re-authorize it, create a new request instead',
+        },
+      }
+    }
+    if (previousTask && partial.task_id && previousTask !== partial.task_id) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          reason: 'authorization_stale',
+          workspace_id: workspaceId,
+          session_id: sessionId,
+          deduplicated: false,
+          historical,
+          current: 'task_changed',
+          started_task: false,
+          detail: 'this workspace now belongs to another task; create a new request instead of repairing',
+        },
+      }
+    }
     if (preset !== undefined) {
       let projection
       try {
@@ -811,6 +1071,7 @@ export function createHostServer(ctx, config, secret) {
       if (projection?.kind !== 'sequenced' || projection.values?.agentPreset !== preset) {
         const recorded = recordOp({
           op: 'session_create',
+          operation: 'session',
           workspace_id: workspaceId,
           path: directory,
           task_id: task.task_id,
@@ -822,6 +1083,9 @@ export function createHostServer(ctx, config, secret) {
           result: 'failed',
           reason: 'agent_preset_unverified',
           client_request_key: requestKey,
+          // Keep the binding's arguments: a replay must still recognise itself.
+          request: partial.request || null,
+          request_hash: partial.request_hash || null,
         })
         return {
           status: 409,
@@ -848,6 +1112,8 @@ export function createHostServer(ctx, config, secret) {
       agentPreset: preset,
       task,
       requestKey,
+      request: partial.request || null,
+      requestHash: partial.request_hash || null,
       workspaceCreated: false,
       workspaceReused: false,
       repaired: true,
@@ -858,7 +1124,7 @@ export function createHostServer(ctx, config, secret) {
   async function finishAutonomySession(context) {
     const {
       body, preset, access, workspace, workspaceId, sessionId, agentPreset, task, requestKey,
-      workspaceCreated, workspaceReused, plannedSelection, plannedEffortUnverified, repaired,
+      request, requestHash, workspaceCreated, workspaceReused, plannedSelection, plannedEffortUnverified, repaired,
     } = context
     const directory = canonicalDirectory(workspace.path)
     const sessionGrant = {
@@ -899,6 +1165,7 @@ export function createHostServer(ctx, config, secret) {
       note(config, [detail])
       const recorded = recordOp({
         op: 'session_grant_failed',
+        operation: 'session',
         workspace_id: workspaceId,
         path: directory,
         task_id: task.task_id,
@@ -910,6 +1177,8 @@ export function createHostServer(ctx, config, secret) {
         result: 'failed',
         reason: 'grant_persist_failed',
         client_request_key: requestKey,
+        request: request || null,
+        request_hash: requestHash || null,
       })
       if (error?.refused) {
         return {
@@ -973,6 +1242,7 @@ export function createHostServer(ctx, config, secret) {
     }
     const recorded = recordOp({
       op: repaired ? 'session_grant' : 'session_create',
+      operation: 'session',
       workspace_id: workspaceId,
       path: directory,
       task_id: task.task_id,
@@ -983,6 +1253,8 @@ export function createHostServer(ctx, config, secret) {
       phase: null,
       result: 'ok',
       client_request_key: requestKey,
+      request: request || null,
+      request_hash: requestHash || null,
       receipt,
     })
     return { status: 200, body: { ...receipt, ...recorded } }

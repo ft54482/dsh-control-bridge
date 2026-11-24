@@ -12,6 +12,7 @@
  * grant that is already durable.
  */
 
+import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 
@@ -88,6 +89,55 @@ export function clientRequestKey(body) {
     }
   }
   return { ok: true, key }
+}
+
+/**
+ * The part of a request an idempotency key is bound to.
+ *
+ * One key answers one question: a replay must be the *same* operation with the
+ * same arguments. A different operation or a different task/path/preset/access/
+ * model under the same key is a client bug, not a replay (`idempotency_key_reused`).
+ */
+export const FINGERPRINT_FIELDS = [
+  'task_id', 'purpose', 'path', 'workspace_id', 'preset', 'access', 'model', 'confirm_task',
+]
+
+function pick(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+export function requestFingerprint(operation, body) {
+  const scope = operation === 'session' ? 'session' : 'workspace'
+  const model = body && typeof body.model === 'object' && body.model
+    ? {
+      provider: pick(body.model.provider),
+      model: pick(body.model.model),
+      reasoning_effort: pick(body.model.reasoning_effort ?? body.model.reasoningEffort),
+    }
+    : null
+  return {
+    operation: scope,
+    task_id: pick(body && body.task_id),
+    purpose: pick(body && body.purpose),
+    path: pick(body && body.path),
+    // Only a Session create names a workspace, a preset, an access level or a
+    // model; those fields are not part of a workspace registration's identity.
+    workspace_id: scope === 'session' ? pick(body && body.workspace_id) : null,
+    preset: scope === 'session' ? pick(body && body.agent_preset) : null,
+    access: scope === 'session' ? (body && body.access === 'write' ? 'write' : 'read') : null,
+    model: scope === 'session' && model ? JSON.stringify(model) : null,
+    confirm_task: body ? body.confirm_task === true : false,
+  }
+}
+
+export function fingerprintHash(fingerprint) {
+  return crypto.createHash('sha256').update(JSON.stringify(fingerprint)).digest('hex')
+}
+
+/** Names of the fields that differ between the bound request and this one. */
+export function fingerprintDiff(previous, next) {
+  if (!previous || typeof previous !== 'object') return [...FINGERPRINT_FIELDS]
+  return FINGERPRINT_FIELDS.filter((field) => (previous[field] ?? null) !== (next[field] ?? null))
 }
 
 /**
@@ -231,26 +281,26 @@ export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
     recent.push(entry)
     const key = text(entry.client_request_key)
     if (!key) return
+    // A key belongs to exactly one operation. The last line for that key wins,
+    // so a later success supersedes an earlier partial attempt.
     const receipt = entry.receipt && typeof entry.receipt === 'object' ? entry.receipt : null
-    if (receipt && entry.result === 'ok') {
-      byKey.set(key, { complete: true, receipt })
-      return
-    }
-    // A grant that failed after the Session existed is repairable by the same
-    // request key: remember which Session to repair, never create a second one.
-    if ((entry.op === 'session_create' || entry.op === 'session_grant_failed')
-      && entry.phase === 'session_created' && text(entry.session_id)) {
-      byKey.set(key, {
-        complete: false,
-        receipt: null,
-        session_id: text(entry.session_id),
-        workspace_id: text(entry.workspace_id),
-        task_id: text(entry.task_id),
-        purpose: text(entry.purpose),
-        preset: text(entry.preset),
-        access: text(entry.access),
-      })
-    }
+    byKey.set(key, {
+      operation: entry.operation === 'session' ? 'session' : 'workspace',
+      request_hash: text(entry.request_hash),
+      request: entry.request && typeof entry.request === 'object' ? entry.request : null,
+      parent_key: text(entry.parent_key) || null,
+      task_id: text(entry.task_id) || null,
+      purpose: text(entry.purpose) || null,
+      path: text(entry.path) || null,
+      session_id: text(entry.session_id) || null,
+      workspace_id: text(entry.workspace_id) || null,
+      preset: text(entry.preset) || null,
+      access: text(entry.access) || null,
+      phase: text(entry.phase) || null,
+      at: text(entry.at) || null,
+      complete: Boolean(receipt) && entry.result === 'ok',
+      receipt,
+    })
   }
 
   if (target && fs.existsSync(target)) {
@@ -277,6 +327,7 @@ export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
     const full = {
       at: now().toISOString(),
       op: null,
+      operation: null,
       workspace_id: null,
       path: null,
       task_id: null,
@@ -285,6 +336,9 @@ export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
       preset: null,
       access: null,
       client_request_key: null,
+      parent_key: null,
+      request_hash: null,
+      request: null,
       phase: null,
       result: null,
       reason: null,
@@ -306,8 +360,16 @@ export function createAutonomyRecord({ file, now = () => new Date() } = {}) {
     get operations() { return operations },
     get read_error() { return readError },
     append,
-    latest(key) {
+    /** The binding for one idempotency key, whatever operation wrote it. */
+    lookup(key) {
       return byKey.get(text(key)) || null
+    },
+    /** The binding only when it belongs to this operation (`workspace`/`session`). */
+    latest(key, operation) {
+      const bound = byKey.get(text(key))
+      if (!bound) return null
+      if (operation && bound.operation !== operation) return null
+      return bound
     },
     entries() {
       return [...recent]

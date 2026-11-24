@@ -566,3 +566,180 @@ test('workspace listing exposes the owning task without any secret', async (t) =
   assert.equal(JSON.stringify(listed.body).includes(SECRET), false)
   assert.equal(JSON.stringify(listed.body).includes('purpose'), false)
 })
+
+// ---- audit findings: idempotency scope and stale authorization ------------
+
+test('one key cannot answer a workspace call and then a Session call', async (t) => {
+  const { ctx, started, outside } = await harness(t)
+  const project = path.join(outside, 'cross-op')
+  fs.mkdirSync(project)
+  const key = 'cross-op-0001'
+  const workspace = await call(started.port, 'POST', '/v1/workspaces', {
+    path: project, ...TASK, client_request_key: key,
+  })
+  assert.equal(workspace.status, 200, JSON.stringify(workspace.body))
+  assert.ok(workspace.body.workspace_id)
+  const session = await call(started.port, 'POST', '/v1/sessions', {
+    path: project, ...TASK, agent_preset: 'master-control', access: 'write', client_request_key: key,
+  })
+  assert.equal(session.status, 409)
+  assert.equal(session.body.reason, 'idempotency_key_reused')
+  assert.equal(session.body.previous_operation, 'workspace')
+  assert.equal(session.body.operation, 'session')
+  // The workspace receipt must never be mistaken for a Session receipt.
+  assert.equal(Object.hasOwn(session.body, 'session_id'), false)
+  assert.equal(ctx.state.createCalls, undefined)
+  assert.equal(readGrantFile(started.file).sessionAllowlist.length, 0)
+})
+
+test('a path registration that beats the Session create is retried, not replayed', async (t) => {
+  const { ctx, started, outside, baseline } = await harness(t)
+  const project = path.join(outside, 'create-failed')
+  fs.mkdirSync(project)
+  const original = ctx.sessionController.create.bind(ctx.sessionController)
+  let armed = true
+  ctx.sessionController.create = async (request) => {
+    if (armed) {
+      armed = false
+      throw Object.assign(new Error('controller blew up'), { code: 'gateway/internal' })
+    }
+    return original(request)
+  }
+  const body = {
+    path: project, ...TASK, agent_preset: 'master-control', access: 'write', client_request_key: 'create-fail-0001',
+  }
+  const first = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(first.status, 502)
+  assert.equal(first.body.reason, 'gateway/internal')
+  assert.equal(first.body.manual_reconcile, true)
+  assert.equal(first.body.session_id ?? null, null)
+  assert.equal(ctx.state.createCalls, undefined)
+  // The workspace was registered before the failure, and the key is bound to
+  // the Session operation — never to that internal workspace registration.
+  assert.equal(ctx.workspaceRegistry.list().length, baseline + 1)
+  const bound = journal(started.dir).filter((line) => line.client_request_key === 'create-fail-0001')
+  assert.equal(bound.length, 1)
+  assert.equal(bound[0].operation, 'session')
+  assert.equal(bound[0].phase, 'create_failed')
+  const workspaceLines = journal(started.dir).filter((line) => line.operation === 'workspace')
+  assert.equal(workspaceLines.length, 1)
+  assert.equal(workspaceLines[0].client_request_key, null)
+  assert.equal(workspaceLines[0].parent_key, 'create-fail-0001')
+
+  const retry = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(retry.status, 200, JSON.stringify(retry.body))
+  assert.ok(retry.body.session_id)
+  assert.equal(retry.body.workspace_reused, true)
+  assert.equal(ctx.workspaceRegistry.list().length, baseline + 1)
+  assert.equal(readGrantFile(started.file).workspaceAllowlist.length, 1)
+  assert.equal(readGrantFile(started.file).sessionAllowlist.length, 1)
+  assert.equal(ctx.state.prompts, 0)
+})
+
+test('a revoked authorization makes the same key stale instead of replaying success', async (t) => {
+  const { started, outside } = await harness(t)
+  const project = path.join(outside, 'stale-revoked')
+  fs.mkdirSync(project)
+  const body = {
+    path: project, ...TASK, agent_preset: 'master-control', access: 'write', client_request_key: 'stale-revoke-0001',
+  }
+  const created = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(created.status, 200, JSON.stringify(created.body))
+  const revoked = await call(started.port, 'POST', '/v1/workspaces/revoke', { workspace_id: created.body.workspace_id })
+  assert.equal(revoked.status, 200)
+  assert.equal(revoked.body.directory_intact, true)
+
+  const replay = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(replay.status, 409)
+  assert.equal(replay.body.reason, 'authorization_stale')
+  assert.equal(replay.body.current, 'revoked')
+  assert.equal(replay.body.deduplicated, false)
+  assert.equal(replay.body.historical.operation, 'session')
+  assert.equal(replay.body.historical.session_id, created.body.session_id)
+  assert.equal(replay.body.started_task, false)
+  assert.equal(fs.statSync(project).isDirectory(), true)
+  assert.equal(readGrantFile(started.file).sessionAllowlist.length, 0)
+})
+
+test('a downgraded access makes the same key stale instead of replaying write', async (t) => {
+  const { started, outside } = await harness(t)
+  const project = path.join(outside, 'stale-access')
+  fs.mkdirSync(project)
+  const body = {
+    path: project, ...TASK, agent_preset: 'master-control', access: 'write', client_request_key: 'stale-access-0001',
+  }
+  const created = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(created.status, 200, JSON.stringify(created.body))
+  const downgraded = await call(started.port, 'POST', '/v1/access', {
+    session_id: created.body.session_id, access: 'read',
+  })
+  assert.equal(downgraded.status, 200, JSON.stringify(downgraded.body))
+  assert.equal(downgraded.body.access, 'read')
+
+  const replay = await call(started.port, 'POST', '/v1/sessions', body)
+  assert.equal(replay.status, 409)
+  assert.equal(replay.body.reason, 'authorization_stale')
+  assert.equal(replay.body.current, 'access_changed')
+  assert.equal(replay.body.historical.access, 'write')
+  assert.equal(readGrantFile(started.file).sessionAllowlist[0].access, 'read')
+})
+
+test('one key reused for different task, path, preset, access or model is refused', async (t) => {
+  const { ctx, started, outside } = await harness(t)
+  const model = { provider: 'example-provider', model: 'example-model' }
+  const alternate = path.join(outside, 'other-target')
+  fs.mkdirSync(alternate)
+  const variants = [
+    ['task', 'diff-task-0001', { task_id: 'task-beta' }, 'task_id'],
+    ['purpose', 'diff-purpose-0001', { purpose: 'another purpose entirely' }, 'purpose'],
+    ['path', 'diff-path-0001', { path: alternate }, 'path'],
+    ['preset', 'diff-preset-0001', { agent_preset: 'standard' }, 'preset'],
+    ['access', 'diff-access-0001', { access: 'read' }, 'access'],
+    ['model', 'diff-model-0001', { model: { provider: 'example-provider', model: 'other-model' } }, 'model'],
+  ]
+  for (const [name, key, change, field] of variants) {
+    const project = path.join(outside, `diff-${name}`)
+    fs.mkdirSync(project)
+    const base = {
+      path: project, ...TASK, agent_preset: 'master-control', access: 'write', model, client_request_key: key,
+    }
+    const first = await call(started.port, 'POST', '/v1/sessions', base)
+    assert.equal(first.status, 200, `${name}: ${JSON.stringify(first.body)}`)
+    const changed = await call(started.port, 'POST', '/v1/sessions', { ...base, ...change })
+    assert.equal(changed.status, 409, name)
+    assert.equal(changed.body.reason, 'idempotency_key_reused', name)
+    assert.equal(changed.body.previous_operation, 'session', name)
+    assert.equal(changed.body.mismatched.includes(field), true, `${name}: ${JSON.stringify(changed.body.mismatched)}`)
+  }
+  // Every successful create happened once: no variant created another Session.
+  assert.equal(ctx.state.createCalls.length, variants.length)
+})
+
+test('the workspace_id entry obeys the same task ownership rule', async (t) => {
+  const { ctx, started, outside } = await harness(t)
+  const project = path.join(outside, 'by-id')
+  fs.mkdirSync(project)
+  const workspace = await call(started.port, 'POST', '/v1/workspaces', { path: project, ...TASK })
+  assert.equal(workspace.status, 200)
+  const other = { task_id: 'task-beta', purpose: 'another task' }
+  const denied = await call(started.port, 'POST', '/v1/sessions', {
+    workspace_id: workspace.body.workspace_id, ...other, agent_preset: 'master-control', access: 'read',
+  })
+  assert.equal(denied.status, 409)
+  assert.equal(denied.body.reason, 'workspace_task_mismatch')
+  assert.equal(denied.body.existing_task_id, TASK.task_id)
+  assert.equal(ctx.state.createCalls, undefined)
+
+  const confirmed = await call(started.port, 'POST', '/v1/sessions', {
+    workspace_id: workspace.body.workspace_id, ...other, confirm_task: true, agent_preset: 'master-control', access: 'read',
+  })
+  assert.equal(confirmed.status, 200, JSON.stringify(confirmed.body))
+  assert.equal(confirmed.body.task_id, 'task-beta')
+  const lines = journal(started.dir).filter((line) => line.op === 'workspace_task_confirmed')
+  assert.equal(lines.length, 1)
+  assert.equal(lines[0].task_id, 'task-beta')
+  assert.equal(lines[0].operation, 'workspace')
+  assert.equal(lines[0].client_request_key, null)
+  assert.equal(readGrantFile(started.file).workspaceAllowlist[0].task_id, TASK.task_id)
+  assert.equal(readGrantFile(started.file).sessionAllowlist[0].task_id, 'task-beta')
+})
