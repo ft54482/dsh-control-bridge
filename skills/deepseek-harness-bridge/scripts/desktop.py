@@ -32,6 +32,7 @@ WRITE = {
     "set-access": "access",
     "create-workspace": "workspaces",
     "create-session": "sessions",
+    "revoke-workspace": "workspaces/revoke",
     "open": "open",
 }
 OBSERVE = {"wait", "events", "stream"}
@@ -60,6 +61,43 @@ def verified_preset_receipt(request: dict, receipt: dict) -> bool:
         and isinstance(grant, dict) and grant.get("session_id") == session_id
         and grant.get("workspace_id") == workspace_id and grant.get("access") == request.get("access", "read")
     )
+
+
+def verified_workspace_receipt(receipt: dict) -> bool:
+    """A workspace registration is only accepted when it names one identity."""
+    workspace = receipt.get("workspace")
+    grant = receipt.get("grant")
+    workspace_id = receipt.get("workspace_id")
+    path = receipt.get("path")
+    return (
+        receipt.get("ok") is True and receipt.get("started_task") is False
+        and isinstance(workspace_id, str) and bool(workspace_id.strip())
+        and isinstance(workspace, dict) and workspace.get("id") == workspace_id
+        and isinstance(grant, dict) and grant.get("workspace_id") == workspace_id
+        and isinstance(path, str) and bool(path.strip())
+        and workspace.get("path") == path
+    )
+
+
+def verified_task_receipt(request: dict, receipt: dict) -> bool:
+    """A task-scoped Session receipt must carry the task it was created for."""
+    task_id = receipt.get("task_id")
+    return (
+        isinstance(task_id, str) and task_id == request.get("task_id")
+        and verified_preset_receipt(request, receipt)
+    )
+
+
+def verified_revoke_receipt(request: dict, receipt: dict) -> bool:
+    workspace_id = receipt.get("workspace_id")
+    return (
+        receipt.get("ok") is True and receipt.get("started_task") is False
+        and isinstance(workspace_id, str) and workspace_id == request.get("workspace_id")
+    )
+
+
+def task_scoped(body: dict) -> bool:
+    return isinstance(body.get("task_id"), str) and bool(body["task_id"].strip())
 
 
 def load_secret() -> str:
@@ -133,6 +171,9 @@ def main() -> int:
 
     request_id = args.request_id
     verify_preset = False
+    verify_workspace = False
+    verify_revoke = False
+    autonomy_task = False
     try:
         if command in OBSERVE:
             route = f"requests/{quote(request_id, safe='')}/{command}"
@@ -155,6 +196,13 @@ def main() -> int:
                     parser.error("omit session_id for a fresh create-session; use resume for an existing Session")
                 if body.get("access", "read") not in ("read", "write"):
                     parser.error("create-session access must be read or write")
+            verify_workspace = command == "create-workspace"
+            verify_revoke = command == "revoke-workspace"
+            if verify_revoke:
+                workspace = body.get("workspace_id")
+                if not isinstance(workspace, str) or not workspace.strip():
+                    parser.error("revoke-workspace requires a nonempty workspace_id")
+            autonomy_task = task_scoped(body) and (verify_preset or verify_workspace)
             if command == "resume":
                 request_id = body.get("request_id")
                 if not isinstance(request_id, str) or not request_id.strip():
@@ -170,7 +218,9 @@ def main() -> int:
     try:
         if body is not None:
             headers["Content-Type"] = "application/json"
-        if verify_preset or (command == "resume" and "wait" not in body and "wait_ms" not in body):
+        probe_health = verify_preset or autonomy_task or (
+            command == "resume" and "wait" not in body and "wait_ms" not in body)
+        if probe_health:
             connection.request("GET", "/v1/health", headers=headers)
             probe = connection.getresponse()
             health = object_from(probe.read())
@@ -180,6 +230,15 @@ def main() -> int:
             if verify_preset and health.get("preset_create_verified") is not True:
                 emit({"ok": False, "reason": "preset_creation_unavailable", "started_task": False}, secret)
                 return 1
+            # A task-scoped write is only meaningful when the operator's policy
+            # is actually in effect; a configured-but-ineffective Host must fail
+            # here, before any write request is sent.
+            if autonomy_task:
+                autonomy = health.get("workspace_autonomy")
+                if not isinstance(autonomy, dict) or autonomy.get("effective") is not True:
+                    emit({"ok": False, "reason": "workspace_autonomy_not_effective",
+                          "effective": False, "started_task": False}, secret)
+                    return 1
             if command == "resume" and "outbox_enabled" in health:
                 body["wait"] = False
         if command == "stream":
@@ -192,11 +251,29 @@ def main() -> int:
             if command == "stream" and response.status == 200 and response.headers.get_content_type() == "text/event-stream":
                 return print_stream(response, secret)
             result = object_from(response.read())
-            if verify_preset and response.status < 400 and not verified_preset_receipt(body, result):
-                emit({"http_status": response.status, "ok": False, "reason": "agent_preset_unverified",
-                      "session_id": result.get("session_id"), "workspace_id": result.get("workspace_id"),
-                      "manual_reconcile": True}, secret)
+            if autonomy_task and verify_workspace and response.status < 400 and not verified_workspace_receipt(result):
+                emit({"http_status": response.status, "ok": False, "reason": "workspace_receipt_unverified",
+                      "workspace_id": result.get("workspace_id"),
+                      "path": result.get("path") if isinstance(result.get("path"), str) else None,
+                      "started_task": result.get("started_task"), "manual_reconcile": True}, secret)
                 return 1
+            if verify_revoke and response.status < 400 and not verified_revoke_receipt(body, result):
+                emit({"http_status": response.status, "ok": False, "reason": "revoke_receipt_unverified",
+                      "workspace_id": result.get("workspace_id")}, secret)
+                return 1
+            if verify_preset and response.status < 400:
+                # The grant/session identity comes first: it is the receipt's
+                # proof that the Session exists and is the one being granted.
+                if not verified_preset_receipt(body, result):
+                    emit({"http_status": response.status, "ok": False, "reason": "agent_preset_unverified",
+                          "session_id": result.get("session_id"), "workspace_id": result.get("workspace_id"),
+                          "manual_reconcile": True}, secret)
+                    return 1
+                if autonomy_task and not verified_task_receipt(body, result):
+                    emit({"http_status": response.status, "ok": False, "reason": "task_receipt_unverified",
+                          "session_id": result.get("session_id"), "workspace_id": result.get("workspace_id"),
+                          "task_id": result.get("task_id"), "manual_reconcile": True}, secret)
+                    return 1
             if create_attempted and response.status >= 500:
                 result["manual_reconcile"] = True
             emit({"http_status": response.status, **result}, secret)

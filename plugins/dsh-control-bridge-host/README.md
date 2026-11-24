@@ -80,6 +80,31 @@ For preset sessions in 0.2.2, use an already paired workspace ID. If its directo
 
 Filesystem paths are realpath-checked inside `workspaceRoots`: the root itself, sibling prefixes, `..`, and symlink escapes are refused. No delete endpoint is exposed.
 
+## Workspace autonomy, opt-in per operator (this release)
+
+The plugin manifest version is bumped together with the release notes, not in this change.
+
+A fresh workspace cannot be bootstrapped by the guarded create endpoints above: registration produces no grant, and a preset write Session requires an existing write Session. `workspaceAutonomy` closes that loop **only when the operator turns it on**:
+
+```yaml
+    allowlistFile: <file>
+    workspaceAutonomy: true            # or { enabled: true }; absent/false = old behaviour
+    autonomyRecordFile: <file>         # optional; default dirname(allowlistFile)/workspace-autonomy.jsonl
+```
+
+`effective` is the conjunction `enabled && allowlistFile configured && workspaceRegistry.create callable && sessionController.create callable && sessionController.projections callable`. `GET /v1/health` always declares the truth (`configured`, `enabled`, `effective`, `reason`, `roots_mode`, `grant_store`, `record_file`, `operations`), and a configured-but-ineffective policy **fails closed**: a write request that carries `task_id` gets `403 workspace_autonomy_not_effective` instead of silently falling back to the standard mode.
+
+When it is effective:
+
+- Every autonomy write must carry `task_id` (1..200) and `purpose` (1..500); missing or blank is `400 task_required`. `client_request_key` (optional, `^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$`) makes a retry idempotent.
+- `POST /v1/workspaces {path, task_id, purpose, create_directory?, confirm_task?, title?}` canonicalizes with `fs.realpathSync.native`, serializes per canonical path, resolves → creates → resolves again for the authoritative id, and takes a workspace grant (`source: 'autonomy'`, first task wins). A different task on the same workspace is `409 workspace_task_mismatch` unless `confirm_task: true`, which journals `workspace_task_confirmed` and grants the new task on its Session.
+- `POST /v1/sessions {path? | workspace_id, task_id, purpose, agent_preset, access, ...}` registers the path first when given, then creates the Session, proves the preset through `sessionController.projections`, and only then grants. The first write Session in a workspace is allowed; `agentPresets.resolve` and the projection proof are never skipped (`409 agent-preset/invalid`, `409 agent_preset_unverified`). A busy Session is never cancelled or reused.
+- `POST /v1/workspaces/revoke {workspace_id}` removes the workspace grant and every Session grant under it in one atomic write and reports `directory_intact`. It never deletes a directory and never cancels a running turn.
+- Every operation is appended to `workspace-autonomy.jsonl` (op, workspace, path, task, session, preset, access, request key, phase, result). No bearer, no secret, no message text. A failed append never rolls back a durable grant: the response reports `recorded: false` with `record_error`. `purpose` is stored verbatim, so callers must not put confidential material in it.
+- Retry semantics: a completed `client_request_key` replays its receipt (`deduplicated: true`); a Session that was created but could not be granted is repaired by the same key (`500 grant_persist_failed` + `manual_reconcile`, then `repaired: true`) without creating a second Session; a workspace that was registered but could not be granted is repaired on the same path without a second registration.
+
+The guarded 0.2.0 path is untouched: without `workspaceAutonomy` every request and response keeps its exact old shape.
+
 ## Outbound completion webhook (0.2.0, off by default)
 
 Observation over loopback does not wake a coordinator, so 0.2.0 adds a durable **uplink**: an official terminal outcome (or `needs_input`) is written to a persistent outbox and POSTed to one authenticated HTTPS receiver. It is not the official inbound webhook that creates Sessions, and it is not enabled unless configured:
