@@ -74,6 +74,35 @@ PR：[#17](https://github.com/ft54482/dsh-control-bridge/pull/17)（base `main`�
 
 一次获授权的合成 Issue 触发了目标实例接单。实测观察到排队、一个执行槽被占用、worker 交回报告，随后同一张 Ticket 以 `completed` 结束。技能用同一份计划从 Issue 查回了对应的 Assignment 和 worker 会话。GitHub 的第一条机器人评论是接单回执，完成时间取自引擎记录。验证覆盖这台实例的新 Issue 路径；其他实例的 Source 配置须分别核对。[派工和追踪](../skills/deepseek-harness-bridge/references/superagent.md#github-source)
 
+## ZCode 技能 · 2026-11-25
+
+[`skills/zcode/`](../skills/zcode/README.md) 里的两个技能装在一台 Windows 电脑上，Desktop Host 0.2.2，两个 SuperAgent 实例各管一个仓库。下面是在这台电脑上看到的。
+
+- **SuperAgent 派工全程。** `precheck`、`prepare`、`send --yes`、`trace` 四步走通。一张只要求回帖的工单，从发出评论到以 `completed` 结束用了 4 分 26 秒，Assignment 的 `report.state` 是 `ready`。随后在同一个 Issue 下追加一条带新标记的评论，同一张 Ticket 追加了第三个 Assignment，派给同一个工人会话，1 分 20 秒后以 `completed` 结束。两次仓库都没有新增提交、分支或 PR。
+- **发布前，用仓库里提交的这一份再派一次。** 一项只读统计任务：从发出评论到 Ticket 以 `completed` 结束用了 4 分 01 秒，其中约两分半是工人在自己的检出里干活。工人回帖的两个数字与协调方在同一个提交上独立统计的结果一致，仓库没有被改动。
+- **热配对。** 不重启 Desktop 开了一次性的配对窗口，给一个工作区的空白会话写入 `write` 授权。`granted` 里它是 `write`、`idle`，`history` 返回 200，`membership` 前后一致。
+- **Desktop 会话全程。** 负责人授权后，把工作区编号加进 Host 配置的 `presetSessionWorkspaceIds`，用 `desktop.py create-session` 新建了一个 `master-control` 会话。回执里 `agent_preset` 是 `master-control`、`agent_preset_source` 是 `session_projection`、`started_task` 是 `false`。接着用 `send_brief.py` 发一条只回一行字的提示词，`wait` 返回 `phase: terminal`、`terminal_scope: official`、`completed: true`，回答正确，不到半分钟。执行模型是 Host 的全局默认，没有手动选模型。在一个已有模型记录的既有会话上也做了一次同样的往返，结果相同。
+- **改 Host 配置后 Desktop 自动重启。** 两次改动 `cordis.patch.yml`，Desktop 都在 8 到 20 秒内自动重启，新配置随之生效（Desktop 0.2.3-alpha.2）。只观察到这两次，没有做受控实验。
+- **工人的执行目录。** 每张工单一个目录，在分支 `agent/<同名>` 上，起点是引擎当时的 `origin/main`，不碰项目的主工作副本。
+- **助手的自检。** 三套行为测试全部通过；变异对照把两个助手故意改坏 16 处，每一处都被测试抓住。
+
+这台电脑上没有看到的：
+
+- 新开 Issue 的派工路径（`--kind issue`）。它走 `gh issue create`，而这里的 `gh` 令牌没有 project 读权限。
+- 给没选过模型的空白会话发提示词。`409 model_unknown`；请求里带上模型则是 `409 needs_ui`。要先在 Desktop 里给它选模型，或者新建带预设的主控会话。新建会话要求工作区在 Host 的创建范围里，否则是 `403 outside_allowed_roots`。
+- 撤销授权（`/v1/revoke`）。只读过 Host 的源码和文档。
+
+真机上碰到、上游 0.2.3 客户端还没有处理的四件事。绕法写在 ZCode 技能的 `SKILL.md` 里，原因写在 [`skills/zcode/dsh-control-bridge/references/develop.md`](../skills/zcode/dsh-control-bridge/references/develop.md)：
+
+- `superagent.py` 默认连 3082，`github_source.py` 默认连 3084，一台电脑跑多个实例时会连错。
+- 接单回帖以「已接单：」开头，`is_acknowledgement` 认不出它，`final_comment.present` 在工人干活前就是 `true`。
+- 回帖里出现派工标记后，`trace` 报 `comment_marker_not_unique`。
+- Ticket 结束后，发件账号在同一 Issue 下的评论会追加一个 Assignment，并改写 Ticket 的 `ended.outcome`。
+
+仓库里的 `tests/test_zcode_skills.py` 守两件事：ZCode 技能里那五个上游文件与 Codex 技能发布版 v0.2.3（标签 `skill-v0.2.3`）逐字节相同；`skills/zcode/` 下没有本机的配对文件，也没有像令牌的字符串。ZCode 的行为测试只在 Windows 上运行，其他系统的 CI 跳过它们。模拟通过不等于上面这台电脑已经复测了新提交。
+
+主干上的 Codex 技能在 #13 之后多了待办收件箱、回帖和轮询，ZCode 技能还没有同步这部分。
+
 ## 0.2.2 在已授权 Desktop 工作区的主控会话
 
 Windows 上的 Desktop profile 从 Host 0.2.0 升级到 0.2.2 后，Codex 全程通过已安装的 `deepseek-harness-bridge` 验收。工作区和会话的既有授权均已核对。
