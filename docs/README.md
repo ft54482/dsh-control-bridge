@@ -14,6 +14,7 @@
 | 给 Bot 接入 CLI、收件箱或 MCP | [协调桥操作指南](coordinator.md) | [MCP 工具目录（JSON）](mcp-tools.json) · [多实例配置](local-harness.md) |
 | 在独立 profile 运行命令行任务 | [Headless CLI 的进程、凭据与续接](headless-cli.md) | [隔离配置](../examples/headless-cli.example.toml) · [复用已有 home](../examples/headless-shared.example.toml) |
 | 查询 SuperAgent 工单和执行者 | [SuperAgent 命令与 Source 派工](../skills/deepseek-harness-bridge/references/superagent.md) | [连接契约](connector-contract.md) |
+| 处理“等你处理”的待办、回原线程、本地裁决 | [SuperAgent 待办：分流、答复与裁决](superagent-todo-inbox.md) | [SuperAgent 命令](../skills/deepseek-harness-bridge/references/superagent.md) |
 
 ## 仓库里的几个名字
 
