@@ -42,4 +42,4 @@ The Host plugin can run under an operator-enabled `workspaceAutonomy` policy. It
 
 The Host's HTTP contract for this flow, its error codes and its startup gate are in [Desktop commands](references/desktop.md#task-scoped-autonomy), plus `docs/host-api.md` and `docs/windows-delivery.md` (section "工作区自主") in the bridge repository.
 
-**ZCode mirror.** `skills/zcode/**` now carries the ZCode copy of this skill (merged from `feat/zcode-skills`, PR14), but this change did **not** touch it: the mirror still describes the pre-autonomy flow and none of the commands above. Mirror the same semantics there in a separate change; do not edit it from this lane.
+**ZCode mirror.** `skills/zcode/**` now carries the ZCode copy of this skill (merged from `feat/zcode-skills`, PR14), but this change did **not** touch it: the mirror still has only the pre-autonomy form of the workspace commands (no `task_id`/`purpose`, no `revoke-workspace`). Mirror the same semantics there in a separate change; do not edit it from this lane.

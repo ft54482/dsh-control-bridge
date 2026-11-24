@@ -27,7 +27,7 @@
 
 | 态 | 范围 | 证据 | 结论 |
 | --- | --- | --- | --- |
-| **implemented**（已实现） | 任务范围登记/复用工作区与写授权、按任务归属与 `confirm_task` 接管、忙会话不抢占、`revoke-workspace` 只撤授权、幂等键按 operation 绑定、撤销/降权后 `authorization_stale`、空授权首启门禁、helper 的 health 门禁与回执校验、17 固定键操作记录 | `plugins/dsh-control-bridge-host/test/autonomy-cases.js`、`test/startup-cases.js`（含子进程真监听的 `startup-probe.js`，两者由 `test/create.test.js` 导入）、`tests/test_desktop_skill.py`；CI 原样 8 文件命令 169 通过，`python -m pytest tests -q` 145 通过 4 跳过，`python examples/e2e_fake.py` ok（2026-11-25 本机复跑，只跑不改） | 代码与夹具层已实现 |
+| **implemented**（已实现） | 任务范围登记/复用工作区与写授权、按任务归属与 `confirm_task` 接管、忙会话不抢占、`revoke-workspace` 只撤授权、幂等键按 operation 绑定、撤销/降权后 `authorization_stale`、空授权首启门禁、helper 的 health 门禁与回执校验、17 固定键操作记录 | `plugins/dsh-control-bridge-host/test/autonomy-cases.js`、`test/startup-cases.js`（含子进程真监听的 `startup-probe.js`，两者由 `test/create.test.js` 导入）、`tests/test_desktop_skill.py`；CI 原样 8 文件命令 169 通过；pytest **本机 155 passed / 4 skipped**（含合并进来的 PR14 `tests/test_zcode_skills.py` 10 条），**PR17 远端 CI 记录 153 passed / 6 skipped**（Linux 环境多 2 条 skip，环境差异不是缺陷）；合并 main 之前是 145 / 4，只作历史时点；`python examples/e2e_fake.py` ok（2026-11-25 本机复跑，只跑不改） | 代码与夹具层已实现 |
 | **mock**（隔离/夹具） | 上述全部行为都在进程内假服务上验证：官方 `workspaceRegistry` / `sessionController` / `sessionQuery` 是夹具形状；`startup-cases.js` 的子进程会在空闲端口上真监听并真发 `GET /v1/health`，但它连的仍是夹具 Host，不是 Desktop | 同上测试文件 | 夹具通过本身不等于真机通过，但下面的 isolated live 另算一条 |
 | **live**（真机） | 装进隔离 Host 的真实 0.2.2-rc.5 运行时（profile `ws-autonomy-lab`）：真建工作区、真建会话、真派合成提示、真撤销 | **isolated live PASS (0.2.2-rc.5), 2026-11-25**；证据见任务目录 `.agent/master-control/tasks/bridge-workspace-autonomy-20261125/lab/report.md` 与 `A-*`/`B-*`/`C*`/`D-*`（主控侧记录，不在本仓库内） | **通过的是隔离 Host 验收**，不是生产 Desktop 验收，也不是发布验收 |
 
