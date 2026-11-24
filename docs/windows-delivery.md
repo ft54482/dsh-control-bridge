@@ -46,6 +46,8 @@ python $client --help
 
 ### 安装 Host 并完成首次配对
 
+这一节的每一步都在给桥放行，要由你本人决定。让 Agent 代为安装时，先看[权限与授权](permissions.md)。
+
 1. 已经配对的用户可直接做下方连接检查。首次安装或升级需要与所需能力匹配的 Host 包和同一版本的 SHA-256 校验值。若从公开源码构建，先准备 Node.js、pnpm 和 Python，在仓库根目录运行以下命令。它们在 `dist` 下生成并逐文件核验安装包、清单与 `.sha256` 文件。
 
    ```powershell
@@ -56,7 +58,7 @@ python $client --help
    ```
 
 2. 将便携源码 ZIP 解压到一个私有目录，进入其中包含 `scripts/windows` 的文件夹，后续安装和配对脚本在此运行。把同版本 Host TGZ 和校验清单保留在便于引用的位置。等待运行中的任务结束，从 Harness 托盘选择 **Quit DeepSeek Harness**。按下方[安装、升级和回滚](#host-install)命令安装刚核验的包，首次选择 `Install`，已有 Host 则选择 `Upgrade`。
-3. 首次安装时运行 `.\scripts\windows\Prepare-DesktopHost.ps1 -Package <包路径>`。备份 Desktop profile 的 `cordis.patch.yml`，把生成的 `desktop-host-local/cordis-snippet.yml` 应用到其中的 Host 配置项。保管该目录下的配对与凭据文件。若要允许新建会话，启用 `allowCreateSession: true`。使用已配对的工作区 ID。若该工作区位于 `workspaceRoots` 外，将其确切 ID 加入 `presetSessionWorkspaceIds`。创建可派工的会话还需要该工作区已有可写会话授权。[Host 配置示例](host-api.md)
+3. 首次安装时运行 `.\scripts\windows\Prepare-DesktopHost.ps1 -Package <包路径>`。备份 Desktop profile 的 `cordis.patch.yml`，把生成的 `desktop-host-local/cordis-snippet.yml` 应用到其中的 Host 配置项。保管该目录下的配对与凭据文件。若要允许新建会话，启用 `allowCreateSession: true`。使用已配对的工作区 ID。若该工作区位于 `workspaceRoots` 外，将其确切 ID 加入 `presetSessionWorkspaceIds`。这一步是在扩大 Host 的创建范围，确认是你本人的决定；文件一改，Desktop 会自动重启。创建可派工的会话还需要该工作区已有可写会话授权。[Host 配置示例](host-api.md)
 4. 重新打开 Harness Desktop，在已登记的工作区准备一条可供配对的空闲会话。运行 `.\scripts\windows\Pair-DesktopHost.ps1` 查看编号，再加 `-Index <编号>` 授予读取权限。要续接并发送任务，配对时用 `-Index <编号> -Access write` 选择空闲会话。配对窗口过期时运行 `.\scripts\windows\Rearm-DesktopHostBootstrap.ps1` 重新开启。
 
 ### 检查 Codex 连接

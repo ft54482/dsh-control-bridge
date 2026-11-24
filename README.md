@@ -13,6 +13,9 @@
 
 **ZCode 版技能已经做好（2026-11-25）。** 安装步骤和完成情况见下方「ZCode 快速开始」。
 
+> [!IMPORTANT]
+> **安装前先读：[权限与授权](docs/permissions.md)。** 这套桥刚装好时什么都不能做，配对、放开新建会话、把你的工作区加进 Host 的名单，每一步都要你本人同意。代为安装的 Agent 不该自作主张去改这些；改 Host 配置还会让 Harness Desktop 自动重启。自己装，或者让 Agent 代装，都请先看那一页。
+
 ## 选一个入口
 
 | 你的环境和目的 | 安装或运行什么 | 第一次验证 |
@@ -30,7 +33,7 @@
 ## Codex 桌面端快速开始
 
 1. **装 skill。** 将独立技能 ZIP 解压到个人 `~/.agents/skills/`。已配对的用户可以复用原 Host 和授权。首次安装还需下载兼容的 v0.2.2 Host TGZ，以及提供 Windows 安装脚本的便携源码 ZIP（已有源码检出也可）。[Skill ZIP](https://github.com/ft54482/dsh-control-bridge/releases/download/skill-v0.2.3/deepseek-harness-bridge-0.2.3-skill.zip) · [Host、便携包和 SHA-256](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2)
-2. **装 Host 并配对。** 使用 Python 3.11+。按 Windows 手册把 Host 装入实际使用的 desktop profile，在目标工作区选择一条空闲会话，并把长期凭据文件的路径配置给 skill。只查历史可选 `read`，要派工则选 `write`。[安装与配对](docs/windows-delivery.md#codex-desktop-setup)
+2. **装 Host 并配对。** 使用 Python 3.11+。按 Windows 手册把 Host 装入实际使用的 desktop profile，在目标工作区选择一条空闲会话，并把长期凭据文件的路径配置给 skill。只查历史可选 `read`，要派工则选 `write`。[安装与配对](docs/windows-delivery.md#codex-desktop-setup) 配对是你本人在给桥授权，见[权限与授权](docs/permissions.md)。
 3. **先查连接。** 在 Codex 输入「用 `$deepseek-harness-bridge` 检查本机连接，列出已授权会话」。要新建主控会话，再确认同一 profile 已装 `master-control` 预设、Host 已开启会话创建，且 `health` 返回 `preset_create_verified=true`。自定义端口请一并告诉 Codex。[非默认端口示例](docs/ports.md#desktop-host)
 4. **按任务选择会话。** 可以说「找到上次修导出的会话，继续处理失败用例」，也可以说「在同一工作区开一个新的主控会话，处理这项独立任务」。创建成功后，skill 从实际会话读回预设，再派工并按请求 ID 跟踪官方终态。[会话命令与验收字段](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
 
@@ -38,7 +41,7 @@
 
 **状态：已完成（2026-11-25）。** SuperAgent 派工和 Desktop 主控会话都在一台运行两个实例的 Windows 电脑上真机跑通：SuperAgent 的首次派工和在同一张工单上追加任务都以 `completed` 结束；Desktop 这条路新建会话、发送提示词、取回「官方完成」，一次往返不到半分钟。仓库没有被改动。还没有实测的是新开 Issue 的派工路径。完整清单见 [Windows 真机验收](docs/verified-scope.md)。
 
-1. **前提。** Python 3.11+；Harness Desktop 里已装 Host 插件并完成配对，做法与 Codex 路径相同。要派 SuperAgent 工单，还需要已部署的 SuperAgent 和已登录的 GitHub CLI。要在某个工作区里新建会话，这个工作区还得在 Host 的创建范围里，否则会得到 `403 outside_allowed_roots`。
+1. **前提。** Python 3.11+；Harness Desktop 里已装 Host 插件并完成配对，做法与 Codex 路径相同。要派 SuperAgent 工单，还需要已部署的 SuperAgent 和已登录的 GitHub CLI。要在某个工作区里新建会话，这个工作区还得在 Host 的创建范围里，否则会得到 `403 outside_allowed_roots`。这几项授权都由你本人决定，见[权限与授权](docs/permissions.md)。
 2. **装日常派工技能。** 把 `skills/zcode/deepseek-harness-bridge/` 整个目录拷进 `~/.zcode/skills/`，把其中的 `connection.example.json` 复制成 `connection.json`，按自己的电脑填写路径、端口和 SuperAgent 实例对照。这个文件只有路径和端口，凭据本身仍由 Host 保管。
 3. **装控制面技能（可选）。** 先把本仓库克隆到技能目录之外，再把 `skills/zcode/dsh-control-bridge/` 拷进 `~/.zcode/skills/`，把 `local.example.json` 复制成 `local.json` 并填上检出的路径。
 4. **验证并开始用。** 新开一个 ZCode 会话，运行 `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`，再运行该技能 `tests/` 下的三个行为测试，全部通过为准。之后可以说「用 SuperAgent 把某某任务派出去」，或者「找到上次做某某事的会话，接着做」。
@@ -72,4 +75,4 @@ dsh-bridge --config examples/config.example.toml check
 
 Use the Codex skill with a paired local Desktop Host for interactive sessions. Use the Python coordinator for multi-instance task records, approvals and signed events. Its CLI and MCP entry points share the same configuration and data store. The SuperAgent helper reads the management API of a separately configured profile. [Documentation index](docs/README.md)
 
-[开发与贡献](CONTRIBUTING.md) · [安全说明](SECURITY.md) · [MIT 许可证](LICENSE)
+[开发与贡献](CONTRIBUTING.md) · [安全说明](SECURITY.md) · [权限与授权](docs/permissions.md) · [MIT 许可证](LICENSE)

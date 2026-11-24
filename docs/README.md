@@ -2,12 +2,13 @@
 
 项目介绍与快速开始提供 [简体中文](../README.md)、[English](../README.en.md)、[Français](../README.fr.md)、[日本語](../README.ja.md)、[한국어](../README.ko.md) 和 [Deutsch](../README.de.md) 版本。以下详细手册主要使用中文，命令和协议字段保持原文。
 
-首次使用从下面选与自己环境相符的一行。已有安装需要迁移或排查连接时，先核对目标服务、profile 和端口。[项目首页](../README.md) · [端口配置与排错](ports.md)
+第一次安装先看[权限与授权](permissions.md)，再从下面选与自己环境相符的一行。已有安装需要迁移或排查连接时，先核对目标服务、profile 和端口。[项目首页](../README.md) · [端口配置与排错](ports.md)
 
 ## 安装与操作
 
 | 我想做什么 | 从这里开始 | 按需查阅 |
 | --- | --- | --- |
+| 第一次安装，或者让 Agent 代为安装 | [权限与授权：安装前先读](permissions.md) | [安全说明](../SECURITY.md) · [Windows 真机验收](verified-scope.md) |
 | 在 Codex 操作同机 Harness Desktop | [Windows 安装、配对与连接检查](windows-delivery.md#codex-desktop-setup) | [独立 skill](../skills/deepseek-harness-bridge/SKILL.md) · [会话命令](../skills/deepseek-harness-bridge/references/desktop.md) |
 | 在 ZCode 操作同机 Harness Desktop，或派发 SuperAgent 工单 | [ZCode 技能：安装与完成情况](../skills/zcode/README.md) | [日常派工技能](../skills/zcode/deepseek-harness-bridge/SKILL.md) · [控制面技能](../skills/zcode/dsh-control-bridge/SKILL.md) |
 | 在 Desktop 查看主控任务和工单执行器 | [驾驶舱安装与数据说明](../plugins/dsh-superagent-cockpit/README.md) | [可安装插件下载](https://github.com/ft54482/dsh-control-bridge/releases/tag/cockpit-v0.1.3) |

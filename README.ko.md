@@ -12,6 +12,9 @@ Codex, Grok Bot 또는 직접 만든 조정 프로그램에서 지정한 DeepSee
 
 **ZCode용 skill은 완성되었습니다(2026-11-25).** 설치 방법과 검증된 범위는 아래 “ZCode 빠른 시작”을 참고하세요.
 
+> [!IMPORTANT]
+> **설치 전에 읽기: [권한과 승인](docs/permissions.md)(중국어).** 갓 설치한 이 브리지는 아무것도 할 수 없습니다. 페어링, 세션 만들기 허용, Host 목록에 작업 공간 추가는 각각 본인의 동의가 필요합니다. 대신 설치하는 Agent가 임의로 변경해서는 안 되며, Host 설정을 수정하면 Harness Desktop이 다시 시작됩니다. 직접 설치하든 Agent에 맡기든 먼저 이 페이지를 읽으세요.
+
 ## 사용 경로 선택
 
 | 환경과 목적 | 설치하거나 실행할 항목 | 첫 확인 |
@@ -29,7 +32,7 @@ Codex, Grok Bot 또는 직접 만든 조정 프로그램에서 지정한 DeepSee
 ## Codex 데스크톱 빠른 시작
 
 1. **skill 설치.** 독립 skill ZIP을 개인 `~/.agents/skills/`에 압축 해제합니다. 이미 페어링했다면 기존 Host와 권한을 재사용할 수 있습니다. 처음 설치할 때는 호환되는 v0.2.2 Host TGZ와 Windows 설치 스크립트를 포함한 휴대용 소스 ZIP도 내려받으세요. 이미 체크아웃한 소스도 사용할 수 있습니다.[Skill ZIP](https://github.com/ft54482/dsh-control-bridge/releases/download/skill-v0.2.3/deepseek-harness-bridge-0.2.3-skill.zip) · [Host, 휴대용 패키지 및 SHA-256](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2)
-2. **Host 설치 및 페어링.** Python 3.11+가 필요합니다. Windows 안내에 따라 실제 사용하는 desktop profile에 Host를 설치하고 대상 작업 공간에서 사용 중이지 않은 대화를 고른 뒤, 장기 인증 정보 파일의 경로를 skill에 설정합니다. 기록 조회에는 `read`, 작업 전송에는 `write`를 선택하세요.[설치 및 페어링](docs/windows-delivery.md#codex-desktop-setup)
+2. **Host 설치 및 페어링.** Python 3.11+가 필요합니다. Windows 안내에 따라 실제 사용하는 desktop profile에 Host를 설치하고 대상 작업 공간에서 사용 중이지 않은 대화를 고른 뒤, 장기 인증 정보 파일의 경로를 skill에 설정합니다. 기록 조회에는 `read`, 작업 전송에는 `write`를 선택하세요. 페어링은 본인이 직접 주는 권한입니다.[권한과 승인](docs/permissions.md)(중국어)을 참고하세요.[설치 및 페어링](docs/windows-delivery.md#codex-desktop-setup)
 3. **연결 확인.** Codex에 “`$deepseek-harness-bridge`로 로컬 연결을 확인하고 허용된 대화를 나열해 줘”라고 입력합니다. 주 제어 대화를 새로 만들려면 같은 profile에 `master-control` 프리셋이 설치되어 있고 Host의 대화 생성이 활성화되어 있으며 `health`가 `preset_create_verified=true`를 반환하는지 확인하세요. 사용자 지정 포트도 Codex에 알려 주세요.[기본값과 다른 포트 예시](docs/ports.md#desktop-host)
 4. **작업에 맞게 대화 선택.** “지난번 내보내기 수정 대화를 찾아 실패한 사례를 계속 처리해 줘” 또는 “같은 작업 공간에 새 주 제어 대화를 만들고 이 독립 작업을 처리해 줘”라고 요청할 수 있습니다. 생성에 성공하면 skill이 실제 대화에서 프리셋을 다시 읽어 확인하고 작업을 보낸 뒤, 요청 ID로 공식 종료 상태를 추적합니다.[대화 명령 및 검증 필드](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
 
@@ -37,7 +40,7 @@ Codex, Grok Bot 또는 직접 만든 조정 프로그램에서 지정한 DeepSee
 
 **상태: 완료(2026-11-25).** SuperAgent 티켓 전송과 데스크톱 주 제어 대화 모두 인스턴스 두 개를 실행하는 Windows 컴퓨터에서 실제 환경으로 검증했습니다. SuperAgent에서는 첫 티켓과 같은 티켓에 추가한 작업이 모두 `completed`로 끝났고, Desktop에서는 새 대화를 만들고 프롬프트를 보낸 뒤 30 초 안에 `completed`를 받았습니다. 저장소는 변경되지 않았습니다. 아직 검증하지 않은 항목은 새 Issue로 보내는 경로입니다. 전체 목록은 [Windows 실제 환경 검증](docs/verified-scope.md)을 참고하세요.
 
-1. **전제 조건.** Python 3.11 이상. Codex 경로와 같은 방법으로 Harness Desktop에 Host 플러그인을 설치하고 페어링을 마칩니다. SuperAgent 티켓을 보내려면 배포된 SuperAgent와 로그인된 GitHub CLI도 필요합니다. 작업 공간에서 대화를 만들려면 그 작업 공간이 Host의 생성 범위에 포함되어야 하며, 그렇지 않으면 `403 outside_allowed_roots`가 반환됩니다.
+1. **전제 조건.** Python 3.11 이상. Codex 경로와 같은 방법으로 Harness Desktop에 Host 플러그인을 설치하고 페어링을 마칩니다. SuperAgent 티켓을 보내려면 배포된 SuperAgent와 로그인된 GitHub CLI도 필요합니다. 작업 공간에서 대화를 만들려면 그 작업 공간이 Host의 생성 범위에 포함되어야 하며, 그렇지 않으면 `403 outside_allowed_roots`가 반환됩니다. 이 권한들은 본인이 직접 주어야 합니다.[권한과 승인](docs/permissions.md)(중국어)을 참고하세요.
 2. **전송용 skill 설치.** `skills/zcode/deepseek-harness-bridge/`를 `~/.zcode/skills/`에 복사하고, 그 안의 `connection.example.json`을 `connection.json`으로 복제한 뒤 자신의 컴퓨터 경로, 포트, SuperAgent 인스턴스 대응을 적습니다. 이 파일에는 경로와 포트만 적고 인증 정보 자체는 Host가 관리합니다.
 3. **조정 브리지용 skill 설치(선택).** 이 저장소를 skill 디렉터리 밖에 복제한 뒤 `skills/zcode/dsh-control-bridge/`를 `~/.zcode/skills/`에 복사하고, `local.example.json`을 `local.json`으로 복제하여 복제한 경로를 적습니다.
 4. **확인 후 사용.** 새 ZCode 세션을 엽니다. `python ~/.zcode/skills/deepseek-harness-bridge/scripts/desktop.py health`를 실행한 뒤 skill의 `tests/` 디렉터리에 있는 세 개의 동작 테스트를 실행합니다. 모두 통과해야 합니다. 이후 “이 작업을 SuperAgent에 보내 줘” 또는 “지난번에 이 작업을 한 대화를 찾아 이어 가 줘”라고 요청할 수 있습니다.
@@ -67,4 +70,4 @@ dsh-bridge --config examples/config.example.toml check
 
 예시에서는 `local-desktop`과 `lab-server` 모두에 `broadcast-cs` 작업 공간을 둡니다. 작업을 보낼 때는 인스턴스와 작업 공간을 함께 지정합니다. 작업 기록은 일반 대화 `ordinary_session`과 장기 작업 `superagent`를 구분하며 기본값은 `draft`입니다. 전송하려면 운영자가 제공한 `mandate`가 필요합니다. fake가 생성하는 ticket/run은 시연용입니다. 실제 Assignment는 해당 SuperAgent 관리 서비스에서 추적합니다.[조정 브리지 명령 및 승인](docs/coordinator.md) · [어댑터 기능](docs/adapters.md)
 
-[개발 및 기여](CONTRIBUTING.md) · [보안 안내](SECURITY.md) · [MIT 라이선스](LICENSE)
+[개발 및 기여](CONTRIBUTING.md) · [보안 안내](SECURITY.md) · [권한과 승인](docs/permissions.md)(중국어) · [MIT 라이선스](LICENSE)
