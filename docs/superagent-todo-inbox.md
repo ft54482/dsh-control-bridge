@@ -44,12 +44,16 @@ python skills/deepseek-harness-bridge/scripts/superagent.py --port $port inbox -
 | `ended` | 票已终态（`ended.outcome`） | 读终态原因，不再当待办 |
 | `unknown` | 不满足以上任何一条（含只拿到列表行、详情读失败） | 人工看 `detail` |
 
+`triage` 一共 **7 个取值**：`review_ready`、`review_reported`、`blocked_missing_info`、`retryable_failed`、`running`、`ended`、`unknown`（前五个 + `unknown` 是待办六态，`ended` 是终态）。
+
+判定顺序固定在 `triage_of()` 里：**终态最先**，所以 `ended` 票即使带着 `report.state=failed` 且 `actions.retry=true`，也只会显示 `ended`，**不会显示 `retryable_failed`**——这是有意为之的副作用，避免把已终态的票重新当待办。要看它为什么失败，读 `ended.outcome`、`latest_assignment.report_state` 与 `report_summary`。
+
 `stop` 只表示人为停止；`acceptance.accepted` 只表示接单授权。两者都不产生 `review_ready`。
 
 ## 3. 详情：`detail <ticket_id>`
 
 ```powershell
-python skills/deepseek-harness-bridge/scripts/superagent.py --port $port detail 702127a7db19b3a7f2ca9f3360df1806
+python skills/deepseek-harness-bridge/scripts/superagent.py --port $port detail TICKET_ID
 ```
 
 在 `inbox` 的字段之外补：`summary`（截断到 4000 字符，另给 `summary_truncated`）、`all_assignments`、`threads`、`subscriptions`、`channels`、`decision`、`acceptance`（含 `note: acceptance 不是交付`）、`mandate`、`ended`、`local_reply{plans,latest}`、`next_actions`。
@@ -112,7 +116,7 @@ python $g reply poll --ticket TICKET_ID --port $port --watch --interval 30 --wai
 - 游标落 `~/.codex/state/deepseek-harness-bridge/reply/cursors/<ticket>.json`（原子写、0600），字段：`submitted_comment_id`、`delivered_input_id`、`delivered_at`、`read_at`、`report_at`、`terminal_outcome`、`pull_request_state`。
 - 同一游标重复轮询输出 `changed=false`、`new=[]`，不重复报「新结果」，也不会重复评论。
 - `--resume` 额外回显 `resumed_from`（上次保存的游标），便于跨进程续跑。
-- `--watch`/`--wait` 是**客户端轮询**。事件订阅默认关闭：上游管理 API 的路由表（`src/app/api.ts` 第 12–46 行的 `Api` 接口）里没有事件流或订阅路由，`/orchestrator/api` 只有请求-响应式 GET；证据不足，不启用。
+- `--watch`/`--wait` 是**客户端轮询**。事件订阅默认关闭：上游管理 API 的路由表（`src/app/api.ts` 第 12–46 行的 `Api` 接口）里没有事件流或订阅路由，`/orchestrator/api` 只有请求-响应式路由（含少数 POST 控制操作，如 `sources/:id/labels`、`threads/:key/unsubscribe`、`triggers/:id/requeue`、`decisions/:id/dismiss`、`executor/pause`、`tickets/:id/retry|stop`）；没有可订阅的事件来源，证据不足，不启用。
 
 ### 5.1 生命周期对照
 

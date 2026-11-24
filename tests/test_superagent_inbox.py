@@ -77,7 +77,7 @@ def threads(*, issue: int = ISSUE, pull: int | None = 136) -> list[dict]:
 
 def ticket(tid: str, *, state: str = "open", stage: str = "person", action: str = "review",
            assignments: list[dict] | None = None, inputs: list[dict] | None = None,
-           undelivered: int = 0, ended: dict | None = None,
+           undelivered: int = 0, ended: dict | None = None, actions: dict | None = None,
            decision: dict | None = None, threads_rows: list[dict] | None = None,
            updated: str = "2026-01-01T00:05:00Z", title: str = "work item",
            summary: str = "worker report", issue: int = ISSUE) -> dict:
@@ -89,7 +89,7 @@ def ticket(tid: str, *, state: str = "open", stage: str = "person", action: str 
         "state": state,
         "stage": stage,
         "action": action,
-        "actions": {"retry": False, "stop": state != "ended"},
+        "actions": actions if actions is not None else {"retry": False, "stop": state != "ended"},
         "strength": "explicit",
         "assignments": rows,
         "inputs": inputs if inputs is not None else [ticket_input("input-1")],
@@ -353,6 +353,95 @@ def test_latest_assignment_wins_over_a_retried_one_and_is_review_ready(world):
     actions = {row["action"]: row["allowed"] for row in full["next_actions"]}
     assert actions["reply"] is True and actions["stop"] is True and actions["retry"] is False
     assert full["local_reply"]["plans"] == []
+
+
+# --------------------------------------------------------------------------- #
+# Every triage value is pinned here, not only in an audit probe
+# --------------------------------------------------------------------------- #
+def inbox_item(superagent, ticket_id: str) -> dict:
+    result = superagent("inbox", "--all")
+    assert result.returncode == 0, result.stdout + result.stderr
+    return next(item for item in payload(result)["items"] if item["id"] == ticket_id)
+
+
+def test_triage_review_reported_when_a_ready_report_has_undelivered_inputs(world):
+    data, _, superagent = world
+    data["add"](ticket("reported-1", undelivered=2, inputs=[
+        ticket_input("input-1", delivered=False, delivered_to=None, read_at=None),
+        ticket_input("input-2", delivered=False, delivered_to=None, read_at=None),
+    ]))
+    item = inbox_item(superagent, "reported-1")
+    assert item["triage"] == "review_reported"
+    assert item["latest_assignment"]["report_state"] == "ready"
+    assert item["delivery"]["undelivered"] == 2
+    assert item["delivery"]["pending_inputs"] == 2
+    assert "not delivered" in item["triage_reason"]
+
+
+def test_triage_retryable_failed_needs_a_failed_report_and_retry(world):
+    data, _, superagent = world
+    data["add"](ticket("failed-1", actions={"retry": True, "stop": True}, inputs=[], assignments=[
+        assignment("assignment-1", state="ended", report_state="failed",
+                   summary="two acceptance cases still fail", ended="2026-01-01T00:10:00Z")]))
+    item = inbox_item(superagent, "failed-1")
+    assert item["triage"] == "retryable_failed"
+    assert item["latest_assignment"]["state_effective"] == "ended"
+    assert item["latest_assignment"]["report_state"] == "failed"
+    assert item["actions"]["retry"] is True
+    assert "actions.retry is true" in item["triage_reason"]
+
+
+def test_triage_running_only_while_the_turn_is_open(world):
+    data, _, superagent = world
+    data["add"](ticket("running-1", inputs=[], assignments=[
+        assignment("assignment-1", state="running", report_state="progress",
+                   report_at="2026-01-01T00:04:00Z")]))
+    item = inbox_item(superagent, "running-1")
+    assert item["triage"] == "running"
+    assert item["latest_assignment"]["state_effective"] == "running"
+    assert item["latest_assignment"]["stale_running_ignored"] is False
+
+
+def test_triage_blocked_missing_info_when_no_report_exists(world):
+    data, _, superagent = world
+    data["add"](ticket("missing-1", inputs=[], assignments=[
+        assignment("assignment-1", state="ended", report_state=None,
+                   ended="2026-01-01T00:10:00Z")]))
+    item = inbox_item(superagent, "missing-1")
+    assert item["triage"] == "blocked_missing_info"
+    assert item["latest_assignment"]["report_state"] is None
+    assert item["report_summary"] is None
+    assert "no worker report" in item["triage_reason"]
+
+
+def test_triage_ended_wins_over_retryable_failed(world):
+    data, _, superagent = world
+    data["add"](ticket("ended-1", state="ended", stage="ended", action=None, inputs=[],
+                       actions={"retry": True, "stop": False},
+                       ended={"at": "2026-01-01T00:30:00Z", "by": "executor", "outcome": "completed"},
+                       assignments=[assignment("assignment-1", state="ended", report_state="failed",
+                                              summary="an earlier attempt failed",
+                                              ended="2026-01-01T00:20:00Z")]))
+    # A terminal ticket is not a person ticket, so `detail` is how it is read.
+    assert "ended-1" not in [item["id"] for item in payload(superagent("inbox", "--all"))["items"]]
+    result = superagent("detail", "ended-1")
+    assert result.returncode == 0, result.stdout + result.stderr
+    full = payload(result)
+    assert full["triage"] == "ended"
+    assert full["triage"] != "retryable_failed"
+    assert full["actions"]["retry"] is True
+    assert "completed" in full["triage_reason"]
+
+
+def test_triage_unknown_for_a_failed_report_that_cannot_be_retried(world):
+    data, _, superagent = world
+    data["add"](ticket("odd-1", inputs=[], assignments=[
+        assignment("assignment-1", state="ended", report_state="failed",
+                   ended="2026-01-01T00:10:00Z")]))
+    item = inbox_item(superagent, "odd-1")
+    assert item["triage"] == "unknown"
+    assert item["actions"]["retry"] is False
+    assert "unclassified" in item["triage_reason"]
 
 
 # --------------------------------------------------------------------------- #
