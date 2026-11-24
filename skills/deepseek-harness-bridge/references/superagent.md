@@ -42,7 +42,7 @@ python $source trace --plan $plan --wait 300
 
 ## 待办、原线程答复与本地裁决
 
-完整说明见 [SuperAgent 待办：分流、答复与裁决](../../../docs/superagent-todo-inbox.md)。只读边界：`superagent.py` 只发 GET；答复只向来源 Issue 发一次评论；裁决只写本地文件。
+完整说明见 [SuperAgent 待办：分流、答复与裁决](https://github.com/ft54482/dsh-control-bridge/blob/main/docs/superagent-todo-inbox.md)。只读边界：`superagent.py` 只发 GET；答复只向来源 Issue 发一次评论；裁决只写本地文件。
 
 ```powershell
 $port = 3082                                # 该 profile 的管理端口
