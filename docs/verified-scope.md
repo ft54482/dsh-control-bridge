@@ -2,6 +2,10 @@
 
 本文记录 Windows Desktop 上的匿名验收和隔离测试。会话标识、路径、业务名称及凭据保存在本机。
 
+## Codex 技能 0.2.3 · GitHub Source 派工
+
+一次获授权的合成 Issue 触发了目标实例接单。实测观察到排队、一个执行槽被占用、worker 交回报告，随后同一张 Ticket 以 `completed` 结束。技能用同一份计划从 Issue 查回了对应的 Assignment 和 worker 会话。GitHub 的第一条机器人评论是接单回执，完成时间取自引擎记录。验证覆盖这台实例的新 Issue 路径；其他实例的 Source 配置须分别核对。[派工和追踪](../skills/deepseek-harness-bridge/references/superagent.md#github-source)
+
 ## 0.2.2 在已授权 Desktop 工作区的主控会话
 
 Windows 上的 Desktop profile 从 Host 0.2.0 升级到 0.2.2 后，Codex 全程通过已安装的 `deepseek-harness-bridge` 验收。工作区和会话的既有授权均已核对。
@@ -70,7 +74,7 @@ Windows 上的 Desktop profile 从 Host 0.2.0 升级到 0.2.2 后，Codex 全程
 - 操作者同时在界面里改模型
 - 对运行中自有回合执行取消，以及超时后的完整生命周期
 - 跨工作区、多实例的实际工程闭环
-- 新 SuperAgent Assignment 与出站通知，见 [0.2.0 交付记录](history/release-0.2.0.md)。
+- 通用出站通知仍待验证。早期版本的验收范围见 [0.2.0 交付记录](history/release-0.2.0.md)。
 
 仓库里的 Node 和 Python 测试是模拟。模拟通过不等于上面这台 Desktop 已经复测了新提交。
 

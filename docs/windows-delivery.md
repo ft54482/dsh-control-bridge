@@ -14,11 +14,11 @@
 
 个人安装可用于多个项目，目标为 `~/.agents/skills/deepseek-harness-bridge`。只在一个仓库使用时，可将目标改为该仓库内的 `.agents/skills/deepseek-harness-bridge`。已有自定义技能目录的用户可在 Codex 的技能列表核对实际加载位置，更新同一份安装。[OpenAI 技能目录说明](https://developers.openai.com/codex/skills/)
 
-下载 [v0.2.2 独立技能包](https://github.com/ft54482/dsh-control-bridge/releases/download/v0.2.2/deepseek-harness-bridge-0.2.2-skill.zip)，在下载目录运行。压缩包已有顶层技能文件夹，直接解压到 `skills` 目录即可。
+下载 [v0.2.3 独立技能包](https://github.com/ft54482/dsh-control-bridge/releases/download/skill-v0.2.3/deepseek-harness-bridge-0.2.3-skill.zip)，在下载目录运行。压缩包已有顶层技能文件夹，直接解压到 `skills` 目录即可。
 
 ```powershell
 $skillRoot = Join-Path $HOME '.agents/skills'
-Expand-Archive -LiteralPath './deepseek-harness-bridge-0.2.2-skill.zip' -DestinationPath $skillRoot -Force
+Expand-Archive -LiteralPath './deepseek-harness-bridge-0.2.3-skill.zip' -DestinationPath $skillRoot -Force
 $skill = Join-Path $skillRoot 'deepseek-harness-bridge'
 $client = Join-Path $skill 'scripts/desktop.py'
 python $client --help

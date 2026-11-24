@@ -24,7 +24,7 @@ def test_skill_archive_is_installable_and_omits_local_pairing_files(tmp_path):
     builder = runpy.run_path(str(root / "scripts" / "build_release.py"))
     skill_dir = tmp_path / "installed"
     public = ("SKILL.md", "references/desktop.md", "references/superagent.md",
-              "scripts/desktop.py", "scripts/superagent.py")
+              "scripts/desktop.py", "scripts/superagent.py", "scripts/github_source.py")
     for relative in (*public, "connection.json", "private-notes.md", "scripts/__pycache__/cache.pyc"):
         path = skill_dir / relative
         path.parent.mkdir(parents=True, exist_ok=True)

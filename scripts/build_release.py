@@ -35,9 +35,10 @@ SKIP_NAMES = {"bridge.secret", "host.secret", "bootstrap.secret", ".credentials.
 PACKAGE_TOP = ["README.md", "LICENSE", "pyproject.toml", "Makefile", "CONTRIBUTING.md", "SECURITY.md"]
 PACKAGE_DIRS = ["src", "scripts", "examples", "docs", "plugins", "skills", "tests"]
 SKILL_NAME = "deepseek-harness-bridge"
+SKILL_VERSION = "0.2.3"
 # Explicit public payload. An installed copy may also hold local pairing files.
 SKILL_FILES = ("SKILL.md", "references/desktop.md", "references/superagent.md",
-               "scripts/desktop.py", "scripts/superagent.py")
+               "scripts/desktop.py", "scripts/superagent.py", "scripts/github_source.py")
 
 
 def plugin_version() -> str:
@@ -197,7 +198,7 @@ def main(argv: list[str] | None = None) -> int:
         print("\n".join(report[1:]))
         return 1
 
-    skill_zip = build_skill_zip(args.dist, version, ROOT / "skills" / SKILL_NAME)
+    skill_zip = build_skill_zip(args.dist, SKILL_VERSION, ROOT / "skills" / SKILL_NAME)
     names.append(skill_zip.name)
     print(f"skill: {skill_zip.name} -> {len(SKILL_FILES)} entries compared")
 
