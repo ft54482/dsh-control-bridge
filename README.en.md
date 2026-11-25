@@ -8,9 +8,9 @@ Project introductions and quick starts are available in six languages through th
 
 Let Codex, Grok Bot or your own coordinator assign work to a specific DeepSeek Harness workspace and track the results. **Already using Codex and Harness Desktop on the same computer? Start with the Codex skill and Desktop Host.** This path connects to the local Host and lets you operate it through natural-language requests in Codex after setup.
 
-[Super Agent Cockpit](plugins/dsh-superagent-cockpit/README.md) · [Codex skill v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [ZCode skills](skills/zcode/README.md) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [Documentation index](docs/README.md) · [Ports and troubleshooting](docs/ports.md) · [Windows live acceptance](docs/verified-scope.md)
+[Super Agent Cockpit](plugins/dsh-superagent-cockpit/README.md) · [Codex skill v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [Antigravity skills](skills/antigravity/README.md) · [ZCode skills](skills/zcode/README.md) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [Documentation index](docs/README.md) · [Ports and troubleshooting](docs/ports.md) · [Windows live acceptance](docs/verified-scope.md)
 
-**The ZCode skills are finished (2026-11-25).** See the ZCode quick start below for installation and for what has been verified.
+**The Antigravity and ZCode skills are ready.** See the corresponding quick starts below for installation and verified scope.
 
 > [!IMPORTANT]
 > **Read this before installing: [Permissions and authorization](docs/permissions.md) (in Chinese).** Freshly installed, this bridge can do nothing. Pairing, enabling session creation and adding your workspace to the Host's list each need your own consent. An Agent installing it on your behalf must not make these changes on its own, and editing the Host configuration restarts Harness Desktop. Read that page whether you install it yourself or let an Agent do it.
@@ -20,6 +20,7 @@ Let Codex, Grok Bot or your own coordinator assign work to a specific DeepSeek H
 | Your environment and goal | What to install or run | First check |
 | --- | --- | --- |
 | Use Codex Desktop to continue earlier work or open a master-control session for a new task | Install the **skill** in Codex and the **Host plugin** in the Harness desktop profile | Run `health` and `granted` through the skill. [Setup and pairing](docs/windows-delivery.md#codex-desktop-setup) |
+| Use Antigravity for Desktop sessions, workspace autonomy, SuperAgent inbox/dispatch, or the coordinator CLI | Copy the two **Antigravity skill** directories into `~/.gemini/config/skills/` (synced with `main`) | Run `desktop.py health` and its `tests/` suite. [Antigravity quick start](skills/antigravity/README.md) |
 | Use ZCode to continue a Desktop session, open a master-control session, or dispatch SuperAgent tickets | Copy the two **ZCode skill** directories into `~/.zcode/skills/`; the Host plugin is the same as on the Codex path | Run `desktop.py health` from the skill, then its three behaviour tests. [ZCode quick start](skills/zcode/README.md) |
 | Use your own bot or script for multiple instances, an inbox, task approvals and auditing | Install the Python **coordinator** and operate it through the `dsh-bridge` CLI. Start `serve` when you need to receive signed HTTP events | Complete the draft, send and submission flow with fake first. [Coordinator guide](docs/coordinator.md) |
 | Use an existing tool client to read the inbox or draft tasks through MCP | Have the client launch the same Python coordinator's `mcp` subcommand. v0.2.2 uses `Content-Length` message framing, which the client must support | Call `tools/list` with a compatible client. Clients that only support newline-delimited JSON can use the CLI first. [MCP configuration and tools](docs/coordinator.md) |
@@ -35,6 +36,12 @@ See [components and runtime locations](docs/README.md#仓库里的几个名字) 
 2. **Install the Host and pair.** Use Python 3.11+. Follow the Windows guide to install the Host into the desktop profile you actually use, choose an idle session in the target workspace, and configure the skill with the path to the long-lived credential file. Choose `read` for history access or `write` for dispatch. [Setup and pairing](docs/windows-delivery.md#codex-desktop-setup) Pairing is a grant you give yourself; see [Permissions and authorization](docs/permissions.md) (in Chinese).
 3. **Check the connection.** Ask Codex to “use `$deepseek-harness-bridge` to check the local connection and list authorized sessions.” To create master-control sessions, also confirm that the same profile has the `master-control` preset installed, the Host allows session creation, and `health` returns `preset_create_verified=true`. Tell Codex about any custom port. [Non-default port example](docs/ports.md#desktop-host)
 4. **Choose the session for the task.** Ask to “find the earlier export-fix session and continue the failing cases,” or “open a new master-control session in the same workspace for this independent task.” After creation, the skill reads back the preset from the actual session, dispatches the task and tracks the official terminal state by request ID. [Session commands and acceptance fields](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
+
+## Antigravity quick start
+
+1. **Install the dispatch skill.** Copy `skills/antigravity/deepseek-harness-bridge/` into `~/.gemini/config/skills/` (or workspace `.agent/skills/`), copy `connection.example.json` to `connection.json`, and fill in local paths, ports, and SuperAgent instances.
+2. **Install the coordinator skill (optional).** Clone this repository outside every skills directory, copy `skills/antigravity/dsh-control-bridge/` into `~/.gemini/config/skills/`, and copy `local.example.json` to `local.json` with the checkout path.
+3. **Verify.** Start a new Antigravity session and run `desktop.py health` and the skill's `tests/` suite ([details](skills/antigravity/README.md)).
 
 ## ZCode quick start
 
