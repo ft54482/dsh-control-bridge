@@ -58,7 +58,7 @@ python $client --help
    ```
 
 2. 将便携源码 ZIP 解压到一个私有目录，进入其中包含 `scripts/windows` 的文件夹，后续安装和配对脚本在此运行。把同版本 Host TGZ 和校验清单保留在便于引用的位置。等待运行中的任务结束，从 Harness 托盘选择 **Quit DeepSeek Harness**。按下方[安装、升级和回滚](#host-install)命令安装刚核验的包，首次选择 `Install`，已有 Host 则选择 `Upgrade`。
-3. 首次安装时运行 `.\scripts\windows\Prepare-DesktopHost.ps1 -Package <包路径>`。备份 Desktop profile 的 `cordis.patch.yml`，把生成的 `desktop-host-local/cordis-snippet.yml` 应用到其中的 Host 配置项。保管该目录下的配对与凭据文件。若要允许新建会话，启用 `allowCreateSession: true`。使用已配对的工作区 ID。若该工作区位于 `workspaceRoots` 外，将其确切 ID 加入 `presetSessionWorkspaceIds`。这一步是在扩大 Host 的创建范围，确认是你本人的决定；文件一改，Desktop 会自动重启。创建可派工的会话还需要该工作区已有可写会话授权。[Host 配置示例](host-api.md)
+3. 首次安装时运行 `.\scripts\windows\Prepare-DesktopHost.ps1 -Package <包路径>`。备份 Desktop profile 的 `cordis.patch.yml`，把生成的 `desktop-host-local/cordis-snippet.yml` 应用到其中的 Host 配置项。保管该目录下的配对与凭据文件。若要允许新建会话，启用 `allowCreateSession: true`。使用已配对的工作区 ID。若该工作区位于 `workspaceRoots` 外，将其确切 ID 加入 `presetSessionWorkspaceIds`。这一步是在扩大 Host 的创建范围，确认是你本人的决定；文件一改，Desktop 会自动重启。创建可派工的会话还需要该工作区已有可写会话授权（仅当操作者已开启 `workspaceAutonomy` 且其生效时为例外，见[工作区自主](#workspace-autonomy)）。[Host 配置示例](host-api.md)
 4. 重新打开 Harness Desktop，在已登记的工作区准备一条可供配对的空闲会话。运行 `.\scripts\windows\Pair-DesktopHost.ps1` 查看编号，再加 `-Index <编号>` 授予读取权限。要续接并发送任务，配对时用 `-Index <编号> -Access write` 选择空闲会话。配对窗口过期时运行 `.\scripts\windows\Rearm-DesktopHostBootstrap.ps1` 重新开启。
 
 ### 检查 Codex 连接
@@ -154,6 +154,144 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows\Rearm-DesktopHostBoot
 插件参数见 [Host 插件说明](../plugins/dsh-control-bridge-host/README.md)。
 
 兼容目标是带 0.2.2 session controller 的 Desktop。使用 Desktop 随附的 CLI 可以避免与 PATH 上其他版本混用。Windows Desktop 0.2.2-rc.5 上的历史测试和 0.2.2 主控会话真机结果见 [验收记录](verified-scope.md)。`desktop_install` 在遇到外壳、desktop profile 或归属不明的进程时阻断安装，独立的 SuperAgent profile 可以继续运行。
+
+<a id="workspace-autonomy"></a>
+
+## 工作区自主：安装、启用与回退
+
+`workspaceAutonomy` 是操作者开关，默认关闭。关闭时插件行为与本手册其他章节完全一致；开启后，带 `task_id`+`purpose` 的调用可以把任意绝对目录登记成工作区、取得写授权，并在还没有任何写会话的工作区里建第一个写会话。Host 不检查目录可写性（只做 realpath 归一，必要时建一层），实际能写什么由该账号的文件权限决定。**不要在生产 Desktop 上直接开启。** 先在一个隔离 profile 里按下面步骤验收，确认后再决定是否对生产 profile 打开。
+
+依据与语义见[插件说明](../plugins/dsh-control-bridge-host/README.md#workspace-autonomy-opt-in-per-operator-this-release)与 [Host API](host-api.md#workspace-autonomy-api)。
+
+### 1. 建隔离 profile（不启动服务）
+
+```powershell
+$dsh = Read-Host 'Desktop 自带 dsh.cmd 的完整路径'
+$profile = 'ws-autonomy-lab'
+& $dsh $profile --from-default-profile web --dump-config
+```
+
+`--dump-config` 只生成 profile 并打印组合树后退出，不会挂载或监听；不要照抄成不带该开关的命令，否则会真的起一个 web 服务。隔离 profile 必须用自己的状态目录和端口，不复用 8765 以及 3082/3084/3088 等在用端口。用哪条 CLI 启动，就决定了这个隔离 Host 的 runtime 版本。本机有三条入口，别混用：
+
+| 入口 | 版本 | 用途 |
+| --- | --- | --- |
+| Desktop 自带 CLI（`resources\runtime\cli`） | 0.2.3-alpha.2 | 正式 Desktop 及其 profile |
+| 全局 npm `@deepseek-ai/dsh` | 0.2.1-rc.3 | 3082/3084/3088 三个 web 实例 |
+| 本机隔离安装 `dsh-022` | 0.2.2-rc.5 | 本轮隔离验收用的就是这条 |
+
+文档里四处“0.2.2”的区别见[验收范围](verified-scope.md#version-map)。
+
+```powershell
+& $dsh --version   # 记下这次验收用的 runtime 版本
+```
+
+### 2. 只在这个 profile 里装插件
+
+```powershell
+& $dsh plugin --profile $profile add "link:<仓库路径>/plugins/dsh-control-bridge-host"
+& $dsh plugin --profile $profile add "link:<主控预设包路径>"
+```
+
+用 `link:` 装的是符号链接，仓库再被改动会直接生效；验收前先固定被测提交。`--dump-config` 里能看到 `dsh-control-bridge-host` 与预设两层，才说明装上了。
+
+### 3. 写插件配置行
+
+在 `C:\Users\<你>\.dsh\profiles\<profile>\cordis.patch.yml` 里加：
+
+```yaml
+- id: dsh-control-bridge-host
+  config:
+    bind: 127.0.0.1
+    port: 8766                                  # 空闲端口，不要用 8765
+    secretFile: <状态目录>/host.secret
+    allowlistFile: <状态目录>/allowlist.json
+    workspaceAutonomy: true
+    allowCreateWorkspace: true
+    allowCreateSession: true
+    allowOpenPath: false
+    busyPolicy: refuse                          # 保留键：当前恒为拒绝忙会话，改它不会放开抢占
+    workspaceRoots: [ "D:/ws-lab/roots" ]
+    bootstrapFile: ""                           # 显式写明：没有配对窗口
+    bootstrapSecretFile: ""
+```
+
+`secretFile` 是一个至少 32 字符的长期 bearer（64 位十六进制即可），用你自己的方式生成，写进文件，不进仓库、不进日志。`allowlistFile` 可以先写成合法空授权：
+
+```json
+{"version":1,"workspaceAllowlist":[],"sessionAllowlist":[]}
+```
+
+**不要预灌任何 grant，也不要为了让它起来去布防 bootstrap 窗口。** 空授权只在策略真的生效时才允许监听，这正是本次要验收的那条门禁。
+
+### 4. 启动并读 health
+
+先按[安装 Codex skill](#codex-desktop-setup) 把 skill 放到 `$skill`，然后：
+
+```powershell
+& $dsh $profile --no-open
+# 另一个终端（从仓库根目录也能跑：用绝对路径指向 helper，不要写裸 desktop.py）
+$client = Join-Path $skill 'scripts/desktop.py'
+$env:DSH_BRIDGE_SECRET_FILE = '<状态目录>/host.secret'
+python $client health --port 8766
+```
+
+判定只看三个值：`workspace_autonomy.effective` 为 `true`、`configured`/`enabled` 为 `true`、`operations` 为 `0`。若 `effective` 为 `false`，`reason` 会指出缺什么（`not_configured` / `disabled` / `allowlist_file_missing` / `workspace_create_unavailable` / `session_create_unavailable` / `session_projections_unavailable`），按它补配置，不要改成别的路径绕过。
+
+### 5. 端到端验收（示例路径都是合成值）
+
+```powershell
+$client = Join-Path $skill 'scripts/desktop.py'   # 或写完整路径：C:\...\scripts\desktop.py
+
+# 登记并授权一个根外目录（只登记，不建会话、不发提示词）
+python $client create-workspace --port 8766 --data ws.json
+# ws.json: {"path":"D:\\ws-lab\\outside\\alpha","task_id":"TASK-A","purpose":"验收","create_directory":true,"client_request_key":"lab-ws-0001"}
+
+# 同一 key 重放：应 200 且 deduplicated:true
+python $client create-workspace --port 8766 --data ws.json
+
+# 建第一个写会话（还不会派任务）
+python $client create-session --port 8766 --data sess.json
+# sess.json: {"path":"D:\\ws-lab\\outside\\alpha","task_id":"TASK-A","purpose":"验收","access":"write","agent_preset":"master-control","client_request_key":"lab-sess-0001"}
+
+# 撤销授权：只撤授权，不删目录
+python $client revoke-workspace --port 8766 --data revoke.json
+# revoke.json: {"workspace_id":"<上一步返回的 workspace_id>"}
+```
+
+通过判据：`create-workspace` 的回执 `started_task:false` 且 `workspace_id`/`workspace.id`/`grant.workspace_id` 同一；`create-session` 回执带 `agent_preset: "master-control"`、`agent_preset_source: "session_projection"`、`started_task:false`；重放返回 `deduplicated:true`；`revoke-workspace` 返回 `directory_intact:true`，且该目录在磁盘上仍在；撤销后再用同一 key 重放返回 `409 authorization_stale`。同一把 key 换参数（如改 `purpose`）应 `409 idempotency_key_reused`。
+
+helper 对回执自己也会校验：回执不一致时退出码 1，并报 `workspace_receipt_unverified` / `task_receipt_unverified` / `agent_preset_unverified` / `revoke_receipt_unverified`。退出码 `0` 成功、`1` 业务失败或回执未证实、`2` 本地输入或传输错误。
+
+<a id="workspace-autonomy-lab-record"></a>
+
+### 5bis. 隔离验收记录（2026-11-25，isolated live PASS，runtime 0.2.2-rc.5）
+
+上面这套步骤已经在一台隔离 Host 上真跑过一次，结论是 **isolated live PASS (0.2.2-rc.5)**，不是生产通过。记录：`lab/report.md`（任务目录 `.agent/master-control/tasks/bridge-workspace-autonomy-20261125/lab/`，证据 `A-*`/`B-*`/`C*`/`D-*` 与之同目录）；开发 PR 为 [#17](https://github.com/ft54482/dsh-control-bridge/pull/17)（未合并）。同一轮的证据分级见[验收范围](verified-scope.md#workspace-autonomy-scope)。
+
+| 项 | 实测 |
+| --- | --- |
+| 实例 | profile `ws-autonomy-lab`，Host `127.0.0.1:8766`、web `3096`，runtime 0.2.2-rc.5（本机 `dsh-022` 安装），独立状态目录；对照 profile `ws-autonomy-off`（8767）跑完即停 |
+| 首启 | 空 allowlist + 无 bootstrap：`health` `effective:true`、`grants_count:0`、`bootstrap_status:"unconfigured"`；启动时无 tool-office / preset broken 告警，随后 stderr 仅一行 `[llm-deepseek-account] model listing …`（110 B）；未预灌任何授权 |
+| 主路径 | 两个 roots 外目录：`create-workspace` 200（`created:true`、`started_task:false`）→ `create-session` 200（`master-control` + `session_projection` + `access:write`）→ 合成提示 202 → `wait` `phase:terminal / terminal_scope:official / completed:true / text:"OK"`，route、effort、model 三项 match |
+| 复用 | 同工作区再登记 `reused:true`，工作区与会话各仍只 1 条，第二个提示照样 official 完成 |
+| 反例 | 4 并发同路径 → 同一 workspace id（1 created + 3 reused）；未知预设 409 `agent-preset/invalid`；换任务无 confirm → 409 `workspace_task_mismatch`，加 `confirm_task:true` → 200；`running:true` 时 `resume` → 409 `busy` 且长任务未被取消；策略关闭 → 400 `outside_allowed_roots` 等旧拒绝；`revoke-workspace` → 200 `directory_intact:true`，随后 `resume` → 409 `workspace_not_allowlisted` |
+| 旁证 | 8765/3082/3084/3088 进程未重启、四个 profile 的 patch sha256 未变；全程只监听 loopback、只用合成文本、无客户数据；正式 Desktop 8765 零写入 |
+| 没做的 | 部分失败/重试（mock-only）、幂等键冲突与撤销后回放的 409、只读忙会话、`allowOpenPath`、出站 webhook、符号链接守卫反例——见[验收范围](verified-scope.md#workspace-autonomy-scope) |
+
+### 6. 回退
+
+1. 把 `workspaceAutonomy` 改成 `false`（或整项删掉），重启该 profile。授权仍在 `allowlist.json` 里，只是重新走旧规则：根外目录与"新写授权需要已有写会话"的限制恢复。
+2. 要连授权一起收回：对每个工作区调用 `revoke-workspace`，或（确认没有其他 profile 共用该文件后）删除 `allowlist.json`。撤销不删目录、不取消在跑的回合。
+3. 整个插件不想要了：`& $dsh plugin --profile $profile remove dsh-control-bridge-host`，再删掉 profile 里对应的 patch 行。
+
+### 7. 生产启用前的门槛
+
+任意有 OS 权限的路径都能被登记，且登记时不做可写性检查；授权本身把一个工作区的写权限交给带 bearer 的调用方，权限级别与同账号的 shell 相同。隔离验收已于 2026-11-25 通过（见上文 5bis，runtime 0.2.2-rc.5），但生产是否开启仍由操作者决定，且生产 Desktop 是另一份 runtime。因此：
+
+- 先隔离 profile 全过，再由操作者明确决定是否对生产 Desktop 打开；
+- 打开后仍只监听 `127.0.0.1`，不要把 bearer 交给其他机器或别的用户；
+- `purpose` 会原样写进 `workspace-autonomy.jsonl`，不要写机密内容；
+- 生产 profile 上做的任何配置改动都要先备份 `cordis.patch.yml`，回退时按上面第 6 步改回 `false` 并重启。
 
 ## 本环境没有做的 Windows 实测
 

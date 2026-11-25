@@ -11,6 +11,10 @@ import path from 'node:path'
 import test from 'node:test'
 import './first-turn-cases.js'
 import { SECRET, WORKSPACE, call, close, officialCtx, startServer } from './fixtures.js'
+// The autonomy and first-start regressions live in `*-cases.js` so the eight
+// files this repository's CI runs keep executing them without a CI edit.
+import './autonomy-cases.js'
+import './startup-cases.js'
 
 const WRITE_DEMO = {
   version: 1,

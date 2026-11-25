@@ -41,12 +41,24 @@ export function rejectBrowser(headers) {
   return ''
 }
 
-export function decideListen({ services, hostSecret, allowlistCount, bootstrap, bind, now }) {
+/**
+ * Decide whether this Host may listen.
+ *
+ * @param options.autonomyEffective - the operator's workspace-autonomy policy
+ *   is in effect. A profile that starts from nothing has no grants yet; only an
+ *   effective policy makes that first start legitimate. Everything else (no
+ *   secret, no services, a non-loopback bind, an unreadable grant file, no
+ *   steady grants without an armed bootstrap) keeps its original refusal.
+ */
+export function decideListen({ services, hostSecret, allowlistCount, bootstrap, bind, now, autonomyEffective }) {
   if (!services) {
     return { listening: false, reason: 'desktop session services are not mounted; headless and incomplete profiles stay silent' }
   }
   if (bind && bind !== '127.0.0.1') return { listening: false, reason: 'bind must be 127.0.0.1' }
-  const steady = Boolean(hostSecret && hostSecret.length >= 32 && allowlistCount > 0)
+  const steady = Boolean(
+    hostSecret && hostSecret.length >= 32 && services
+    && (allowlistCount > 0 || autonomyEffective === true),
+  )
   const clock = now || Date.now()
   // A caller that already classified the window (the plugin's bootstrap source
   // enforces the short-lived cap) is authoritative; the older shape is
@@ -61,7 +73,7 @@ export function decideListen({ services, hostSecret, allowlistCount, bootstrap, 
       && !bootstrap.consumed,
     )
   if (!steady && !armed) {
-    return { listening: false, reason: 'no steady allowlist and no armed bootstrap' }
+    return { listening: false, steady, bootstrap: false, reason: 'no steady allowlist and no armed bootstrap' }
   }
   return { listening: true, steady, bootstrap: armed, outbound: false }
 }
@@ -192,14 +204,16 @@ export function selectGrant(catalog, choice) {
 }
 
 export function visibleWorkspaces(grants, workspaces) {
-  const allowed = new Set((grants.workspaceAllowlist || []).map((item) => item.id))
+  const byId = new Map((grants.workspaceAllowlist || []).map((item) => [item.id, item]))
   return (workspaces || [])
-    .filter((item) => allowed.has(item.id))
+    .filter((item) => byId.has(item.id))
     .map((item) => ({
       id: item.id,
       title: redactText(item.title || item.id),
       cwd: item.path || item.cwd || '',
       profile: 'desktop',
+      // Task ownership is readable for reconciliation; it is not a secret.
+      task_id: byId.get(item.id).task_id || null,
     }))
 }
 

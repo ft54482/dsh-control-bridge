@@ -1,6 +1,6 @@
 # Host 控制面 API（0.2.2）
 
-进程内 Desktop Host 插件 `dsh-control-bridge-host` 的 loopback HTTP 契约。0.2.0 的每条能力都先按官方 0.2.2-rc.5 源码核对；夹具回归只证明协议行为和失败关闭，**不等于真机验收**。
+进程内 Desktop Host 插件 `dsh-control-bridge-host` 的 loopback HTTP 契约。0.2.0 的每条能力都先按官方 0.2.2-rc.5 源码核对；夹具回归只证明协议行为和失败关闭，**不等于真机验收**。本分支另加操作者开关 `workspaceAutonomy`（[工作区自主](#workspace-autonomy-api)），未发布、未合并。
 
 ## 鉴权与作用域
 
@@ -75,23 +75,121 @@
 | POST | `/v1/cancel` | 该请求绑定自有未结束回合才调用官方 `cancel`；调用前重新判归属 |
 | POST | `/v1/model` | 会话 `write`；`reasoning_effort:null` 清除旧 effort；`auto` 不是合法值 |
 | POST | `/v1/access` / `/v1/revoke` | 会话/目录授权；撤销是唯一移除路径 |
-| POST | `/v1/workspaces` | `allowCreateWorkspace` + `workspaceRoots`；注册已存在目录（可选创建一层） |
-| POST | `/v1/sessions` | 需要 `allowCreateSession` 和允许的工作区根目录。通过官方 `sessionController.create` 创建，默认授予 `read`；传入 `agent_preset` 时还会核验预设。 |
+| POST | `/v1/workspaces` | `allowCreateWorkspace` + `workspaceRoots`；注册已存在目录（可选创建一层）。`workspaceAutonomy` 生效且带 `task_id`+`purpose` 时按[工作区自主](#workspace-autonomy-api)处理：仍要 `allowCreateWorkspace`，但不再校验根目录。 |
+| POST | `/v1/sessions` | 需要 `allowCreateSession` 和允许的工作区根目录。通过官方 `sessionController.create` 创建，默认授予 `read`；传入 `agent_preset` 时还会核验预设。`workspaceAutonomy` 生效且带 `task_id`+`purpose` 时按工作区自主流程处理。 |
+| POST | `/v1/workspaces/revoke` | （本分支）删除该工作区授权及其下所有会话授权；不删目录、不取消回合。 |
 | POST | `/v1/open` | `allowOpenPath` + `workspaceRoots`；官方 `openWorkspacePath`，只打开不创建 |
 
-创建类端点在未配置时返回 `403 *_disabled` / `no_allowed_roots`；官方服务未挂载时返回 `501 *_unavailable`；不猜方法、不落盘伪造。路径必须是已存在目录（或显式 `create_directory:true` 创建**一层**），按 realpath 校验在根内；根本身、兄弟前缀、`..` 穿越、逃出根的符号链接都拒绝。
+创建类端点在未配置时返回 `403 *_disabled` / `no_allowed_roots`；官方服务未挂载时返回 `501 *_unavailable`；不猜方法、不落盘伪造。旧路径的路径必须是已存在目录（或显式 `create_directory:true` 创建**一层**），按 realpath 校验在根内；根本身、兄弟前缀、`..` 穿越、逃出根的符号链接都拒绝。工作区自主生效时的任务请求改用“绝对路径”判定（不做可写性检查，见下节），但仍只允许 `create_directory:true` 建一层。
 
 ### 新建会话时核验主控预设
 
 Codex Skill 默认在选定的工作区新建 `master-control` 会话。该预设需由操作者安装到 Harness。在原有任务上继续工作时，Skill 直接续接原会话。
 
-从 0.2.2 起，带预设的新会话必须使用已配对工作区的 ID。Host 比对授权目录和 Desktop 实际登记的目录。若工作区在已有 `workspaceRoots` 之外，可以在 Host 插件配置中添加 `presetSessionWorkspaceIds: ["WORKSPACE_ID"]`，仅允许在该工作区创建预设会话。新会话申请写入时，该工作区还需有现存的可写会话授权。这项配置只用于预设会话创建，原有的打开路径与创建工作区边界继续生效。往这份名单里加工作区，是在扩大 Host 的创建范围，由操作者本人决定；代为安装的 Agent 要先问，见[权限与授权](permissions.md)。
+从 0.2.2 起，带预设的新会话必须使用已配对工作区的 ID。Host 比对授权目录和 Desktop 实际登记的目录。若工作区在已有 `workspaceRoots` 之外，可以在 Host 插件配置中添加 `presetSessionWorkspaceIds: ["WORKSPACE_ID"]`，仅允许在该工作区创建预设会话。新会话申请写入时，该工作区还需有现存的可写会话授权。这项配置只用于预设会话创建，原有的打开路径与创建工作区边界继续生效。往这份名单里加工作区，是在扩大 Host 的创建范围，由操作者本人决定；代为安装的 Agent 要先问，见[权限与授权](permissions.md)。**例外**：操作者开启 `workspaceAutonomy` 且 `health.workspace_autonomy.effective` 为 `true` 时，带 `task_id`+`purpose` 的请求只放宽这两条（需要已有写会话、必须在根内），其他约束不变；该策略默认关闭、由操作者显式开启，开关本身仍属于上面这条规则，见[工作区自主](#workspace-autonomy-api)。
 
 1. `GET /v1/health` 的 `preset_create_verified: true` 表明 Host 能查询预设、创建会话并读取会话当前的预设。工作区的创建权限仍单独检查。
 2. 向 `POST /v1/sessions` 提交 `{"workspace_id":"WORKSPACE","agent_preset":"master-control"}`。Host 先在 Harness 注册表里解析预设，再比对创建回执和会话投影，成功后才为新会话保存桥接授权。
 3. 确认响应中的 `workspace_id`、`session_id`、`agent_preset: "master-control"`、`agent_preset_source: "session_projection"` 及 `started_task: false`。需要派工时再调用 `resume`。
 
 创建后核验失败时，先用已返回的会话 ID 到 Desktop 核对；若连接中断且没有 ID，从原工作区查找新会话，避免重复创建。使用旧 Host 时可在 Desktop 手动新建并核对标题旁的预设，再按已有授权流程继续。[Codex 操作指南](../skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
+
+<a id="workspace-autonomy-api"></a>
+
+## Workspace autonomy（本分支，未发布）
+
+操作者开关 `workspaceAutonomy`，默认关闭。关闭时不会有任何自主流程被触发：不带任务意图的旧调用语义不变，但响应是**增量**的（`health.workspace_autonomy` 恒在、`workspaces[].task_id` 恒在，旧字段一个不改）；带任务意图的请求必须显式开启并生效，否则 403 `workspace_autonomy_not_effective`。开启且**生效**时，带 `task_id`+`purpose` 的调用可以把任意绝对目录登记成工作区、取得任务范围的写授权，并在还没有写会话的工作区里建第一个写会话。Host 不对目录做可写性检查（只做 realpath 归一，必要时建一层），真正能写什么由该账号的文件系统权限决定——这就是为什么它必须由操作者显式开启。语义与安全边界见[插件说明](../plugins/dsh-control-bridge-host/README.md#workspace-autonomy-opt-in-per-operator-this-release)和[安装与回退](windows-delivery.md#workspace-autonomy)。
+
+### 生效判定
+
+```yaml
+- id: dsh-control-bridge-host
+  config:
+    allowlistFile: <file>
+    workspaceAutonomy: true          # 或 { enabled: true }；缺省/false = 旧行为
+    autonomyRecordFile: <file>       # 可选；默认 dirname(allowlistFile)/workspace-autonomy.jsonl
+```
+
+`effective = enabled && allowlistFile 已配置 && workspaceRegistry.create 可调用 && sessionController.create 可调用 && sessionController.projections 可调用`。`GET /v1/health` 的 `workspace_autonomy` 块：
+
+| 字段 | 含义 |
+| --- | --- |
+| `configured` / `enabled` | 配置项是否存在 / 是否为真 |
+| `effective` | 上述合取；只有它为 `true` 时新流程才服务请求 |
+| `reason` | 生效时 `null`；否则是第一个缺口：`not_configured`、`disabled`、`allowlist_file_missing`、`workspace_create_unavailable`、`session_create_unavailable`、`session_projections_unavailable` |
+| `require_task` | 恒为 `true`：新流程一律要 `task_id`+`purpose` |
+| `roots_mode` | 开关为真时 `unrestricted`，否则 `configured_roots`（是声明，不是额外能力） |
+| `grant_store` | `file`（配置了 `allowlistFile`）或 `memory` |
+| `record_file` | 操作记录路径；已知即如实上报 |
+| `operations` | 本次进程已读入加已追加的记录条数 |
+
+已配置但未生效时**失败关闭**：带任务意图的写请求返回 `403 workspace_autonomy_not_effective`，不会回落到标准模式。
+
+### 端点
+
+| 方法 | 路径 | 新字段 / 行为 |
+| --- | --- | --- |
+| POST | `/v1/workspaces` | 新 body：`path`（绝对路径，必填）、`task_id`（1..200）、`purpose`（1..500）、`create_directory`、`confirm_task`、`client_request_key`、`title`。路径用 `fs.realpathSync.native` 归一，按归一后的路径串行，resolve → create → 再 resolve 取权威 id，然后写任务范围的 workspace 授权（`source: "autonomy"`）。不带任务意图时旧路径照原样回答；根外路径、或已登记但无授权的工作区，会要求补 `task_id`+`purpose`（`400 task_required`）。 |
+| POST | `/v1/sessions` | 新 body：`path` 或 `workspace_id`，加 `task_id`、`purpose`、`agent_preset`、`access`、`model`、`confirm_task`、`client_request_key`、`title`。顺序固定：先按需登记并授权路径 → 校验 model → `sessionController.create` → 用 `sessionController.projections` 证实预设 → 再写会话授权。不带任务意图但只有新流程能服务（给了 path / 要第一个写会话 / 工作区在根外）：`400 task_required`；工作区已被撤销：`403 workspace_not_allowlisted`（补任务也修不回来）。 |
+| POST | `/v1/workspaces/revoke` | body `{workspace_id}`。一次原子写里删除该 workspace 授权及其下所有 session 授权；返回 `revoked{workspace,sessions}`、`directory_intact`、`revision`。**不删目录、不取消回合**，且不属于任务范围流程（策略关闭时也可用，因为它只减不增）。 |
+| GET | `/v1/health` | 增 `workspace_autonomy` 块（见上）。 |
+| GET | `/v1/workspaces` | 每行增 `task_id`（拥有该工作区的任务，旧授权为 `null`）。 |
+
+回执字段（只增不改）：
+
+- workspace：`ok`、`workspace_id`、`workspace{id,title,path}`、`path`、`created`、`reused`、`created_directory`、`task{task_id,purpose,confirmed,previous_task_id}`、`grant{workspace_id,path}`、`autonomy{enabled,effective}`、`started_task:false`、`recorded`（追加失败时另有 `record_error`）。
+- session：`ok`、`session_id`、`workspace_id`、`path`、`agent_preset`、`agent_preset_source:"session_projection"`、`access`、`grant{session_id,workspace_id,access,cwd,task_id,source}`、`model`、`revision`、`task_id`、`purpose`、`workspace_created`、`workspace_reused`、`deduplicated`、`started_task:false`、`recorded`，修复授权时多 `repaired:true`。
+- revoke：`ok`、`workspace_id`、`revoked{workspace,sessions}`、`directory_intact`、`started_task:false`、`revision`。
+
+### 错误码
+
+| 状态 | `reason` | 触发条件 |
+| --- | --- | --- |
+| 400 | `task_required` | `task_id`/`purpose` 缺失、空白或超长；也表示「这个旧形状请求只有新流程能服务，请补任务」 |
+| 400 | `invalid_client_request_key` | `client_request_key` 不符合 `^[A-Za-z0-9][A-Za-z0-9._:-]{7,199}$` |
+| 400 | `missing_path` / `invalid_path` / `missing_directory` / `missing_parent` / `not_a_directory` / `unreadable_path` / `create_failed` | 路径解析失败：非绝对、不存在且未要求创建、父目录不存在（只允许建一层）、不是目录等 |
+| 400 | `missing_workspace_id` | `/v1/workspaces/revoke` 没带 `workspace_id`（或空白） |
+| 403 | `workspace_autonomy_not_effective` | 带任务意图但策略未生效（附 `autonomy_reason`） |
+| 403 | `workspace_not_allowlisted` | 工作区没有授权（含撤销后） |
+| 409 | `workspace_task_mismatch` | 工作区已属于另一个任务且未传 `confirm_task:true`（附 `existing_task_id`） |
+| 409 | `idempotency_key_reused` | 同一 key 换了 operation 或换了参数（`previous_operation`、`mismatched`） |
+| 409 | `authorization_stale` | 重放时的授权已被撤销、降权、移除或被别的任务接管（`historical` + 顶层 `current` 字符串） |
+| 409 | `agent-preset/invalid` | 预设 id 不能解析成该确切 id |
+| 409 | `agent_preset_unverified` | 会话已建，但投影没有回读该预设；去 Desktop 核对该会话，不要重试创建 |
+| 409 | `session_already_granted` | 修复请求发现该会话已授权 |
+| 500 | `grant_persist_failed` | 会话已建但授权落盘失败；用同一 key 重试即修复 |
+| 500 | `workspace_revoke_failed` | 撤销写盘失败（`saved:false`），授权未变 |
+| 502 | `workspace_grant_failed` | 工作区已登记但授权落盘失败（`manual_reconcile`） |
+| 502 | `workspace_unresolved` / `create_returned_no_session_id` / `session/workspace-attach-failed` | 官方调用半成功；先对账再决定重试 |
+
+### 幂等语义
+
+`client_request_key` 是可选的全局键，绑定「一个 operation + 一组参数」。参与绑定的参数是 `task_id`、`purpose`、`path`、`workspace_id`、`agent_preset`、`access`、`model`、`confirm_task`（workspace 操作只看与工作区身份有关的字段）。
+
+| 情形 | 结果 |
+| --- | --- |
+| 同 key、同 operation、同参数，授权仍有效 | `200`，回执加 `deduplicated:true` |
+| 同 key，operation 不同（workspace ↔ session） | `409 idempotency_key_reused`，带 `previous_operation`，**不重放** |
+| 同 key，operation 相同但参数不同 | `409 idempotency_key_reused`，带 `mismatched`（差异字段名） |
+| 同 key、同参数，但授权已撤销/降权/任务变更 | `409 authorization_stale`：`historical` 是旧成功摘要，顶层 `current` 是字符串 `revoked` / `missing` / `access_changed` / `task_changed` |
+
+补充约束：一次 Session 请求内部为路径做的登记**不消费**调用方的 key（记录 `client_request_key:null`、`parent_key` 指向该请求），所以 Session 重试不会重放 workspace 回执；`confirm_task` 的接管记录同样只作证据、不绑定 key；修复路径（`repaired:true`）在重放前重新核验授权，撤销过的 workspace 不会被重试复活。
+
+### 操作记录
+
+`workspace-autonomy.jsonl`，一行一个 JSON 对象，固定 17 个键：`at`、`op`、`operation`、`workspace_id`、`path`、`task_id`、`purpose`、`session_id`、`preset`、`access`、`client_request_key`、`parent_key`、`request_hash`、`request`、`phase`、`result`、`reason`（不适用写 `null`），成功行再加 `receipt`，撤销行加 `revoked`。`operation` 取值 `workspace` / `session` / `null`：工作区相关行是 `workspace`（`workspace_task_confirmed` 无论按路径还是按 `workspace_id` 触发都记 `workspace`，见 `server.js:528`、`server.js:840`），`session_*` 行是 `session`，只有 `workspace_revoke` 行是 `null`。行分两类：**绑定行**（`workspace_create`/`workspace_reuse`/`workspace_grant_failed`、`session_create`/`session_grant`/`session_grant_failed`）回答调用方并占有 key；**证据行**（`workspace_task_confirmed`、`workspace_revoke`）只记录发生过什么，既不绑定 key 也不降级已有绑定。记录不含 bearer、密钥、提示词正文。追加失败只报 `recorded:false` + `record_error`，不回滚已落盘的授权。`purpose` 原样保存。
+
+### 首次启动门禁
+
+从未配对过的 profile 没有授权（空数组，或文件不存在）。只有在下列条件同时成立时才允许监听并从零创建：
+
+1. 策略**真的生效**（`effective:true`，不是配置项存在）；
+2. 长期 secret 可读且长度 ≥ 32；
+3. 官方服务已挂载（`sessionController`、`workspaceRegistry`、`sessionQuery`）；
+4. 绑定 `127.0.0.1`；
+5. 授权文件缺失，或是合法的空授权——零字节、坏 JSON、结构非法仍是 `allowlist_unreadable`。
+
+不预灌任何授权（第一条授权才创建文件），也不需要布防配对窗口；窗口仍然只在没有策略时作为另一条入口，不能用来绕过未生效的策略。其余拒绝理由全部保留：默认关闭 + 空授权 → `no steady allowlist and no armed bootstrap`；缺 secret / 缺服务 / 非 loopback → 原拒绝；授权文件不可读 → `allowlist_unreadable`。启动结果另报 `autonomy{configured,enabled,effective,reason}`。隔离 profile 的复跑步骤见[安装与回退](windows-delivery.md#workspace-autonomy)；四处“0.2.2”分别指什么，见[验收范围](verified-scope.md#version-map)。
 
 ## 请求状态与自动感知交卷
 
@@ -176,6 +274,9 @@ def finish(port, secret, request_id, last_seq=0):
 | 创建工作区 / 新建会话 / 授权 / 打开目录 | 隔离回归（官方 API） | `create.test.js`、`paths.test.js` |
 | 路径安全（穿越/前缀/根/符号链接） | 隔离回归 | `paths.test.js` |
 | 配对窗口重新布防、单次使用、失败关闭 | 隔离回归 | `rearm.test.js` |
+| 工作区自主：任务范围登记/复用/写授权、任务归属与 `confirm_task`、忙会话不抢占、撤销只撤授权 | 隔离回归 + 隔离 Host 真机（0.2.2-rc.5） | `test/autonomy-cases.js`（经 `test/create.test.js` 导入）；真机见 [验收范围](verified-scope.md#workspace-autonomy-scope) |
+| 工作区自主：幂等键按 operation 绑定、`idempotency_key_reused`、撤销/降权后 `authorization_stale`、修复不复活撤销 | 隔离回归（真机未演练） | `test/autonomy-cases.js` |
+| 工作区自主：空授权首启门禁（生效即监听、未生效仍拒、零字节仍拒、不预灌） | 隔离回归 + 隔离 Host 真机（0.2.2-rc.5） | `test/startup-cases.js`、`test/startup-probe.js`；真机见 [验收范围](verified-scope.md#workspace-autonomy-scope) |
 | 真机安装、发现、创建、打开、配对、短任务终态与 SSE 续读 | Windows Desktop 实测 | 见 [真机验收](verified-scope.md) |
 
 ## 已知边界

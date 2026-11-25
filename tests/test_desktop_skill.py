@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -122,6 +123,181 @@ def test_new_task_in_existing_workspace_defaults_to_master_control(invoke_client
     )
     assert result.returncode == 0
     assert json.loads(requests[1][3]) == {"workspace_id": "w", "agent_preset": "master-control"}
+
+
+EFFECTIVE = {"ok": True, "preset_create_verified": True,
+             "workspace_autonomy": {"configured": True, "enabled": True, "effective": True, "reason": None}}
+
+
+def workspace_receipt(**change):
+    receipt = {
+        "ok": True, "workspace_id": "w1", "path": "/tmp/project",
+        "workspace": {"id": "w1", "title": "project", "path": "/tmp/project"},
+        "grant": {"workspace_id": "w1", "path": "/tmp/project"},
+        "started_task": False,
+    }
+    receipt.update(change)
+    return receipt
+
+
+def test_create_workspace_with_a_task_requires_an_effective_policy(invoke_client):
+    request = {"path": "/tmp/project", "task_id": "task-1", "purpose": "build"}
+    result, requests = invoke_client(
+        [(200, "application/json", json.dumps({"ok": True, "preset_create_verified": True,
+                                              "workspace_autonomy": {"configured": True, "enabled": True,
+                                                                     "effective": False, "reason": "allowlist_file_missing"}}).encode())],
+        ["create-workspace", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert [item[:2] for item in requests] == [("GET", "/v1/health")]
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["reason"] == "workspace_autonomy_not_effective"
+
+
+@pytest.mark.parametrize("change, ok", [
+    ({}, True),
+    ({"started_task": True}, False),
+    ({"workspace": {"id": "other", "path": "/tmp/project"}}, False),
+    ({"grant": {"workspace_id": "other"}}, False),
+    ({"path": "/tmp/elsewhere"}, False),
+    ({"workspace_id": ""}, False),
+])
+def test_create_workspace_receipt_must_name_one_workspace(invoke_client, change, ok):
+    request = {"path": "/tmp/project", "task_id": "task-1", "purpose": "build"}
+    result, requests = invoke_client(
+        [(200, "application/json", json.dumps(EFFECTIVE).encode()),
+         (200, "application/json", json.dumps(workspace_receipt(**change)).encode())],
+        ["create-workspace", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert [item[:2] for item in requests] == [("GET", "/v1/health"), ("POST", "/v1/workspaces")]
+    assert json.loads(requests[1][3]) == request
+    assert result.returncode == int(not ok)
+    output = json.loads(result.stdout)
+    if not ok:
+        assert output["reason"] == "workspace_receipt_unverified"
+        assert output["manual_reconcile"] is True
+    else:
+        assert output["workspace_id"] == "w1"
+
+
+def test_revoke_workspace_posts_one_request_and_checks_the_receipt(invoke_client):
+    request = {"workspace_id": "w1"}
+    result, requests = invoke_client(
+        [(200, "application/json", json.dumps({"ok": True, "workspace_id": "w1",
+                                              "revoked": {"workspace": True, "sessions": 2},
+                                              "directory_intact": True, "started_task": False}).encode())],
+        ["revoke-workspace", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert [item[:2] for item in requests] == [("POST", "/v1/workspaces/revoke")]
+    assert json.loads(requests[0][3]) == request
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["revoked"] == {"workspace": True, "sessions": 2}
+
+
+@pytest.mark.parametrize("receipt", [
+    {"ok": True, "workspace_id": "other", "started_task": False},
+    {"ok": True, "workspace_id": "w1", "started_task": True},
+    {"ok": False, "workspace_id": "w1", "started_task": False},
+])
+def test_revoke_workspace_rejects_a_mismatched_receipt(invoke_client, receipt):
+    result, requests = invoke_client(
+        [(200, "application/json", json.dumps(receipt).encode())],
+        ["revoke-workspace", "--data", "-"], b'{"workspace_id":"w1"}',
+    )
+    assert [item[:2] for item in requests] == [("POST", "/v1/workspaces/revoke")]
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["reason"] == "revoke_receipt_unverified"
+
+
+def test_revoke_workspace_needs_a_workspace_id_before_contacting_host(invoke_client):
+    result, requests = invoke_client([], ["revoke-workspace", "--data", "-"], b'{"workspace_id":""}')
+    assert result.returncode != 0
+    assert not requests
+
+
+def test_task_scoped_session_receipts_must_carry_that_task(invoke_client):
+    request = {"path": "/tmp/project", "task_id": "task-1", "purpose": "build",
+               "agent_preset": "master-control", "access": "write"}
+    receipt = {"ok": True, "session_id": "s1", "workspace_id": "w1", "agent_preset": "master-control",
+               "grant": {"session_id": "s1", "workspace_id": "w1", "access": "write"},
+               "agent_preset_source": "session_projection", "started_task": False,
+               "task_id": "task-1", "purpose": "build", "workspace_created": True, "deduplicated": False}
+    result, requests = invoke_client(
+        [(200, "application/json", json.dumps(EFFECTIVE).encode()),
+         (200, "application/json", json.dumps(receipt).encode())],
+        ["create-session", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert [item[:2] for item in requests] == [("GET", "/v1/health"), ("POST", "/v1/sessions")]
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["task_id"] == "task-1"
+
+    wrong = dict(receipt, task_id="task-other")
+    failed, _ = invoke_client(
+        [(200, "application/json", json.dumps(EFFECTIVE).encode()),
+         (200, "application/json", json.dumps(wrong).encode())],
+        ["create-session", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert failed.returncode == 1
+    assert json.loads(failed.stdout)["reason"] == "task_receipt_unverified"
+
+
+def test_task_scoped_create_session_without_a_preset_still_gates_on_health(invoke_client):
+    # The caller names no preset: the task intent alone must trigger the policy
+    # gate, so a configured-but-ineffective Host is never written to.
+    request = {"path": "/tmp/project", "task_id": "task-1", "purpose": "build"}
+    result, requests = invoke_client(
+        [(200, "application/json", json.dumps({"ok": True, "preset_create_verified": True,
+                                              "workspace_autonomy": {"configured": True, "enabled": True,
+                                                                     "effective": False, "reason": "allowlist_file_missing"}}).encode())],
+        ["create-session", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert [item[:2] for item in requests] == [("GET", "/v1/health")]
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["reason"] == "workspace_autonomy_not_effective"
+
+
+def test_task_session_receipt_proof_does_not_depend_on_a_preset():
+    # A plain Session (no preset) still has to prove the task and the grant.
+    spec = importlib.util.spec_from_file_location("desktop_cli_under_test", CLIENT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    request = {"path": "/tmp/project", "task_id": "task-1", "purpose": "build", "access": "write"}
+    receipt = {"ok": True, "session_id": "s1", "workspace_id": "w1", "access": "write",
+               "grant": {"session_id": "s1", "workspace_id": "w1", "access": "write", "task_id": "task-1"},
+               "started_task": False, "task_id": "task-1"}
+    assert module.verified_task_session_receipt(request, receipt) is True
+    assert module.verified_task_session_receipt(request, dict(receipt, task_id="task-2")) is False
+    assert module.verified_task_session_receipt(request, dict(receipt, started_task=True)) is False
+    assert module.verified_task_session_receipt(request, dict(receipt, access="read")) is False
+    assert module.verified_task_session_receipt(
+        request, dict(receipt, grant={"session_id": "s1", "workspace_id": "other", "access": "write"})) is False
+    # The helper's default preset receipt satisfies the same proof.
+    preset = dict(receipt, agent_preset="master-control", agent_preset_source="session_projection")
+    assert module.verified_task_session_receipt(request, preset) is True
+
+
+def test_a_deduplicated_session_receipt_still_proves_grant_consistency(invoke_client):
+    request = {"path": "/tmp/project", "task_id": "task-1", "purpose": "build",
+               "agent_preset": "master-control", "access": "write", "client_request_key": "key-0001"}
+    consistent = {"ok": True, "session_id": "s1", "workspace_id": "w1", "agent_preset": "master-control",
+                  "grant": {"session_id": "s1", "workspace_id": "w1", "access": "write"},
+                  "agent_preset_source": "session_projection", "started_task": False,
+                  "task_id": "task-1", "deduplicated": True}
+    result, _ = invoke_client(
+        [(200, "application/json", json.dumps(EFFECTIVE).encode()),
+         (200, "application/json", json.dumps(consistent).encode())],
+        ["create-session", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["deduplicated"] is True
+
+    broken = dict(consistent, grant={"session_id": "s1", "workspace_id": "other", "access": "write"})
+    failed, _ = invoke_client(
+        [(200, "application/json", json.dumps(EFFECTIVE).encode()),
+         (200, "application/json", json.dumps(broken).encode())],
+        ["create-session", "--data", "-"], json.dumps(request).encode(),
+    )
+    assert failed.returncode == 1
+    assert json.loads(failed.stdout)["reason"] == "agent_preset_unverified"
 
 
 def test_fresh_create_rejects_caller_id_before_contacting_host(invoke_client):

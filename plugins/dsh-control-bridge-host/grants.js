@@ -26,6 +26,24 @@ function text(value) {
   return typeof value === 'string' ? value : ''
 }
 
+/**
+ * Autonomy annotations travel in the same grant file as the pair itself, so a
+ * restart cannot lose task ownership. They are only written when present: an
+ * older grant keeps its exact old shape and old assertions still hold.
+ */
+function taskAnnotations(item) {
+  const source = text(item.source)
+  const taskId = text(item.task_id).trim()
+  const purpose = text(item.purpose)
+  const grantedAt = text(item.granted_at)
+  return {
+    ...(source ? { source } : {}),
+    ...(taskId ? { task_id: taskId } : {}),
+    ...(purpose ? { purpose } : {}),
+    ...(grantedAt ? { granted_at: grantedAt } : {}),
+  }
+}
+
 function normalizeWorkspace(item) {
   if (!item || typeof item !== 'object') return null
   const id = text(item.id)
@@ -34,6 +52,7 @@ function normalizeWorkspace(item) {
     id,
     cwd: text(item.cwd || item.path),
     title: text(item.title),
+    ...taskAnnotations(item),
   }
 }
 
@@ -51,6 +70,7 @@ function normalizeSession(item) {
     model: text(item.model) || null,
     provider: text(item.provider) || null,
     title: text(item.title),
+    ...taskAnnotations(item),
   }
 }
 
@@ -274,6 +294,13 @@ export function createGrantStore({ file, initial, now = () => Date.now() } = {})
     const index = list.findIndex((item) => item.id === entry.id)
     if (index === -1) return [...list, entry]
     const merged = { ...list[index], ...entry, title: entry.title || list[index].title, cwd: entry.cwd || list[index].cwd }
+    // The first task that claimed this workspace owns it. A later task may be
+    // confirmed (`confirm_task`) and is recorded on its own Session grant, but
+    // it never rewrites the workspace's original owner — or that owner's purpose.
+    if (list[index].task_id) {
+      merged.task_id = list[index].task_id
+      if (list[index].purpose) merged.purpose = list[index].purpose
+    }
     return list.map((item, at) => (at === index ? merged : item))
   }
 
@@ -340,6 +367,30 @@ export function createGrantStore({ file, initial, now = () => Date.now() } = {})
         const before = next.sessionAllowlist.length
         next.sessionAllowlist = next.sessionAllowlist.filter((item) => item.sessionId !== sessionId)
         return { state: next, result: { revoked: before !== next.sessionAllowlist.length } }
+      })
+    },
+    /**
+     * Revoke one workspace and every session grant under it in a single atomic
+     * write. The directory itself is never touched, and a running Session is
+     * not cancelled: only authorization is withdrawn.
+     */
+    revokeWorkspace(workspaceId) {
+      return withState((next) => {
+        const id = text(workspaceId)
+        const beforeWorkspaces = next.workspaceAllowlist.length
+        const beforeSessions = next.sessionAllowlist.length
+        next.workspaceAllowlist = next.workspaceAllowlist.filter((item) => item.id !== id)
+        next.sessionAllowlist = next.sessionAllowlist.filter((item) => item.workspaceId !== id)
+        return {
+          state: next,
+          result: {
+            revoked: {
+              workspace: beforeWorkspaces !== next.workspaceAllowlist.length,
+              sessions: beforeSessions - next.sessionAllowlist.length,
+            },
+            workspace_path: (state.workspaceAllowlist.find((item) => item.id === id) || {}).cwd || '',
+          },
+        }
       })
     },
   }

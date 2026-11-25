@@ -1,5 +1,10 @@
 import http from 'node:http'
+import fs from 'node:fs'
 import { bootstrapSourceFromSecret, createStaticBootstrapSource, hashSecret, matchesSecretHash } from './bootstrap.js'
+import {
+  autonomyHealth, clientRequestKey, createAutonomyRecord, createKeyedLock, fingerprintDiff,
+  fingerprintHash, requestFingerprint, resolveAutonomyConfig, resolveAutonomyPath, taskFields, taskIntent,
+} from './autonomy.js'
 import { eventsSince, journalStart } from './journal.js'
 import { createOutbox } from './outbox.js'
 import { canonicalDirectory, hasRoots, resolveWithinRoots, sameDirectory } from './paths.js'
@@ -160,6 +165,1120 @@ export function createHostServer(ctx, config, secret) {
   const openPathEnabled = config.allowOpenPath === true
   const rootsUnavailable = () => !hasRoots(workspaceRoots)
 
+  // ---- workspace autonomy -------------------------------------------------
+  // Opt-in only. When the operator does not set `workspaceAutonomy`, none of
+  // the code below is consulted by an old path and every old response stays
+  // byte-identical. A configured-but-ineffective policy never falls back to
+  // the standard mode: a request that carries task intent fails closed.
+  const autonomyConfig = resolveAutonomyConfig(config, ctx)
+  const autonomyRecord = autonomyConfig.record_file
+    ? createAutonomyRecord({ file: autonomyConfig.record_file })
+    : null
+  const withWorkspaceLock = createKeyedLock()
+  const withRequestKeyLock = createKeyedLock()
+  let anonymousLockSeq = 0
+
+  function autonomyHealthBlock() {
+    return autonomyHealth(autonomyConfig, autonomyRecord)
+  }
+
+  /** Append one audit line. A failed append is reported, never rolled back. */
+  function recordOp(entry) {
+    if (!autonomyRecord) return { recorded: false, record_error: 'autonomy_not_effective' }
+    // An absent key is written as null, never as an empty string: "this request
+    // carried no key" must not look like "it carried one".
+    const written = autonomyRecord.append({
+      ...entry,
+      client_request_key: entry.client_request_key ? entry.client_request_key : null,
+      parent_key: entry.parent_key ? entry.parent_key : null,
+    })
+    return written.ok ? { recorded: true } : { recorded: false, record_error: written.error }
+  }
+
+  function workspaceGrantOf(current, id) {
+    return (current.workspaceAllowlist || []).find((row) => row && row.id === id) || null
+  }
+
+  function autonomyNotEffective() {
+    return {
+      status: 403,
+      body: {
+        ok: false,
+        reason: 'workspace_autonomy_not_effective',
+        effective: false,
+        autonomy_reason: autonomyConfig.reason,
+        started_task: false,
+        detail: 'the workspace autonomy policy is configured but not effective; fix the configuration instead of falling back',
+      },
+    }
+  }
+
+  /**
+   * Decide who serves POST /v1/workspaces. `null` means the legacy
+   * registration path must answer unchanged; anything else is the outcome.
+   */
+  async function workspaceRoute(body) {
+    if (taskIntent(body)) {
+      if (!autonomyConfig.effective) return autonomyNotEffective()
+      return registerAutonomyWorkspace(body)
+    }
+    if (!autonomyConfig.effective) return null
+    // No task intent: a path that already exists outside the roots, or an
+    // already-registered workspace that carries no grant, can only be served by
+    // the autonomy flow, which requires the task.
+    const resolved = resolveAutonomyPath(body.path, { createDirectory: false })
+    if (!resolved.ok) return null
+    let existing = null
+    try {
+      if (typeof ctx.workspaceRegistry.resolveByPath === 'function') {
+        existing = await ctx.workspaceRegistry.resolveByPath(resolved.path)
+      }
+    } catch { /* resolveByPath is optional */ }
+    const view = existing ? workspaceView(existing) : null
+    if (view && !workspaceGrantOf(state(), view.id)) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          reason: 'task_required',
+          detail: 'this workspace is registered but has no grant; pass task_id and purpose',
+          workspace_id: view.id,
+          path: resolved.path,
+          started_task: false,
+        },
+      }
+    }
+    if (!resolveWithinRoots(workspaceRoots, resolved.path).ok) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          reason: 'task_required',
+          detail: 'a path outside the configured roots needs task_id and purpose',
+          path: resolved.path,
+          started_task: false,
+        },
+      }
+    }
+    return null
+  }
+
+  // ---- idempotency and replay safety --------------------------------------
+  // A key answers exactly one operation with one set of arguments, and a replay
+  // is only honoured while the authorization it was based on still exists.
+
+  function idempotencyReused(bound, operation, mismatched) {
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        reason: 'idempotency_key_reused',
+        previous_operation: bound.operation,
+        operation,
+        mismatched: mismatched || [],
+        previous_recorded_at: bound.at || null,
+        previous_workspace_id: bound.workspace_id || null,
+        previous_session_id: bound.session_id || null,
+        started_task: false,
+        detail: 'this client_request_key is already bound to another operation or other request arguments; use a new key',
+      },
+    }
+  }
+
+  function staleAuthorization({ operation, bound, current }) {
+    const receipt = bound.receipt || {}
+    return {
+      status: 409,
+      body: {
+        ok: false,
+        reason: 'authorization_stale',
+        workspace_id: receipt.workspace_id || bound.workspace_id || null,
+        ...(operation === 'session' ? { session_id: receipt.session_id || bound.session_id || null } : {}),
+        deduplicated: false,
+        historical: {
+          operation,
+          at: bound.at || null,
+          workspace_id: receipt.workspace_id || bound.workspace_id || null,
+          session_id: receipt.session_id || null,
+          task_id: receipt.task_id || bound.task_id || null,
+          path: receipt.path || bound.path || null,
+          access: receipt.access || null,
+        },
+        current,
+        started_task: false,
+        detail: 'the authorization this receipt was based on is no longer in effect; create a new request instead of replaying it',
+      },
+    }
+  }
+
+  /** Why a recorded workspace grant no longer authorizes its receipt, or null. */
+  function workspaceAuthorizationProblem(receipt) {
+    const workspaceId = receipt && receipt.workspace_id
+    if (!workspaceId) return 'missing'
+    const row = registeredWorkspace(workspaceId)
+    if (!row) return 'missing'
+    const directory = canonicalDirectory(row.path)
+    if (!directory || canonicalDirectory(receipt.path) !== directory) return 'missing'
+    const grant = workspaceGrantOf(state(), workspaceId)
+    if (!grant) return 'revoked'
+    if (canonicalDirectory(grant.cwd) !== directory) return 'missing'
+    const taskId = receipt.task && receipt.task.task_id
+    if (grant.task_id && taskId && grant.task_id !== taskId
+      && !(receipt.task && receipt.task.confirmed === true)) return 'task_changed'
+    return null
+  }
+
+  /** Why a recorded Session grant no longer authorizes its receipt, or null. */
+  function sessionAuthorizationProblem(receipt, access) {
+    const current = state()
+    const grant = (current.sessionAllowlist || []).find((row) => row && row.sessionId === receipt.session_id)
+    if (!grant) return 'revoked'
+    if (grant.workspaceId !== receipt.workspace_id) return 'missing'
+    if (grant.access !== access) return 'access_changed'
+    const workspaceGrant = workspaceGrantOf(current, receipt.workspace_id)
+    if (!workspaceGrant) return 'revoked'
+    const row = registeredWorkspace(receipt.workspace_id)
+    const directory = row ? canonicalDirectory(row.path) : null
+    if (!directory) return 'missing'
+    if (canonicalDirectory(workspaceGrant.cwd) !== directory) return 'missing'
+    if (grant.cwd && canonicalDirectory(grant.cwd) !== directory) return 'missing'
+    return null
+  }
+
+  /**
+   * Register or reuse one workspace under the autonomy policy and take a
+   * task-scoped workspace grant. Never creates a Session, never prompts.
+   *
+   * `options.ignore_request_key` is used by the Session flow: an internal
+   * registration must not consume the caller's key, or the Session retry would
+   * replay a workspace receipt. Such a record carries `parent_key` instead and
+   * stays idempotent by canonical path.
+   * @returns `{ status, body }`; 200 bodies are the frozen 3.3 receipt.
+   */
+  async function registerAutonomyWorkspace(body, options = {}) {
+    if (!autonomyConfig.effective) return autonomyNotEffective()
+    const task = taskFields(body)
+    if (!task.ok) return { status: 400, body: { ok: false, reason: task.reason, detail: task.detail, started_task: false } }
+    const key = options.ignore_request_key === true
+      ? { ok: true, key: '' }
+      : clientRequestKey(body)
+    if (!key.ok) return { status: 400, body: { ok: false, reason: key.reason, detail: key.detail, started_task: false } }
+    const resolved = resolveAutonomyPath(body.path, { createDirectory: body.create_directory === true })
+    if (!resolved.ok) {
+      return {
+        status: 400,
+        body: { ok: false, reason: resolved.reason, detail: resolved.detail || null, path: null, started_task: false },
+      }
+    }
+    const canonical = resolved.path
+    const confirmTask = body.confirm_task === true
+    const fingerprint = requestFingerprint('workspace', { ...body, path: canonical })
+    const requestHash = fingerprintHash(fingerprint)
+    const parentKey = typeof options.parent_key === 'string' && options.parent_key ? options.parent_key : null
+
+    const run = async () => {
+      // A key is bound to one operation and one request: replay only the same.
+      if (key.key) {
+        const bound = autonomyRecord.lookup(key.key)
+        if (bound) {
+          if (bound.operation !== 'workspace') return idempotencyReused(bound, 'workspace', [])
+          const mismatched = fingerprintDiff(bound.request, fingerprint)
+          if (mismatched.length) return idempotencyReused(bound, 'workspace', mismatched)
+          if (bound.complete) {
+            const current = workspaceAuthorizationProblem(bound.receipt)
+            if (current) return staleAuthorization({ operation: 'workspace', bound, current })
+            return { status: 200, body: { ...bound.receipt, deduplicated: true } }
+          }
+        }
+      }
+      let existing = null
+      try {
+        if (typeof ctx.workspaceRegistry.resolveByPath === 'function') {
+          existing = await ctx.workspaceRegistry.resolveByPath(canonical)
+        }
+      } catch { /* resolveByPath is optional; create() is the authority */ }
+      let workspace = existing ? workspaceView(existing) : null
+      let created = false
+      if (!workspace) {
+        try {
+          workspace = workspaceView(await ctx.workspaceRegistry.create(
+            canonical,
+            typeof body.title === 'string' ? body.title : undefined,
+          ))
+        } catch (error) {
+          return officialErrorBody(error, 'workspaceRegistry.create')
+        }
+        created = true
+        // The registry is the authority for the id: resolve again after create.
+        try {
+          if (typeof ctx.workspaceRegistry.resolveByPath === 'function') {
+            const again = workspaceView(await ctx.workspaceRegistry.resolveByPath(canonical))
+            if (again) workspace = again
+          }
+        } catch { /* keep the create() answer */ }
+      }
+      const workspaceId = workspace ? workspace.id : ''
+      if (!workspaceId) {
+        return {
+          status: 502,
+          body: { ok: false, reason: 'workspace_unresolved', path: canonical, manual_reconcile: true, started_task: false },
+        }
+      }
+      const directory = canonicalDirectory(workspace.path) || canonical
+      const current = state()
+      const existingGrant = workspaceGrantOf(current, workspaceId)
+      const previousTask = (existingGrant && existingGrant.task_id) || null
+      if (previousTask && previousTask !== task.task_id && !confirmTask) {
+        return {
+          status: 409,
+          body: {
+            ok: false,
+            reason: 'workspace_task_mismatch',
+            workspace_id: workspaceId,
+            existing_task_id: previousTask,
+            task_id: task.task_id,
+            started_task: false,
+            detail: 'this workspace already belongs to another task; pass confirm_task:true to take it for this one',
+          },
+        }
+      }
+      const grantedAt = new Date().toISOString()
+      try {
+        await grants.grant({
+          workspace: {
+            id: workspaceId,
+            cwd: directory,
+            title: workspace.title || '',
+            source: 'autonomy',
+            task_id: task.task_id,
+            purpose: task.purpose,
+            granted_at: grantedAt,
+          },
+        })
+      } catch (error) {
+        const detail = safeError(error, 'grants.save')
+        note(config, [detail])
+        const failure = recordOp({
+          op: 'workspace_grant_failed',
+          operation: 'workspace',
+          workspace_id: workspaceId,
+          path: directory,
+          task_id: task.task_id,
+          purpose: task.purpose,
+          phase: created ? 'workspace_created' : 'workspace_reused',
+          result: 'failed',
+          reason: 'workspace_grant_failed',
+          client_request_key: key.key,
+          parent_key: parentKey,
+          request: fingerprint,
+          request_hash: requestHash,
+        })
+        return {
+          status: 502,
+          body: {
+            ok: false,
+            reason: 'workspace_grant_failed',
+            workspace_id: workspaceId,
+            path: directory,
+            manual_reconcile: true,
+            started_task: false,
+            detail,
+            ...failure,
+          },
+        }
+      }
+      const receipt = {
+        ok: true,
+        workspace_id: workspaceId,
+        workspace: { id: workspaceId, title: workspace.title || '', path: directory },
+        path: directory,
+        created,
+        reused: !created,
+        created_directory: resolved.created === true,
+        task: {
+          task_id: task.task_id,
+          purpose: task.purpose,
+          confirmed: !previousTask || previousTask === task.task_id || confirmTask,
+          previous_task_id: previousTask,
+        },
+        grant: { workspace_id: workspaceId, path: directory },
+        autonomy: { enabled: true, effective: true },
+        started_task: false,
+        note: 'workspace registered and granted; no session and no prompt',
+      }
+      const recorded = recordOp({
+        op: created ? 'workspace_create' : 'workspace_reuse',
+        operation: 'workspace',
+        workspace_id: workspaceId,
+        path: directory,
+        task_id: task.task_id,
+        purpose: task.purpose,
+        phase: null,
+        result: 'ok',
+        client_request_key: key.key,
+        parent_key: parentKey,
+        request: fingerprint,
+        request_hash: requestHash,
+        receipt,
+      })
+      if (confirmTask && previousTask && previousTask !== task.task_id) {
+        // Evidence, not a binding: this line records that the task took the
+        // workspace over. It must never speak for the caller's key, or the key
+        // would stop answering its own (already successful) request.
+        recordOp({
+          op: 'workspace_task_confirmed',
+          operation: 'workspace',
+          workspace_id: workspaceId,
+          path: directory,
+          task_id: task.task_id,
+          purpose: task.purpose,
+          phase: null,
+          result: 'ok',
+          client_request_key: null,
+          parent_key: key.key || parentKey,
+          request: fingerprint,
+          request_hash: requestHash,
+          reason: `previous_task_id=${previousTask}`,
+        })
+      }
+      return { status: 200, body: { ...receipt, ...recorded } }
+    }
+
+    // One key is one queue; one canonical directory is another. The nesting is
+    // always key → path, so two flows cannot deadlock on each other.
+    if (key.key) return withRequestKeyLock(key.key, () => withWorkspaceLock(canonical, run))
+    return withWorkspaceLock(canonical, run)
+  }
+
+  /**
+   * Whether a Session request can only be served by the autonomy flow: it names
+   * a path, it asks for the first write Session in a workspace, or the
+   * workspace lives outside the configured roots.
+   */
+  async function needsAutonomyPath(body) {
+    const wanted = typeof body.path === 'string' ? body.path.trim() : ''
+    if (wanted) return true
+    const id = typeof body.workspace_id === 'string' ? body.workspace_id : ''
+    if (!id) return false
+    const workspace = registeredWorkspace(id)
+    if (!workspace) return false
+    const directory = canonicalDirectory(workspace.path)
+    if ((body.access === 'write' ? 'write' : 'read') === 'write') {
+      const current = state()
+      const hasWrite = (current.sessionAllowlist || []).some((row) => row && row.workspaceId === id
+        && row.access === 'write' && row.profile === 'desktop'
+        && (!directory || canonicalDirectory(row.cwd) === directory))
+      if (!hasWrite) return true
+    }
+    if (directory && !presetSessionWorkspaceIds.has(id) && !resolveWithinRoots(workspaceRoots, directory).ok) return true
+    return false
+  }
+
+  /** Validate a requested model before anything is created (shared with the old path). */
+  async function validateModelRequest(body) {
+    let plannedSelection = null
+    let plannedEffortUnverified = false
+    if (body.model && typeof body.model === 'object') {
+      plannedSelection = selectionOf({
+        provider: body.model.provider,
+        model: body.model.model,
+        reasoningEffort: body.model.reasoning_effort ?? body.model.reasoningEffort,
+      })
+      if (!plannedSelection) return { status: 400, body: { ok: false, reason: 'invalid_requested_model' } }
+      if (plannedSelection.reasoningEffort === 'auto') {
+        return {
+          status: 400,
+          body: {
+            ok: false,
+            reason: 'auto_not_an_effort',
+            detail: 'omit reasoning_effort to follow the adapter default; "auto" is not an official value',
+          },
+        }
+      }
+      const support = await effortSupport(ctx, plannedSelection)
+      if (support.known && plannedSelection.reasoningEffort && !support.efforts.includes(plannedSelection.reasoningEffort)) {
+        return {
+          status: 409,
+          body: { ok: false, reason: 'unsupported_reasoning_effort', supported_reasoning_efforts: support.efforts },
+        }
+      }
+      plannedEffortUnverified = Boolean(plannedSelection.reasoningEffort && !support.known)
+    }
+    return { plannedSelection, plannedEffortUnverified }
+  }
+
+  /**
+   * A new Session has no recorded model selection. The bridge never substitutes
+   * the deployment default; an explicit model is selected only when the live
+   * Agent already exists and is idle.
+   */
+  function modelInfoAfterCreate(sessionId, plannedSelection, plannedEffortUnverified) {
+    let modelInfo = {
+      selection: null,
+      source: 'deferred',
+      note: 'a new Session has no recorded selection; pass model on the first resume or set it with POST /v1/model',
+    }
+    if (plannedSelection) {
+      const agent = liveAgent(ctx, sessionId)
+      if (agent && agentIdle(agent)) {
+        const selected = selectOnAgent(agent, plannedSelection)
+        modelInfo = selected.ok
+          ? { selection: selected.confirmed, source: 'session_selected_by_bridge', effort_unverified: plannedEffortUnverified }
+          : { selection: null, source: 'deferred', reason: selected.reason }
+      } else {
+        modelInfo = { selection: null, source: 'deferred', reason: agent ? 'busy' : 'needs_ui' }
+      }
+    }
+    return modelInfo
+  }
+
+  /**
+   * Decide who serves POST /v1/sessions. `null` means the legacy path must
+   * answer unchanged.
+   */
+  async function sessionAutonomyGuard(body) {
+    if (taskIntent(body)) {
+      if (!autonomyConfig.effective) return autonomyNotEffective()
+      return createAutonomySession(body)
+    }
+    if (!autonomyConfig.effective) return null
+    if (await needsAutonomyPath(body)) {
+      const id = typeof body.workspace_id === 'string' ? body.workspace_id : ''
+      // A revoked (or never granted) workspace is not fixable by adding a task:
+      // the workspace flow has to grant it first.
+      if (id && !workspaceGrantOf(state(), id)) {
+        return {
+          status: 403,
+          body: { ok: false, reason: 'workspace_not_allowlisted', workspace_id: id, started_task: false },
+        }
+      }
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          reason: 'task_required',
+          detail: 'this request needs a path, the first write Session, or an unrestricted root; pass task_id and purpose',
+          started_task: false,
+        },
+      }
+    }
+    return null
+  }
+
+  /**
+   * Create one Session under the autonomy policy. Serialized per
+   * client_request_key: a retry after a failed grant repairs that Session
+   * instead of creating a second one.
+   */
+  async function createAutonomySession(body) {
+    const key = clientRequestKey(body)
+    if (!key.ok) return { status: 400, body: { ok: false, reason: key.reason, detail: key.detail, started_task: false } }
+    const lockKey = key.key || `anonymous:${anonymousLockSeq += 1}`
+    return withRequestKeyLock(lockKey, () => autonomySessionFlow(body, key.key))
+  }
+
+  async function autonomySessionFlow(body, requestKey) {
+    const task = taskFields(body)
+    if (!task.ok) return { status: 400, body: { ok: false, reason: task.reason, detail: task.detail, started_task: false } }
+    const preset = body.agent_preset
+    const wantedPath = typeof body.path === 'string' ? body.path.trim() : ''
+    const access = body.access === 'write' ? 'write' : 'read'
+    const canonicalPath = wantedPath ? (resolveAutonomyPath(wantedPath, { createDirectory: false }).path || wantedPath) : ''
+    const fingerprint = requestFingerprint('session', {
+      ...body,
+      path: canonicalPath || wantedPath || null,
+      workspace_id: wantedPath ? null : body.workspace_id,
+    })
+    const requestHash = fingerprintHash(fingerprint)
+    // A key is bound to one operation with one set of arguments; a replay is
+    // honoured only while the authorization behind the receipt still exists.
+    const bound = requestKey ? autonomyRecord.lookup(requestKey) : null
+    if (bound) {
+      if (bound.operation !== 'session') return idempotencyReused(bound, 'session', [])
+      // The path a receipt was recorded with is the canonical one; a caller may
+      // spell it differently, so compare the resolved form.
+      const mismatched = fingerprintDiff(bound.request, fingerprint)
+      if (mismatched.length) return idempotencyReused(bound, 'session', mismatched)
+      if (bound.complete) {
+        const current = sessionAuthorizationProblem(bound.receipt, access)
+        if (current) return staleAuthorization({ operation: 'session', bound, current })
+        return { status: 200, body: { ...bound.receipt, deduplicated: true } }
+      }
+      if (bound.phase === 'session_created' && bound.session_id) {
+        return repairAutonomySession(bound, task, requestKey)
+      }
+      if (bound.phase === 'projection_unverified') {
+        // The Session exists but its preset could not be proven. Replaying must
+        // not mint a second Session, and there is no grant to repair.
+        return {
+          status: 409,
+          body: {
+            ok: false,
+            reason: 'agent_preset_unverified',
+            session_id: bound.session_id,
+            workspace_id: bound.workspace_id,
+            saved: false,
+            started_task: false,
+            manual_reconcile: true,
+            note: 'inspect this Session in Desktop before continuing; do not retry creation',
+          },
+        }
+      }
+      // phase `create_failed` (or a grant failure recorded before the Session
+      // id was known): the flow may continue below — but only if the workspace
+      // it was registered on is still authorized. A retry is not a way to
+      // re-grant a revoked workspace.
+    }
+    if (bound && !bound.complete && bound.workspace_id) {
+      const current = workspaceGrantOf(state(), bound.workspace_id)
+      if (!current) return staleAuthorization({ operation: 'session', bound, current: 'revoked' })
+      const confirmed = Boolean(bound.request && bound.request.confirm_task === true)
+        && autonomyRecord.confirmed(requestKey, bound.task_id, bound.workspace_id)
+      if (current.task_id && bound.task_id && current.task_id !== bound.task_id && !confirmed) {
+        return staleAuthorization({ operation: 'session', bound, current: 'task_changed' })
+      }
+    }
+    if (preset !== undefined) {
+      if (typeof preset !== 'string' || !preset.trim() || preset !== preset.trim()) {
+        return { status: 400, body: { ok: false, reason: 'invalid_agent_preset', started_task: false } }
+      }
+      if (body.session_id !== undefined) {
+        return { status: 400, body: { ok: false, reason: 'omit_session_id_for_preset_create', started_task: false } }
+      }
+      if (body.profile !== undefined && body.profile !== 'desktop') {
+        return { status: 403, body: { ok: false, reason: 'cross_profile', started_task: false } }
+      }
+      if (body.access !== undefined && body.access !== 'write' && body.access !== 'read') {
+        return { status: 400, body: { ok: false, reason: 'invalid_access', started_task: false } }
+      }
+      if (!presetCreationAvailable()) {
+        return { status: 501, body: { ok: false, reason: 'preset_creation_unavailable', started_task: false } }
+      }
+      try {
+        const declared = await ctx.get('agentPresets').resolve(preset)
+        if (declared?.id !== preset || declared.broken !== undefined) {
+          return { status: 409, body: { ok: false, reason: 'agent-preset/invalid', started_task: false } }
+        }
+      } catch (error) {
+        // A preset the host cannot resolve to this exact id is the frozen
+        // `agent-preset/invalid` refusal for a new path; nothing is created.
+        if (error && error.code === 'agent-preset/not-found') {
+          return {
+            status: 409,
+            body: {
+              ok: false,
+              reason: 'agent-preset/invalid',
+              started_task: false,
+              detail: 'the preset id does not resolve to an available preset',
+            },
+          }
+        }
+        return officialErrorBody(error, 'agentPresets.resolve')
+      }
+    }
+    const partial = bound && !bound.complete && bound.session_id ? bound : null
+    if (partial) {
+      return repairAutonomySession(partial, task, requestKey)
+    }
+    let workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id : ''
+    let workspaceCreated = false
+    let workspaceReused = false
+    if (wantedPath) {
+      // Register the workspace without consuming this request's key: the key
+      // belongs to the Session operation, so a Session retry re-enters the flow
+      // instead of replaying a workspace receipt.
+      const registered = await registerAutonomyWorkspace({
+        ...body,
+        path: wantedPath,
+        task_id: task.task_id,
+        purpose: task.purpose,
+        client_request_key: null,
+      }, { ignore_request_key: true, parent_key: requestKey || null })
+      if (registered.status !== 200) return registered
+      workspaceId = registered.body.workspace_id
+      workspaceCreated = registered.body.deduplicated === true ? false : registered.body.created === true
+      workspaceReused = !workspaceCreated
+    }
+    if (!workspaceId) {
+      return {
+        status: 400,
+        body: {
+          ok: false,
+          reason: 'workspace_required',
+          detail: 'pass workspace_id, or path with task_id and purpose',
+          started_task: false,
+        },
+      }
+    }
+    const workspace = registeredWorkspace(workspaceId)
+    if (!workspace) {
+      return { status: 404, body: { ok: false, reason: 'workspace_not_found', workspace_id: workspaceId, started_task: false } }
+    }
+    const directory = canonicalDirectory(workspace.path)
+    const options = { firstWriteAllowed: true, unrestrictedRoots: true }
+    if (!wantedPath) {
+      // Naming a workspace by id is not a takeover: the same ownership rule as
+      // the path flow applies, and confirmation is journaled the same way.
+      const previousTask = (workspaceGrantOf(state(), workspaceId) || {}).task_id || null
+      if (previousTask && previousTask !== task.task_id && body.confirm_task !== true) {
+        return {
+          status: 409,
+          body: {
+            ok: false,
+            reason: 'workspace_task_mismatch',
+            workspace_id: workspaceId,
+            existing_task_id: previousTask,
+            task_id: task.task_id,
+            started_task: false,
+            detail: 'this workspace already belongs to another task; pass confirm_task:true to take it for this one',
+          },
+        }
+      }
+      if (previousTask && previousTask !== task.task_id) {
+        recordOp({
+          op: 'workspace_task_confirmed',
+          operation: 'workspace',
+          workspace_id: workspaceId,
+          path: directory,
+          task_id: task.task_id,
+          purpose: task.purpose,
+          phase: null,
+          result: 'ok',
+          // This line belongs to the Session request, so it must not consume the
+          // Session's idempotency key: it points at it through parent_key.
+          client_request_key: null,
+          parent_key: requestKey || null,
+          request: requestFingerprint('workspace', { ...body, path: directory }),
+          reason: `previous_task_id=${previousTask}`,
+        })
+      }
+    }
+    if (preset === undefined) {
+      // Autonomy can relax the first-write rule, not the grant itself: the
+      // workspace must already carry a grant before a Session may join it.
+      const authorized = authorizeWorkspace(state(), workspaceId)
+      if (!authorized.ok) {
+        return { status: 403, body: { ok: false, reason: authorized.reason, workspace_id: workspaceId, started_task: false } }
+      }
+    } else {
+      const reason = presetGrantDenial(state(), workspaceId, directory, access, null, options)
+      if (reason) return { status: 403, body: { ok: false, reason, workspace_id: workspaceId, started_task: false } }
+    }
+    const planned = await validateModelRequest(body)
+    if (planned.status) return planned
+    const createRequest = { workspaceId }
+    if (preset !== undefined) createRequest.agentPreset = preset
+    if (typeof body.session_id === 'string' && body.session_id) createRequest.sessionId = body.session_id
+    let created
+    try {
+      created = await ctx.sessionController.create(createRequest)
+    } catch (error) {
+      // The workspace registration above may have succeeded; the Session was
+      // not created. Binding the key to this request is what lets the same key
+      // retry the Session instead of ever replaying a workspace receipt.
+      const failure = recordOp({
+        op: 'session_create',
+        operation: 'session',
+        workspace_id: workspaceId,
+        path: directory,
+        task_id: task.task_id,
+        purpose: task.purpose,
+        session_id: error.details?.sessionId ?? null,
+        preset,
+        access,
+        phase: 'create_failed',
+        result: 'failed',
+        reason: (error && error.code) || 'create_failed',
+        client_request_key: requestKey,
+        request: fingerprint,
+        request_hash: requestHash,
+      })
+      if (error?.code === 'session/workspace-attach-failed') {
+        return {
+          status: 502,
+          body: {
+            ok: false,
+            reason: error.code,
+            session_id: error.details?.sessionId ?? null,
+            workspace_id: workspaceId,
+            saved: false,
+            started_task: false,
+            manual_reconcile: true,
+            ...failure,
+          },
+        }
+      }
+      const outcome = officialErrorBody(error, 'sessionController.create', { workspace_id: workspaceId, manual_reconcile: true })
+      return { status: outcome.status, body: { ...outcome.body, ...failure } }
+    }
+    const sessionId = created?.sessionId ?? (preset === undefined ? createRequest.sessionId : null)
+    if (typeof sessionId !== 'string' || !sessionId) {
+      const failure = recordOp({
+        op: 'session_create',
+        operation: 'session',
+        workspace_id: workspaceId,
+        path: directory,
+        task_id: task.task_id,
+        purpose: task.purpose,
+        session_id: null,
+        preset,
+        access,
+        phase: 'create_failed',
+        result: 'failed',
+        reason: 'create_returned_no_session_id',
+        client_request_key: requestKey,
+        request: fingerprint,
+        request_hash: requestHash,
+      })
+      return {
+        status: 502,
+        body: { ok: false, reason: 'create_returned_no_session_id', workspace_id: workspaceId, manual_reconcile: true, ...failure },
+      }
+    }
+    if (preset !== undefined) {
+      let projection
+      try {
+        projection = await ctx.sessionController.projections({ sessionId }, new AbortController().signal)
+      } catch (error) {
+        note(config, [safeError(error, 'sessionController.projections')])
+      }
+      if (created.agentPreset !== preset
+        || projection?.kind !== 'sequenced' || projection.values?.agentPreset !== preset) {
+        const recorded = recordOp({
+          op: 'session_create',
+          operation: 'session',
+          workspace_id: workspaceId,
+          path: directory,
+          task_id: task.task_id,
+          purpose: task.purpose,
+          session_id: sessionId,
+          preset,
+          access,
+          phase: 'projection_unverified',
+          result: 'failed',
+          reason: 'agent_preset_unverified',
+          client_request_key: requestKey,
+          request: fingerprint,
+          request_hash: requestHash,
+        })
+        return {
+          status: 409,
+          body: {
+            ok: false,
+            reason: 'agent_preset_unverified',
+            session_id: sessionId,
+            workspace_id: workspaceId,
+            saved: false,
+            started_task: false,
+            manual_reconcile: true,
+            note: 'inspect this Session in Desktop before continuing; do not retry creation',
+            ...recorded,
+          },
+        }
+      }
+    }
+    return finishAutonomySession({
+      body,
+      preset,
+      access,
+      workspace,
+      workspaceId,
+      sessionId,
+      agentPreset: created.agentPreset,
+      task,
+      requestKey,
+      request: fingerprint,
+      requestHash,
+      workspaceCreated,
+      workspaceReused,
+      plannedSelection: planned.plannedSelection,
+      plannedEffortUnverified: planned.plannedEffortUnverified,
+    })
+  }
+
+  /** Re-verify the projection and grant a Session a previous attempt created. */
+  async function repairAutonomySession(partial, task, requestKey) {
+    const sessionId = partial.session_id
+    const workspaceId = partial.workspace_id
+    const workspace = registeredWorkspace(workspaceId)
+    if (!workspace) {
+      return {
+        status: 502,
+        body: {
+          ok: false,
+          reason: 'workspace_not_found',
+          workspace_id: workspaceId,
+          session_id: sessionId,
+          manual_reconcile: true,
+          started_task: false,
+        },
+      }
+    }
+    if (state().sessionAllowlist.some((row) => row && row.sessionId === sessionId)) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          reason: 'session_already_granted',
+          session_id: sessionId,
+          workspace_id: workspaceId,
+          deduplicated: false,
+          started_task: false,
+        },
+      }
+    }
+    const preset = partial.preset || undefined
+    const access = partial.access === 'write' ? 'write' : 'read'
+    const directory = canonicalDirectory(workspace.path)
+    // Repair only a grant that is still authorized: a revoked workspace must not
+    // come back to life through a retry. The recorded receipt is the historical
+    // summary; the current state is what decides.
+    const previousTask = (workspaceGrantOf(state(), workspaceId) || {}).task_id || null
+    const historical = {
+      operation: 'session',
+      at: partial.at || null,
+      workspace_id: workspaceId,
+      session_id: sessionId,
+      task_id: partial.task_id || null,
+      path: directory,
+      access,
+    }
+    if (!previousTask && !workspaceGrantOf(state(), workspaceId)) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          reason: 'authorization_stale',
+          workspace_id: workspaceId,
+          session_id: sessionId,
+          deduplicated: false,
+          historical,
+          current: 'revoked',
+          started_task: false,
+          detail: 'the workspace grant is gone; a retry cannot re-authorize it, create a new request instead',
+        },
+      }
+    }
+    // A confirmed continuation is a legitimate owner of this Session's task:
+    // the workspace keeps its first task, so the evidence for the second one
+    // lives under this request key.
+    const confirmedContinuation = Boolean(partial.request && partial.request.confirm_task === true)
+      && autonomyRecord.confirmed(requestKey, partial.task_id, workspaceId)
+    if (previousTask && partial.task_id && previousTask !== partial.task_id && !confirmedContinuation) {
+      return {
+        status: 409,
+        body: {
+          ok: false,
+          reason: 'authorization_stale',
+          workspace_id: workspaceId,
+          session_id: sessionId,
+          deduplicated: false,
+          historical,
+          current: 'task_changed',
+          started_task: false,
+          detail: 'this workspace now belongs to another task; create a new request instead of repairing',
+        },
+      }
+    }
+    if (preset !== undefined) {
+      let projection
+      try {
+        projection = await ctx.sessionController.projections({ sessionId }, new AbortController().signal)
+      } catch (error) {
+        note(config, [safeError(error, 'sessionController.projections')])
+      }
+      if (projection?.kind !== 'sequenced' || projection.values?.agentPreset !== preset) {
+        const recorded = recordOp({
+          op: 'session_create',
+          operation: 'session',
+          workspace_id: workspaceId,
+          path: directory,
+          task_id: task.task_id,
+          purpose: task.purpose,
+          session_id: sessionId,
+          preset,
+          access,
+          phase: 'projection_unverified',
+          result: 'failed',
+          reason: 'agent_preset_unverified',
+          client_request_key: requestKey,
+          // Keep the binding's arguments: a replay must still recognise itself.
+          request: partial.request || null,
+          request_hash: partial.request_hash || null,
+        })
+        return {
+          status: 409,
+          body: {
+            ok: false,
+            reason: 'agent_preset_unverified',
+            session_id: sessionId,
+            workspace_id: workspaceId,
+            saved: false,
+            started_task: false,
+            manual_reconcile: true,
+            ...recorded,
+          },
+        }
+      }
+    }
+    return finishAutonomySession({
+      body: { access },
+      preset,
+      access,
+      workspace,
+      workspaceId,
+      sessionId,
+      agentPreset: preset,
+      task,
+      requestKey,
+      request: partial.request || null,
+      requestHash: partial.request_hash || null,
+      workspaceCreated: false,
+      workspaceReused: false,
+      repaired: true,
+    })
+  }
+
+  /** Grant, record and answer one autonomy Session receipt. */
+  async function finishAutonomySession(context) {
+    const {
+      body, preset, access, workspace, workspaceId, sessionId, agentPreset, task, requestKey,
+      request, requestHash, workspaceCreated, workspaceReused, plannedSelection, plannedEffortUnverified, repaired,
+    } = context
+    const directory = canonicalDirectory(workspace.path)
+    const sessionGrant = {
+      sessionId,
+      workspaceId,
+      access,
+      ...(preset === undefined ? {} : { agentPreset }),
+      // The workspace's canonical directory, not the caller's spelling: every
+      // later cwd comparison must agree with the grant.
+      cwd: directory || workspace.path || '',
+      profile: typeof body.profile === 'string' && body.profile ? body.profile : 'desktop',
+      title: typeof body.title === 'string' ? body.title : '',
+      source: 'autonomy',
+      task_id: task.task_id,
+      purpose: task.purpose,
+      granted_at: new Date().toISOString(),
+    }
+    const deny = (current) => {
+      if (current.warnings?.length) return 'allowlist_unavailable'
+      const authorized = authorizeWorkspace(current, workspaceId)
+      if (!authorized.ok) return authorized.reason
+      if (preset !== undefined) {
+        return presetGrantDenial(current, workspaceId, directory, access, sessionId, {
+          firstWriteAllowed: true,
+          unrestrictedRoots: true,
+        })
+      }
+      const workspaceNow = registeredWorkspace(workspaceId)
+      if (!workspaceNow) return 'workspace_not_found'
+      if (directory && canonicalDirectory(workspaceNow.path) !== directory) return 'cwd_mismatch'
+      return null
+    }
+    let after
+    try {
+      after = await grants.grantFreshSession(sessionGrant, deny)
+    } catch (error) {
+      const detail = safeError(error, 'grants.save')
+      note(config, [detail])
+      const recorded = recordOp({
+        op: 'session_grant_failed',
+        operation: 'session',
+        workspace_id: workspaceId,
+        path: directory,
+        task_id: task.task_id,
+        purpose: task.purpose,
+        session_id: sessionId,
+        preset,
+        access,
+        phase: 'session_created',
+        result: 'failed',
+        reason: 'grant_persist_failed',
+        client_request_key: requestKey,
+        request: request || null,
+        request_hash: requestHash || null,
+      })
+      if (error?.refused) {
+        return {
+          status: 403,
+          body: {
+            ok: false,
+            reason: error.code,
+            session_id: sessionId,
+            workspace_id: workspaceId,
+            saved: false,
+            started_task: false,
+            manual_reconcile: true,
+            ...recorded,
+          },
+        }
+      }
+      return {
+        status: 500,
+        body: {
+          ok: false,
+          reason: 'grant_persist_failed',
+          session_id: sessionId,
+          workspace_id: workspaceId,
+          saved: false,
+          manual_reconcile: true,
+          detail,
+          note: 'the Session exists but is not granted; retry with the same client_request_key to grant it',
+          ...recorded,
+        },
+      }
+    }
+    const modelInfo = repaired
+      ? { selection: null, source: 'deferred', note: 'this call repaired a missing grant; the Session model was not changed' }
+      : modelInfoAfterCreate(sessionId, plannedSelection, plannedEffortUnverified)
+    const receipt = {
+      ok: true,
+      session_id: sessionId,
+      workspace_id: workspaceId,
+      path: workspace.path || '',
+      ...(preset === undefined ? {} : { agent_preset: agentPreset, agent_preset_source: 'session_projection' }),
+      access,
+      grant: {
+        session_id: sessionId,
+        workspace_id: workspaceId,
+        access,
+        cwd: directory || workspace.path || '',
+        task_id: task.task_id,
+        source: 'autonomy',
+      },
+      model: modelInfo,
+      revision: after.revision,
+      started_task: false,
+      note: 'the Session is created and granted; no prompt was sent and the deployment default model was not changed',
+      task_id: task.task_id,
+      purpose: task.purpose,
+      workspace_created: Boolean(workspaceCreated),
+      workspace_reused: Boolean(workspaceReused),
+      deduplicated: false,
+      ...(repaired ? { repaired: true } : {}),
+      autonomy: { enabled: true, effective: true },
+    }
+    const recorded = recordOp({
+      op: repaired ? 'session_grant' : 'session_create',
+      operation: 'session',
+      workspace_id: workspaceId,
+      path: directory,
+      task_id: task.task_id,
+      purpose: task.purpose,
+      session_id: sessionId,
+      preset,
+      access,
+      phase: null,
+      result: 'ok',
+      client_request_key: requestKey,
+      request: request || null,
+      request_hash: requestHash || null,
+      receipt,
+    })
+    return { status: 200, body: { ...receipt, ...recorded } }
+  }
+
   function presetCreationAvailable() {
     return typeof ctx.get?.('agentPresets')?.resolve === 'function'
       && typeof ctx.sessionController?.create === 'function'
@@ -179,7 +1298,10 @@ export function createHostServer(ctx, config, secret) {
 
   // Both the pre-create check and the serialized grant commit read current
   // membership. Keep the original canonical directory across the async create.
-  function presetGrantDenial(current, id, directory, access, newSessionId) {
+  // `options` is only passed by the autonomy flow: it relaxes exactly two old
+  // requirements (a pre-existing write Session, and root containment) and
+  // nothing else.
+  function presetGrantDenial(current, id, directory, access, newSessionId, options) {
     if (current.warnings?.length) return 'allowlist_unavailable'
     const authorized = authorizeWorkspace(current, id)
     if (!authorized.ok) return authorized.reason
@@ -187,11 +1309,12 @@ export function createHostServer(ctx, config, secret) {
     if (!workspace) return 'workspace_not_found'
     if (!directory || canonicalDirectory(workspace.path) !== directory
       || canonicalDirectory(authorized.workspace.cwd) !== directory) return 'cwd_mismatch'
-    if (!presetSessionWorkspaceIds.has(id) && !resolveWithinRoots(workspaceRoots, directory).ok) {
+    if (!options?.unrestrictedRoots
+      && !presetSessionWorkspaceIds.has(id) && !resolveWithinRoots(workspaceRoots, directory).ok) {
       return 'outside_allowed_roots'
     }
     if (newSessionId && !workspace.sessionIds.includes(newSessionId)) return 'workspace_mismatch'
-    if (access === 'write' && !current.sessionAllowlist.some((row) => row.workspaceId === id
+    if (access === 'write' && !options?.firstWriteAllowed && !current.sessionAllowlist.some((row) => row.workspaceId === id
       && row.access === 'write' && row.profile === 'desktop' && workspace.sessionIds.includes(row.sessionId)
       && canonicalDirectory(row.cwd) === directory)) return 'workspace_write_not_granted'
     return null
@@ -351,7 +1474,7 @@ export function createHostServer(ctx, config, secret) {
   }
 
   /** Map the official ApiError code to an HTTP status; unknown codes are a 502. */
-  function sendOfficialError(res, error, method, serverErrorFields = {}) {
+  function officialErrorBody(error, method, serverErrorFields = {}) {
     const detail = safeError(error, method)
     const code = (error && error.code) || 'call_failed'
     let status = 502
@@ -363,7 +1486,15 @@ export function createHostServer(ctx, config, secret) {
     else if (code === 'workspace/session-active' || code === 'session/conflict' || code === 'agent-preset/conflict') status = 409
     else if (code === 'workspace/name-conflict') status = 409
     else if (code === 'gateway/cancelled') status = 409
-    return send(res, status, { ok: false, reason: code, started_task: false, detail, ...(status >= 500 ? serverErrorFields : {}) })
+    return {
+      status,
+      body: { ok: false, reason: code, started_task: false, detail, ...(status >= 500 ? serverErrorFields : {}) },
+    }
+  }
+
+  function sendOfficialError(res, error, method, serverErrorFields = {}) {
+    const outcome = officialErrorBody(error, method, serverErrorFields)
+    return send(res, outcome.status, outcome.body)
   }
 
   function bodyOfRequest(record) {
@@ -839,6 +1970,7 @@ export function createHostServer(ctx, config, secret) {
           bootstrap_retired: spentWindow(boot.secret || ''),
           bootstrap_expires_at: boot.expiresAt || null,
           resume_timeout_ms: resumeTimeoutMs,
+          workspace_autonomy: autonomyHealthBlock(),
         })
       }
       if (req.method === 'GET' && url.pathname === '/v1/outbox') {
@@ -883,8 +2015,19 @@ export function createHostServer(ctx, config, secret) {
         if (!ctx.workspaceRegistry || typeof ctx.workspaceRegistry.create !== 'function') {
           return send(res, 501, { ok: false, reason: 'workspace_create_unavailable', detail: 'the official workspaceRegistry.create is not mounted' })
         }
-        if (rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
+        // Without an autonomy policy at all, the old order is byte-identical:
+        // no roots means no capability, before the body is even read.
+        if (!autonomyConfig.configured && rootsUnavailable()) {
+          return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
+        }
         const body = await readJson(req)
+        if (autonomyConfig.effective || taskIntent(body)) {
+          const outcome = await workspaceRoute(body)
+          if (outcome) return send(res, outcome.status, outcome.body)
+        }
+        // A configured-but-ineffective policy with no roots keeps the old
+        // refusal for calls that did not ask for autonomy at all.
+        if (rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
         const resolved = resolveWithinRoots(workspaceRoots, body.path, { createDirectory: body.create_directory === true })
         if (!resolved.ok) {
           return send(res, 400, { ok: false, reason: resolved.reason, detail: resolved.detail || null, path: null })
@@ -911,6 +2054,56 @@ export function createHostServer(ctx, config, secret) {
           return sendOfficialError(res, error, 'workspaceRegistry.create')
         }
       }
+      if (req.method === 'POST' && url.pathname === '/v1/workspaces/revoke') {
+        const body = await readJson(req)
+        const workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id.trim() : ''
+        if (!workspaceId) return send(res, 400, { ok: false, reason: 'missing_workspace_id', started_task: false })
+        const registered = registeredWorkspace(workspaceId)
+        const grantBefore = workspaceGrantOf(state(), workspaceId)
+        let after
+        try {
+          after = await grants.revokeWorkspace(workspaceId)
+        } catch (error) {
+          const detail = safeError(error, 'grants.save')
+          note(config, [detail])
+          return send(res, 500, {
+            ok: false,
+            reason: 'workspace_revoke_failed',
+            workspace_id: workspaceId,
+            saved: false,
+            started_task: false,
+            detail,
+          })
+        }
+        const directoryPath = (registered && registered.path) || (grantBefore && grantBefore.cwd) || ''
+        let directoryIntact = true
+        try {
+          if (directoryPath) directoryIntact = fs.existsSync(directoryPath)
+        } catch {
+          directoryIntact = true
+        }
+        // Only authorization is withdrawn: the directory and any running turn
+        // are left exactly as they were.
+        const recorded = autonomyRecord
+          ? recordOp({
+            op: 'workspace_revoke',
+            workspace_id: workspaceId,
+            path: directoryPath,
+            phase: null,
+            result: 'ok',
+            revoked: after.revoked,
+          })
+          : null
+        return send(res, 200, {
+          ok: true,
+          workspace_id: workspaceId,
+          revoked: after.revoked,
+          directory_intact: directoryIntact,
+          started_task: false,
+          revision: after.revision,
+          ...(recorded || {}),
+        })
+      }
       if (req.method === 'POST' && url.pathname === '/v1/sessions') {
         if (!createSessionEnabled) {
           return send(res, 403, {
@@ -923,6 +2116,13 @@ export function createHostServer(ctx, config, secret) {
           return send(res, 501, { ok: false, reason: 'session_create_unavailable', detail: 'the official sessionController.create is not mounted' })
         }
         const body = await readJson(req)
+        // ---- workspace autonomy: an explicit task selects the new flow.
+        // Without task intent an old call is answered by the old code below,
+        // except when only the new flow can serve it (then it asks for the task).
+        if (taskIntent(body) || autonomyConfig.effective) {
+          const outcome = await sessionAutonomyGuard(body)
+          if (outcome) return send(res, outcome.status, outcome.body)
+        }
         let workspaceId = typeof body.workspace_id === 'string' ? body.workspace_id : ''
         const preset = body.agent_preset
         if (preset === undefined && rootsUnavailable()) return send(res, 403, { ok: false, reason: 'no_allowed_roots' })
@@ -994,32 +2194,10 @@ export function createHostServer(ctx, config, secret) {
         }
         // Validate the requested model before create(): a rejected effort must
         // not leave behind a created Session and a persisted write grant.
-        let plannedSelection = null
-        let plannedEffortUnverified = false
-        if (body.model && typeof body.model === 'object') {
-          plannedSelection = selectionOf({
-            provider: body.model.provider,
-            model: body.model.model,
-            reasoningEffort: body.model.reasoning_effort ?? body.model.reasoningEffort,
-          })
-          if (!plannedSelection) return send(res, 400, { ok: false, reason: 'invalid_requested_model' })
-          if (plannedSelection.reasoningEffort === 'auto') {
-            return send(res, 400, {
-              ok: false,
-              reason: 'auto_not_an_effort',
-              detail: 'omit reasoning_effort to follow the adapter default; "auto" is not an official value',
-            })
-          }
-          const support = await effortSupport(ctx, plannedSelection)
-          if (support.known && plannedSelection.reasoningEffort && !support.efforts.includes(plannedSelection.reasoningEffort)) {
-            return send(res, 409, {
-              ok: false,
-              reason: 'unsupported_reasoning_effort',
-              supported_reasoning_efforts: support.efforts,
-            })
-          }
-          plannedEffortUnverified = Boolean(plannedSelection.reasoningEffort && !support.known)
-        }
+        const planned = await validateModelRequest(body)
+        if (planned.status) return send(res, planned.status, planned.body)
+        const plannedSelection = planned.plannedSelection
+        const plannedEffortUnverified = planned.plannedEffortUnverified
         const access = body.access === 'write' ? 'write' : 'read'
         const createRequest = { workspaceId }
         const presetDirectory = preset === undefined ? null : canonicalDirectory(workspace.path)
@@ -1106,22 +2284,7 @@ export function createHostServer(ctx, config, secret) {
         // A new Session has no recorded model selection. The bridge never
         // substitutes the deployment default; an explicit model is selected
         // only when the live Agent already exists and is idle.
-        let modelInfo = {
-          selection: null,
-          source: 'deferred',
-          note: 'a new Session has no recorded selection; pass model on the first resume or set it with POST /v1/model',
-        }
-        if (plannedSelection) {
-          const agent = liveAgent(ctx, sessionId)
-          if (agent && agentIdle(agent)) {
-            const selected = selectOnAgent(agent, plannedSelection)
-            modelInfo = selected.ok
-              ? { selection: selected.confirmed, source: 'session_selected_by_bridge', effort_unverified: plannedEffortUnverified }
-              : { selection: null, source: 'deferred', reason: selected.reason }
-          } else {
-            modelInfo = { selection: null, source: 'deferred', reason: agent ? 'busy' : 'needs_ui' }
-          }
-        }
+        const modelInfo = modelInfoAfterCreate(sessionId, plannedSelection, plannedEffortUnverified)
         return send(res, 200, {
           ok: true,
           session_id: sessionId,

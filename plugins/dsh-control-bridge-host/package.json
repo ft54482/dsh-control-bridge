@@ -10,6 +10,7 @@
     "server.js",
     "policy.js",
     "grants.js",
+    "autonomy.js",
     "requests.js",
     "journal.js",
     "paths.js",
