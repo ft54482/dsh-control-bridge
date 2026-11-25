@@ -10,6 +10,7 @@
 | --- | --- | --- |
 | 第一次安装，或者让 Agent 代为安装 | [权限与授权：安装前先读](permissions.md) | [安全说明](../SECURITY.md) · [Windows 真机验收](verified-scope.md) |
 | 在 Codex 操作同机 Harness Desktop | [Windows 安装、配对与连接检查](windows-delivery.md#codex-desktop-setup) | [独立 skill](../skills/deepseek-harness-bridge/SKILL.md) · [会话命令](../skills/deepseek-harness-bridge/references/desktop.md) |
+| 在 Antigravity 操作同机 Harness Desktop、SuperAgent 与控制面 CLI | [Antigravity 技能：安装与验证](../skills/antigravity/README.md) | [日常派工技能](../skills/antigravity/deepseek-harness-bridge/SKILL.md) · [控制面技能](../skills/antigravity/dsh-control-bridge/SKILL.md) |
 | 在 ZCode 操作同机 Harness Desktop，或派发 SuperAgent 工单 | [ZCode 技能：安装与完成情况](../skills/zcode/README.md) | [日常派工技能](../skills/zcode/deepseek-harness-bridge/SKILL.md) · [控制面技能](../skills/zcode/dsh-control-bridge/SKILL.md) |
 | 在 Desktop 查看主控任务和工单执行器 | [驾驶舱安装与数据说明](../plugins/dsh-superagent-cockpit/README.md) | [可安装插件下载](https://github.com/ft54482/dsh-control-bridge/releases/tag/cockpit-v0.1.3) |
 | 升级或回滚 Host | [安装与回滚步骤](windows-delivery.md#host-install) | [插件说明](../plugins/dsh-control-bridge-host/README.md) · [真机验收范围](verified-scope.md) |
@@ -24,6 +25,7 @@
 | 位置 | 运行在哪里 | 职责 |
 | --- | --- | --- |
 | [`skills/deepseek-harness-bridge/`](../skills/deepseek-harness-bridge/) | Codex 所在的本机 | 提供操作指引和两个 Python 客户端，分别访问 Desktop Host 与 SuperAgent 管理服务。 |
+| [`skills/antigravity/`](../skills/antigravity/) | Antigravity 所在的本机 | 给 Antigravity 用的两个技能。与 `main` 最新客户端同步，附带四个助手脚本与行为测试。 |
 | [`skills/zcode/`](../skills/zcode/) | ZCode 所在的本机 | 给 ZCode 用的两个技能。基于 Codex 技能 v0.2.3 的上游客户端，另带起草 SuperAgent 工单、等待工单结束、给 Desktop 会话发任务书等助手脚本。 |
 | [`plugins/dsh-control-bridge-host/`](../plugins/dsh-control-bridge-host/) | Harness Desktop 进程 | 在已授权范围内，将本机 HTTP 请求交给官方会话服务。 |
 | [`src/dsh_control_bridge/`](../src/dsh_control_bridge/) | 自己的协调程序所在机器 | 提供 `dsh-bridge` CLI、stdio MCP 和独立的签名事件接收器。 |
@@ -43,7 +45,7 @@
 
 ## 验收与版本记录
 
-[Windows 真机验收](verified-scope.md) 按版本记录了现场观察、隔离测试和尚待验证的能力。以下是开发当时的记录，可用于排查旧安装。工作区自主那一节把 implemented / mock / **isolated live** 三态分开写，live 只到「隔离 Host 通过」，不写生产通过；本轮曾有两个中文文档被外部脚本写成双重编码，已从 HEAD 恢复并重写，当前 7 份文档无 BOM、无 U+FFFD（过程记录在任务目录 `docs-log.md`）。
+[Windows 真机验收](verified-scope.md) 按版本记录了现场观察、隔离测试和尚待验证的能力。以下是开发当时的记录，可用于排查旧安装。工作区自主一节严格区分了 `implemented` / `mock` / `isolated live` 三态（其中 live 仅代表隔离 Host 通过，不代表生产环境）。
 
 | 记录 | 适用范围 |
 | --- | --- |

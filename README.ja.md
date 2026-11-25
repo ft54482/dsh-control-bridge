@@ -6,11 +6,11 @@
 
 Codex、Grok Bot、独自の調整プログラムから、指定した DeepSeek Harness ワークスペースへタスクを渡し、実行結果を追跡できます。**同じパソコンで Codex と Harness Desktop を使っている場合は、Codex skill と Desktop Host から始めてください。** ローカル Host に接続し、設定後は Codex から自然言語で操作できます。
 
-[Super Agent コックピット](plugins/dsh-superagent-cockpit/README.md) · [Codex skill v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [ZCode skill](skills/zcode/README.md) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [ドキュメント一覧](docs/README.md) · [ポート設定とトラブルシューティング](docs/ports.md) · [Windows 実機検証](docs/verified-scope.md)
+[Super Agent コックピット](plugins/dsh-superagent-cockpit/README.md) · [Codex skill v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [Antigravity skill](skills/antigravity/README.md) · [ZCode skill](skills/zcode/README.md) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [ドキュメント一覧](docs/README.md) · [ポート設定とトラブルシューティング](docs/ports.md) · [Windows 実機検証](docs/verified-scope.md)
 
 詳細な運用ガイドは現在、主に中国語で提供しています。コマンド、設定キー、技術フィールド名は原文のまま記載しています。
 
-**ZCode 用の skill は完成しました（2026-11-25）。** インストール手順と検証済みの範囲は下記の「ZCode のクイックスタート」を参照してください。
+**Antigravity と ZCode 用の skill は準備完了です。** インストール手順は下記の各クイックスタートを参照してください。
 
 > [!IMPORTANT]
 > **インストール前に読む：[権限と承認](docs/permissions.md)（中国語）。** インストール直後のこのブリッジには何もできません。ペアリング、セッション作成の許可、Host の名簿へのワークスペース追加は、どれも本人の同意が要ります。代わりにインストールする Agent が勝手に変更してはいけません。Host の設定を変更すると Harness Desktop が再起動します。自分で入れる場合も Agent に任せる場合も、先にこのページを読んでください。
@@ -20,6 +20,7 @@ Codex、Grok Bot、独自の調整プログラムから、指定した DeepSeek 
 | 環境と目的 | インストール・起動するもの | 最初の確認 |
 | --- | --- | --- |
 | Codex デスクトップで既存の会話を続ける、または新しいタスク用の主制御会話を作る | Codex に **skill**、Harness の desktop profile に **Host プラグイン**をインストール | skill で `health` と `granted` を実行。[インストールとペアリング](docs/windows-delivery.md#codex-desktop-setup) |
+| Antigravity でデスクトップ会話・ワークスペース自律・SuperAgent 受信箱/送信・調整 CLI を使う | 2 つの **Antigravity skill** を `~/.gemini/config/skills/` にコピー（`main` に追従） | `desktop.py health` と `tests/` を実行。[Antigravity のクイックスタート](skills/antigravity/README.md) |
 | ZCode でデスクトップの会話を続ける、主制御会話を開く、または SuperAgent にチケットを送る | 2 つの **ZCode skill** ディレクトリを `~/.zcode/skills/` にコピー。Host プラグインは Codex の経路と同じ | skill の `desktop.py health` で接続を確認し、同梱の 3 つの動作テストを実行。[ZCode のクイックスタート](skills/zcode/README.md) |
 | 独自の Bot やスクリプトで複数インスタンス、受信箱、タスク承認、監査を管理する | Python **調整ブリッジ**をインストールし、`dsh-bridge` CLI を使用。署名付き HTTP イベントを受信する場合に `serve` を起動 | fake で起草、送信、結果提出まで試す。[調整ブリッジガイド](docs/coordinator.md) |
 | 既存のツールクライアントから MCP で受信箱を読む、タスクを起草する | クライアントから同じ Python 調整ブリッジの `mcp` サブコマンドを起動。v0.2.2 は `Content-Length` フレームを使うため、対応クライアントが必要 | 対応クライアントで `tools/list` を呼び出す。改行区切り JSON のみに対応するクライアントでは CLI を利用可能。[MCP 設定とツール](docs/coordinator.md) |
@@ -35,6 +36,12 @@ Codex、Grok Bot、独自の調整プログラムから、指定した DeepSeek 
 2. **Host をインストールしてペアリング。** Python 3.11+ が必要です。Windows ガイドに従って実際に使用する desktop profile に Host をインストールし、対象ワークスペースの空いている会話を選び、長期認証情報ファイルのパスを skill に設定します。履歴の参照には `read`、タスクの送信には `write` を選びます。[インストールとペアリング](docs/windows-delivery.md#codex-desktop-setup) ペアリングは本人が与える許可です。[権限と承認](docs/permissions.md)（中国語）を参照してください。
 3. **接続を確認。** Codex に「`$deepseek-harness-bridge` でローカル接続を確認し、許可済み会話を一覧表示して」と入力します。主制御会話を新規作成する場合は、同じ profile に `master-control` プリセットが入り、Host の会話作成が有効で、`health` が `preset_create_verified=true` を返すことを確認してください。独自のポートも Codex に伝えます。[既定以外のポートの例](docs/ports.md#desktop-host)
 4. **タスクに合う会話を選ぶ。** 「前回のエクスポート修正の会話を探して、失敗ケースの対応を続けて」、または「同じワークスペースに新しい主制御会話を作り、この独立したタスクを処理して」と依頼できます。作成後、skill は実際の会話からプリセットを読み戻してタスクを送り、リクエスト ID で公式の終了状態を追跡します。[会話コマンドと検証フィールド](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
+
+## Antigravity のクイックスタート
+
+1. **送信用 skill をインストール。** `skills/antigravity/deepseek-harness-bridge/` を `~/.gemini/config/skills/`（または `.agent/skills/`）にコピーし、`connection.example.json` を `connection.json` に複製してローカルのパスとポートを記入します。
+2. **調整ブリッジ用 skill をインストール（任意）。** 本リポジトリを skill ディレクトリ外にクローンし、`skills/antigravity/dsh-control-bridge/` を `~/.gemini/config/skills/` にコピーして `local.json` を設定します。
+3. **確認。** 新しい Antigravity セッションで `desktop.py health` と `tests/` のテストを実行します（[詳細](skills/antigravity/README.md)）。
 
 ## ZCode のクイックスタート
 

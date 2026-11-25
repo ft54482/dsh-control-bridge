@@ -113,11 +113,9 @@ Removes the workspace grant and every Session grant under it in one atomic write
 
 ### Error codes and exit codes
 
-Host reasons this flow can return: `task_required`, `invalid_client_request_key`, `workspace_autonomy_not_effective`, `workspace_task_mismatch`, `workspace_grant_failed`, `grant_persist_failed`, `missing_workspace_id`, `workspace_revoke_failed`, `agent-preset/invalid`, `agent_preset_unverified`, `idempotency_key_reused`, `authorization_stale`, plus the pre-existing path/registry codes. The full table is in [host-api.md](../../../docs/host-api.md).
+Host reasons this flow can return: `task_required`, `invalid_client_request_key`, `workspace_autonomy_not_effective`, `workspace_task_mismatch`, `workspace_grant_failed`, `grant_persist_failed`, `missing_workspace_id`, `workspace_revoke_failed`, `agent-preset/invalid`, `agent_preset_unverified`, `idempotency_key_reused`, `authorization_stale`, plus the pre-existing path/registry codes. The full table is in [host-api.md](https://github.com/ft54482/dsh-control-bridge/blob/main/docs/host-api.md).
 
 `desktop.py` exit codes: `0` success, `1` an HTTP error / `ok:false` / an unverified receipt, `2` invalid local input or a transport error. Every response is one JSON object on stdout; a 2xx body that fails receipt verification is rewritten into the failure shape above.
-
-<!-- ZCode mirror: skills/zcode/** carries the ZCode copy of this skill (merged from PR14) but was not updated by this change; it still lacks these task-scoped semantics. Mirror them in a separate change; do not edit the mirror from this lane. -->
 
 On 0.1.6 `resume` may block until the bridge's wait expires. Keep the command running in the background while checking the same request. For 0.2.0 SSE the helper emits one JSON object per frame with `event`, `id`, and `data`. Keep the last nonempty `id` to reconnect. After a stream ends, read `request` for the official outcome and full result. `stop-wait` affects bridge observation only. `cancel` is for the exact owned active request and final cancellation still requires an official terminal record.
 

@@ -6,11 +6,11 @@
 
 Mit Codex, Grok Bot oder einem eigenen Koordinator Aufgaben an einen bestimmten DeepSeek-Harness-Arbeitsbereich übergeben und die Ergebnisse verfolgen. **Sie verwenden Codex und Harness Desktop bereits auf demselben Rechner? Beginnen Sie mit dem Codex-Skill und Desktop Host.** Diese Verbindung nutzt den lokalen Host. Nach der Einrichtung können Sie Harness aus Codex in natürlicher Sprache bedienen.
 
-[Super Agent Cockpit](plugins/dsh-superagent-cockpit/README.md) · [Codex-Skill v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [ZCode-Skills](skills/zcode/README.md) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [Dokumentation](docs/README.md) · [Ports und Fehlerbehebung](docs/ports.md) · [Prüfung unter Windows](docs/verified-scope.md)
+[Super Agent Cockpit](plugins/dsh-superagent-cockpit/README.md) · [Codex-Skill v0.2.3](https://github.com/ft54482/dsh-control-bridge/releases/tag/skill-v0.2.3) · [Antigravity-Skills](skills/antigravity/README.md) · [ZCode-Skills](skills/zcode/README.md) · [Desktop Host v0.2.2](https://github.com/ft54482/dsh-control-bridge/releases/tag/v0.2.2) · [Dokumentation](docs/README.md) · [Ports und Fehlerbehebung](docs/ports.md) · [Prüfung unter Windows](docs/verified-scope.md)
 
 Die ausführlichen Handbücher sind derzeit überwiegend auf Chinesisch verfasst. Technische Feldnamen und Befehle bleiben in ihrer ursprünglichen Form erhalten.
 
-**Die ZCode-Skills sind fertig (2026-11-25).** Installation und geprüfter Umfang stehen im Schnellstart mit ZCode weiter unten.
+**Die Antigravity- und ZCode-Skills sind bereit.** Die Einrichtung steht in den Schnellstart-Abschnitten unten.
 
 > [!IMPORTANT]
 > **Vor der Installation lesen: [Berechtigungen und Freigaben](docs/permissions.md) (auf Chinesisch).** Frisch installiert, kann diese Bridge nichts tun. Kopplung, das Freischalten der Sitzungserstellung und das Aufnehmen Ihres Arbeitsbereichs in die Liste des Hosts erfordern jeweils Ihre Zustimmung. Ein Agent, der auf Ihren Wunsch installiert, darf diese Änderungen nicht eigenmächtig vornehmen, und eine Änderung der Host-Konfiguration startet Harness Desktop neu. Lesen Sie diese Seite, egal ob Sie selbst installieren oder ein Agent beauftragt wird.
@@ -20,6 +20,7 @@ Die ausführlichen Handbücher sind derzeit überwiegend auf Chinesisch verfasst
 | Umgebung und Ziel | Installation oder Aufruf | Erste Prüfung |
 | --- | --- | --- |
 | Codex Desktop soll bestehende Sitzungen fortsetzen oder für neue Aufgaben eine Hauptsteuerungssitzung öffnen | Den **Skill** in Codex und das **Host-Plugin** im Desktop-Profil von Harness installieren | Mit dem Skill `health` und `granted` ausführen. [Installation und Kopplung](docs/windows-delivery.md#codex-desktop-setup) |
+| Mit Antigravity Desktop-Sitzungen, Workspace-Autonomie, SuperAgent-Posteingang/-Versand oder die Koordinator-CLI nutzen | Beide **Antigravity-Skill**-Verzeichnisse nach `~/.gemini/config/skills/` kopieren (auf `main`-Stand) | `desktop.py health` und die `tests/`-Suite ausführen. [Schnellstart mit Antigravity](skills/antigravity/README.md) |
 | Mit ZCode eine Desktop-Sitzung fortsetzen, eine Hauptsteuerungssitzung öffnen oder SuperAgent-Tickets versenden | Die beiden **ZCode-Skill**-Verzeichnisse nach `~/.zcode/skills/` kopieren; das Host-Plugin bleibt wie auf dem Codex-Weg | Mit dem Skill `desktop.py health` ausführen, danach seine drei Verhaltenstests. [Schnellstart mit ZCode](skills/zcode/README.md) |
 | Ein eigener Bot oder ein Skript braucht mehrere Instanzen, einen Posteingang, Aufgabenfreigaben und Auditdaten | Den **Python-Koordinator** installieren und über die CLI `dsh-bridge` bedienen. Für signierte HTTP-Ereignisse zusätzlich `serve` starten | Mit fake einen Ablauf aus Entwurf, Versand und Ergebnisabgabe durchlaufen. [Koordinator-Handbuch](docs/coordinator.md) |
 | Ein vorhandener Werkzeug-Client soll über MCP den Posteingang lesen oder Aufgaben entwerfen | Der Client startet den Unterbefehl `mcp` desselben Python-Koordinators. v0.2.2 verwendet `Content-Length`-Nachrichtenrahmen, die der Client unterstützen muss | Mit einem kompatiblen Client `tools/list` aufrufen. Clients, die nur zeilenweises JSON unterstützen, können zunächst die CLI verwenden. [MCP-Konfiguration und Werkzeuge](docs/coordinator.md) |
@@ -35,6 +36,12 @@ Die Zuordnung der Verzeichnisse erläutert [Komponenten und Ausführungsorte](do
 2. **Host installieren und koppeln.** Python 3.11+ verwenden. Gemäß Windows-Handbuch den Host im tatsächlich verwendeten Desktop-Profil installieren, eine freie Sitzung im Zielarbeitsbereich auswählen und den Pfad zur Datei mit den dauerhaften Zugangsdaten im Skill hinterlegen. Für das Lesen des Verlaufs `read`, für Aufgabenversand `write` wählen. [Installation und Kopplung](docs/windows-delivery.md#codex-desktop-setup) Die Kopplung ist eine Freigabe, die Sie selbst erteilen; siehe [Berechtigungen und Freigaben](docs/permissions.md) (auf Chinesisch).
 3. **Verbindung prüfen.** Codex anweisen: „Prüfe mit `$deepseek-harness-bridge` die lokale Verbindung und liste autorisierte Sitzungen auf.“ Für eine neue Hauptsteuerungssitzung muss im selben Profil die Voreinstellung `master-control` installiert und im Host die Sitzungserstellung aktiviert sein. `health` muss `preset_create_verified=true` zurückgeben. Einen abweichenden Port ebenfalls Codex mitteilen. [Beispiel mit eigenem Port](docs/ports.md#desktop-host)
 4. **Sitzung zur Aufgabe auswählen.** Zum Beispiel „Finde die Sitzung zur Exportkorrektur und bearbeite die fehlgeschlagenen Fälle weiter“ oder „Öffne im selben Arbeitsbereich eine neue Hauptsteuerungssitzung für diese unabhängige Aufgabe“. Nach der Erstellung liest der Skill die Voreinstellung aus der tatsächlichen Sitzung zurück, übergibt die Aufgabe und verfolgt den offiziellen Endzustand anhand der Anfrage-ID. [Sitzungsbefehle und Prüffelder](skills/deepseek-harness-bridge/references/desktop.md#new-work-in-master-control-mode)
+
+## Schnellstart mit Antigravity
+
+1. **Versand-Skill installieren.** `skills/antigravity/deepseek-harness-bridge/` nach `~/.gemini/config/skills/` (oder `.agent/skills/`) kopieren und `connection.json` aus `connection.example.json` ausfüllen.
+2. **Koordinator-Skill installieren (optional).** Dieses Repository außerhalb aller Skill-Verzeichnisse klonen, `skills/antigravity/dsh-control-bridge/` nach `~/.gemini/config/skills/` kopieren und `local.json` einrichten.
+3. **Prüfen.** Eine neue Antigravity-Sitzung starten und `desktop.py health` sowie die Tests in `tests/` ausführen ([Details](skills/antigravity/README.md)).
 
 ## Schnellstart mit ZCode
 
